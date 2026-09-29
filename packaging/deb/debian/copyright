@@ -1,0 +1,13 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: praxis-prime
+Upstream-Contact: https://github.com/smfworks/praxis-prime
+Source: https://github.com/smfworks/praxis-prime
+
+Files: *
+Copyright: 2026 SMF Works
+License: MIT
+ The MIT license is in the repository LICENSE file and, on Debian systems,
+ in /usr/share/common-licenses/MIT.
+ .
+ Upstream attribution for projects SMF Works does not own is in NOTICE and
+ THIRD_PARTY.md. No upstream source is vendored in the pre-alpha skeleton.

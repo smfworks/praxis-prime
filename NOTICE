@@ -1,0 +1,35 @@
+Praxis Prime
+Copyright (c) 2026 SMF Works
+
+This project is licensed under the MIT License. See LICENSE.
+
+Praxis Prime is the flagship evolution of SMF Praxis (smfworks/smf-praxis),
+by SMF Works. The design reuses ideas, and later may reuse MIT-licensed code,
+from projects SMF Works does not own. Those projects remain the work of their
+authors. Nothing in this repository implies that they endorse Praxis Prime.
+
+SMF Works does not own:
+
+- Hermes Agent. Copyright Nous Research and contributors.
+  https://github.com/NousResearch/hermes-agent
+- OpenClaw. Copyright the OpenClaw Foundation, Peter Steinberger, and
+  contributors. https://github.com/openclaw/openclaw
+- Omarchy. Copyright David Heinemeier Hansson / Basecamp.
+  https://github.com/basecamp/omarchy
+
+SMF Works authored SMF Praxis and SMF Swarm 2.0, both MIT. Praxis Prime is a
+new codebase. This skeleton does not vendor their source trees.
+
+Third-party material that is copied in later must keep its original copyright
+header, license, and NOTICE. The inventory, including Apache-2.0 files whose
+notices have to travel with the code, is in THIRD_PARTY.md (also referred to
+from the architecture blueprint as THIRD_PARTY_NOTICES.md).
+
+The regulated vertical packs that used to ship inside SMF Praxis are not in
+this tree. See packs/regulated/README.md and THIRD_PARTY.md before importing
+them. Versions of that code released under MIT before Praxis 0.29.0 stay MIT
+for the people who received them.
+
+This software is not a certification of HIPAA, FERPA, GDPR, or any other
+regime. The compliance dials are off by default and, in this pre-alpha
+skeleton, do not enforce anything.

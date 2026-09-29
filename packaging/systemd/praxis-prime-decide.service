@@ -1,0 +1,10 @@
+# Nightly Decision Engine recalibration. Not implemented.
+# New judge heads are promoted only after a frozen eval passes (ARCHITECTURE §7.6).
+# TODO: ARCHITECTURE §26.
+
+[Unit]
+Description=Praxis Prime Decision Engine recalibration placeholder
+
+[Service]
+Type=oneshot
+ExecStart=/bin/echo praxis-prime decide recalibration is not implemented

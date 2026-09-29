@@ -1,0 +1,60 @@
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[project]
+name = "praxis-prime"
+dynamic = ["version"]
+description = "Local-first autonomous AI agent for Linux. Pre-alpha skeleton."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE", "NOTICE", "THIRD_PARTY.md"]
+requires-python = ">=3.12"
+authors = [{ name = "SMF Works" }]
+keywords = ["agent", "linux", "local-first", "omarchy", "ubuntu"]
+classifiers = [
+  "Development Status :: 2 - Pre-Alpha",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8.3", "ruff>=0.8"]
+
+[project.urls]
+Homepage = "https://github.com/smfworks/praxis-prime"
+Documentation = "https://github.com/smfworks/praxis-prime/blob/main/docs/ARCHITECTURE.md"
+Source = "https://github.com/smfworks/praxis-prime"
+Issues = "https://github.com/smfworks/praxis-prime/issues"
+
+[project.scripts]
+praxis-prime = "praxis_prime.cli:main"
+pprime = "praxis_prime.cli:main"
+praxis-primed = "praxis_prime.daemon:main"
+
+[tool.hatch.version]
+path = "packages/prime-core/praxis_prime/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["packages/prime-core/praxis_prime"]
+
+[tool.uv]
+package = true
+
+[tool.pytest.ini_options]
+pythonpath = ["packages/prime-core"]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["packages/prime-core", "tests", "packs"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

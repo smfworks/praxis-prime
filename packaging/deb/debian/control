@@ -1,0 +1,18 @@
+Source: praxis-prime
+Section: python
+Priority: optional
+Maintainer: SMF Works <maintainers@praxis-prime.invalid>
+Build-Depends: debhelper-compat (= 13), python3 (>= 3.12)
+Standards-Version: 4.7.0
+Homepage: https://github.com/smfworks/praxis-prime
+Rules-Requires-Root: no
+
+Package: praxis-prime
+Architecture: all
+Depends: ${python3:Depends}, python3 (>= 3.12)
+Description: local-first autonomous AI agent (pre-alpha skeleton)
+ Praxis Prime is a local-first autonomous AI agent for Ubuntu and Omarchy.
+ This binary package is a packaging placeholder. It is not published.
+ .
+ The working install path today is a Python virtualenv. See the repository
+ README.

@@ -1,2 +1,210 @@
-# praxis-prime
-Praxis Prime: an open-source, local-first autonomous AI agent for Linux (Ubuntu + Omarchy) with built-in compliance dials, agent swarms, and a local decision engine. MIT.
+# Praxis Prime
+
+[![Status: pre-alpha](https://img.shields.io/badge/status-pre--alpha-orange)](https://github.com/smfworks/praxis-prime)
+[![CI](https://github.com/smfworks/praxis-prime/actions/workflows/ci.yml/badge.svg)](https://github.com/smfworks/praxis-prime/actions/workflows/ci.yml)
+[![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-3776AB)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
+**Status: pre-alpha.** This repository is the public skeleton of Praxis Prime. The agent loop, gateway, swarm, Decision Engine, voice layer, and desktop UI are named and stubbed. They do not run yet. What works today is the CLI: version, `doctor`, and a default config whose compliance dials are all off.
+
+Praxis Prime is an open-source, local-first autonomous AI agent for Linux, by [SMF Works](https://github.com/smfworks) (Michael Gannotti). It is the flagship evolution of [SMF Praxis](https://github.com/smfworks/smf-praxis): a governed agent that can read, research, and draft on its own, and that stops for a human when an action has consequences. Sending, deleting, spending, sharing, and publishing stay behind that approval spine. Regulatory overlays are optional dials, and they ship **off**.
+
+It is aimed at Ubuntu 22.04 and 24.04, and at [Omarchy](https://github.com/basecamp/omarchy) (Arch plus Hyprland). Local models through Ollama are the default path. Cloud models are opt-in. There is no hosted decision service.
+
+The design takes patterns, and later may take MIT-licensed code, from [Hermes Agent](https://github.com/NousResearch/hermes-agent) (Nous Research), [OpenClaw](https://github.com/openclaw/openclaw) (OpenClaw Foundation, Peter Steinberger, and contributors), SMF Praxis, and [SMF Swarm 2.0](https://github.com/smfworks/smf-swarm-2.0). SMF Works does not own Hermes, OpenClaw, or Omarchy. See [NOTICE](NOTICE) and [THIRD_PARTY.md](THIRD_PARTY.md).
+
+## What works today
+
+From a checkout, with Python 3.12:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e ".[dev]"
+
+praxis-prime --version
+pprime --version
+praxis-primed --version
+
+praxis-prime doctor
+praxis-prime config
+```
+
+`doctor` checks four things and exits 0 unless Python is older than 3.12:
+
+- Python version
+- OS family: Ubuntu, Arch, or Omarchy (anything else is a warning)
+- Display session: Wayland or X11 (a headless machine is a warning)
+- Ollama on `http://127.0.0.1:11434` (unreachable is a warning, not a failure)
+
+`config` writes the XDG default config. It does not overwrite an existing file unless you pass `--force`.
+
+```text
+$XDG_CONFIG_HOME/praxis-prime/config.toml
+$XDG_CONFIG_HOME/praxis-prime/policy/profile.toml
+```
+
+With `XDG_CONFIG_HOME` unset, those paths are under `~/.config/praxis-prime/`. Every compliance dial in that file is `off`, and `policy/profile.toml` lists no active dials. The baseline approval spine is not a dial. Jarvis is disabled. The sandbox network default is `off`. The gateway address in the file is loopback `127.0.0.1:18790`, and the daemon does not bind it.
+
+`praxis-primed` is a stub. It prints a message and exits. It does not listen.
+
+## Feature overview
+
+| Area | Plan | In this skeleton |
+|---|---|---|
+| Governed agent loop | Perceive, plan, govern, act, reflect. Hermes prompt-cache invariants. OpenClaw queue modes. | Package stub. [§5](docs/ARCHITECTURE.md) |
+| Local Decision Engine | Our own cascade: rules, ONNX classifiers, calibrated small-LLM judges, then a jury. Wire shape similar to a public decision API. No hosted TypeSafe service. | Package stub. [§7](docs/ARCHITECTURE.md) |
+| Compliance dials | HIPAA, FERPA, COPPA, GDPR, 13 Praxis state packs, a new North Carolina pack, then SOC 2, EU AI Act, CCPA, PCI, NIST AI RMF, and ISO 42001. Off, monitor, or enforce. **Default off.** | Catalog and config defaults. No enforcement. [§17](docs/ARCHITECTURE.md) |
+| Agent swarms | Workers, a blackboard, and the Swarm 2.0 personas as jury lenses. | Package stub. [§15](docs/ARCHITECTURE.md) |
+| Coding-agent mode | Worktrees, diffs, tests, and `AGENTS.md` / `CLAUDE.md` / `.cursor` rules. | Package stub. [§14](docs/ARCHITECTURE.md) |
+| Gateway | One typed WebSocket protocol for CLI, TUI, web, desktop, channels, and nodes. Loopback only. | Package stub. Port reserved, not opened. [§4](docs/ARCHITECTURE.md) |
+| Jarvis voice layer | Optional wake word, local STT/TTS, Home Assistant, desktop control. Separate user service, off by default. | Package stub. [§19](docs/ARCHITECTURE.md) |
+| Desktop and web UI | One React SPA inside a Tauri 2 shell, also served by the daemon. | Source stubs, not bundled. [§21](docs/ARCHITECTURE.md) |
+| Packaging | `.deb`, APT repo, AppImage, AUR, systemd user units, Omarchy bar plugin. | Placeholders only. Nothing is published. [§26](docs/ARCHITECTURE.md), [§27](docs/ARCHITECTURE.md) |
+
+The full comparison with Hermes, OpenClaw, Praxis, Swarm 2.0, and the Jev reference column is in [docs/CAPABILITY-MATRIX.md](docs/CAPABILITY-MATRIX.md).
+
+## Architecture
+
+```mermaid
+flowchart TB
+  subgraph faces [Faces]
+    CLI["praxis-prime CLI"]
+    TUI["TUI"]
+    WEB["Web UI"]
+    DESK["Desktop Tauri 2"]
+    BAR["Omarchy bar"]
+    CH["Channels"]
+  end
+
+  GW["Gateway loopback :18790"]
+
+  subgraph kernel [Kernel praxis-primed]
+    LOOP["Agent loop"]
+    DE["Decision Engine local only"]
+    POL["Policy spine plus dials default off"]
+    MEM["Memory"]
+    SWARM["Swarm"]
+    AUD["Hash-chained audit"]
+  end
+
+  subgraph edges [Edges]
+    TOOLS["Tools MCP skills"]
+    SBX["Sandboxes"]
+    CODE["Coding mode"]
+    VOICE["Jarvis voice optional"]
+  end
+
+  LOCAL["Local models Ollama llama.cpp vLLM"]
+  CLOUD["Cloud models opt-in"]
+
+  faces --> GW --> LOOP
+  LOOP --> DE
+  LOOP --> POL
+  LOOP --> MEM
+  LOOP --> SWARM
+  LOOP --> TOOLS
+  TOOLS --> SBX
+  TOOLS --> CODE
+  VOICE --> GW
+  DE --> LOCAL
+  LOOP --> LOCAL
+  LOOP --> CLOUD
+  POL --> AUD
+```
+
+The blueprint's full diagram, process topology, and the reasoning behind each box are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). A single-page render is at [docs/architecture.html](docs/architecture.html).
+
+Names used throughout: distribution `praxis-prime`, import package `praxis_prime`, CLI `praxis-prime` with alias `pprime`, daemon `praxis-primed`. The bare command `prime` is intentionally unused. It collides with other tools.
+
+## Roadmap
+
+Condensed from [ARCHITECTURE §29](docs/ARCHITECTURE.md). Dates are not scheduled. The phases are scope gates.
+
+| Phase | Product | Decision Engine | Dials |
+|---|---|---|---|
+| **MVP (v0.1–v0.2)** | Daemon, gateway, CLI, TUI, web UI, local plus a couple of cloud providers, core tools, bubblewrap, MCP client, skills, memory, approval cards, audit chain, routines, coding mode, migrate-from-Praxis, `.deb` and AUR placeholders become real, Omarchy theme and keybind. | Rules, one local classifier tier, one local judge, `/v1/decide`. Escalate only. | Dial framework. NC data-privacy baseline. 13 state packs and regulated packs imported, monitor mode. |
+| **v0.5** | Tauri desktop, Omarchy bar plugin, more channels, swarm runtime, auto mode, hooks, Podman, plugin SDK, Jarvis alpha, APT repo and AppImage. | Jury of judges, calibration, disagreement escalation. | Enforce HIPAA, FERPA/COPPA, GDPR, the 13 state packs, and NC. |
+| **v1.0** | Host computer use, virtual desktop, microVM and remote sandboxes, background coding, MCP server, ACP, out-of-process plugins, signed releases, docs site. | Drift detection, per-pack calibrators, a published reliability report. | SOC 2, EU AI Act, CCPA, PCI, NIST AI RMF, ISO 42001, with evidence export. |
+
+Dials produce technical controls and evidence. They are not legal certifications. Counsel review is required before any enforce mode is recommended to anyone else. See the risks in [ARCHITECTURE §30](docs/ARCHITECTURE.md).
+
+## Install
+
+**Nothing below is published.** There is no APT repository, no AUR package, and no install script host yet. The commands are the intended shape from the blueprint so packaging work has a target. Do not run them.
+
+### Ubuntu 22.04 / 24.04 (placeholder)
+
+```bash
+# Placeholder URL. get.smfworks.com is not a Praxis Prime installer.
+# curl -fsSL https://get.smfworks.com/praxis-prime/install.sh | bash
+
+# Placeholder APT repo. apt.smfworks.com does not serve this package.
+# sudo apt update && sudo apt install praxis-prime praxis-prime-desktop
+# systemctl --user enable --now praxis-prime.service
+```
+
+Planned packages: `praxis-prime` (CLI and daemon), `praxis-prime-desktop` (Tauri), `praxis-prime-voice` (optional), `praxis-prime-packs` (regulated packs, not imported yet). Files live under [packaging/deb](packaging/deb) and [packaging/systemd](packaging/systemd).
+
+### Omarchy / Arch (placeholder)
+
+```bash
+# Not in the AUR. Do not yay -S this yet.
+# yay -S praxis-prime-bin
+# praxis-prime omarchy install
+```
+
+The future Omarchy installer would add a Quickshell bar plugin, a theme template, a Hyprland keybind, and an optional default-agent registration, asking before each step. The theme template stub is [apps/omarchy/praxis-prime.json.tpl](apps/omarchy/praxis-prime.json.tpl). PKGBUILD notes are in [packaging/aur](packaging/aur).
+
+### From this git checkout (works today)
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e ".[dev]"
+# or, if you use uv:
+# uv venv && uv pip install -e ".[dev]"
+```
+
+Development checks:
+
+```bash
+ruff check .
+pytest
+praxis-prime doctor
+```
+
+## Documentation
+
+| Document | What it is |
+|---|---|
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Source of truth for layout, names, and stack |
+| [docs/CAPABILITY-MATRIX.md](docs/CAPABILITY-MATRIX.md) | Feature-by-feature plan against the source systems |
+| [docs/SOURCE-NOTES.md](docs/SOURCE-NOTES.md) | Licenses, file paths, reuse plan, unverified items |
+| [docs/architecture.html](docs/architecture.html) | Rendered blueprint (architecture, matrix, and notes) |
+| [AGENTS.md](AGENTS.md) | Notes for coding agents working in this repo |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | How to build, test, and send a change |
+| [SECURITY.md](SECURITY.md) | How to report a vulnerability |
+| [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) | Community standards |
+| [NOTICE](NOTICE), [THIRD_PARTY.md](THIRD_PARTY.md) | Attribution |
+
+## Layout
+
+```text
+praxis-prime/
+├─ packages/prime-core/praxis_prime/   # import package and CLI
+├─ packages/prime-{cli,voice,desktopctl,sdk}/
+├─ packs/{general,jurisdictions,regulated}/
+├─ plugins/  ui/  apps/{desktop,omarchy}/
+├─ protocol/  skills/  models/decide/  evals/
+├─ packaging/{deb,aur,systemd,appimage,flatpak,apt-repo}/
+└─ docs/
+```
+
+The kernel subpackages (`loop`, `gateway`, `decide`, `swarm`, and the rest) match [ARCHITECTURE §24](docs/ARCHITECTURE.md). Each one points at the blueprint section that will fill it in. Upstream trees are not vendored.
+
+## License
+
+MIT. Copyright (c) 2026 SMF Works. See [LICENSE](LICENSE).
+
+Hermes Agent, OpenClaw, and Omarchy belong to their authors. SMF Works wrote SMF Praxis and SMF Swarm 2.0. The regulated Praxis packs are not in this repository. `packs/regulated/README.md` explains how they will be imported later, after their licenses are confirmed.

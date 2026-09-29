@@ -1,0 +1,30 @@
+name: Feature request
+description: Propose work that matches the Praxis Prime blueprint
+title: "[feature] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please point at a section of `docs/ARCHITECTURE.md` when the idea is
+        already in the blueprint. Compliance features should default to off.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What is hard or missing today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+    validations:
+      required: true
+  - type: input
+    id: blueprint
+    attributes:
+      label: Blueprint section
+      description: For example, ARCHITECTURE §17 or §7.
+      placeholder: "§"
+    validations:
+      required: false

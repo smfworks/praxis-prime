@@ -1,0 +1,12 @@
+# Run only when the machine is idle and on AC power, once that logic exists.
+# TODO: ARCHITECTURE §26.
+
+[Unit]
+Description=Nightly Praxis Prime Decision Engine recalibration
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,9 @@
+# Backup retention sweep. The in-daemon scheduler does not exist yet.
+# TODO: ARCHITECTURE §26.
+
+[Unit]
+Description=Praxis Prime retention sweep placeholder
+
+[Service]
+Type=oneshot
+ExecStart=/bin/echo praxis-prime sweeper is not implemented

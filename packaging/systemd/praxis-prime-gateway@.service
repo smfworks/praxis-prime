@@ -1,0 +1,15 @@
+# Optional out-of-process channel adapter. Instance name is the channel.
+# Example: praxis-prime-gateway@telegram.service
+# TODO: ARCHITECTURE §12 and §26. Not implemented.
+
+[Unit]
+Description=Praxis Prime channel gateway (%i)
+After=praxis-prime.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/echo praxis-prime gateway %i is not implemented
+RemainAfterExit=no
+
+[Install]
+WantedBy=default.target
