@@ -1,0 +1,4 @@
+#!/usr/bin/make -f
+# Placeholder. CI does not run dpkg-buildpackage.
+%:
+	dh $@

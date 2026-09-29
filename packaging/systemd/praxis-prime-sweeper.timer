@@ -1,0 +1,12 @@
+# Daily retention sweep. Not installed. Linger stays off.
+# TODO: ARCHITECTURE §26.
+
+[Unit]
+Description=Daily Praxis Prime retention sweep
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+
+[Install]
+WantedBy=timers.target

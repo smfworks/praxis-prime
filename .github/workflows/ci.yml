@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint-and-test:
+    name: ruff and pytest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install package and dev tools
+        run: python -m pip install -e ".[dev]"
+
+      - name: Ruff
+        run: ruff check .
+
+      - name: Pytest
+        run: pytest
+
+      - name: CLI smoke
+        run: |
+          praxis-prime --version
+          pprime --version
+          praxis-primed --version
+          praxis-prime doctor
+          praxis-prime config --config-dir "${{ runner.temp }}/praxis-prime-config"
+          python - <<'PY'
+          import tomllib
+          from pathlib import Path
+          import os
+          root = Path(os.environ["RUNNER_TEMP"]) / "praxis-prime-config"
+          config = tomllib.loads((root / "config.toml").read_text())
+          assert set(config["dials"].values()) == {"off"}
+          profile = tomllib.loads((root / "policy" / "profile.toml").read_text())
+          assert profile["profile"]["dials"] == []
+          print(f"dials {len(config['dials'])} all off")
+          PY

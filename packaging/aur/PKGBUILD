@@ -1,0 +1,35 @@
+# Maintainer: SMF Works <maintainers@praxis-prime.invalid>
+# Placeholder for the AUR package praxis-prime-git.
+# Not published. build() refuses to run so makepkg cannot emit an empty package.
+# praxis-prime-bin waits on a real release artifact.
+# TODO: ARCHITECTURE §27.2.
+
+pkgname=praxis-prime-git
+pkgver=0.0.1
+pkgrel=1
+pkgdesc="Local-first autonomous AI agent for Linux (pre-alpha skeleton, not published)"
+arch=('any')
+url="https://github.com/smfworks/praxis-prime"
+license=('MIT')
+depends=('python>=3.12')
+makedepends=('git')
+provides=('praxis-prime')
+conflicts=('praxis-prime-bin')
+source=("git+https://github.com/smfworks/praxis-prime.git")
+sha256sums=('SKIP')
+
+pkgver() {
+  cd praxis-prime
+  printf "0.0.1.r%s.%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+}
+
+build() {
+  echo "praxis-prime AUR packaging is a pre-alpha placeholder and is not published." >&2
+  echo "See packaging/aur/README.md." >&2
+  return 1
+}
+
+package() {
+  echo "Nothing to package." >&2
+  return 1
+}

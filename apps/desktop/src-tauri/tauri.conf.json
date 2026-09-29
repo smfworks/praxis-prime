@@ -1,0 +1,6 @@
+{
+  "productName": "Praxis Prime",
+  "version": "0.0.1",
+  "identifier": "works.smf.praxisprime",
+  "comment": "Placeholder. Not a buildable Tauri 2 config. See apps/desktop/README.md. TODO: ARCHITECTURE §21 and §23."
+}

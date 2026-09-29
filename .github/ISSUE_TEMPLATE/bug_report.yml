@@ -1,0 +1,37 @@
+name: Bug report
+description: Something in Praxis Prime does not behave as it should
+title: "[bug] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This project is **pre-alpha**. Please do not include secrets, access
+        tokens, or private data.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What did you expect, and what happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `praxis-prime --version`
+      placeholder: praxis-prime 0.0.1
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, session, and the output of `praxis-prime doctor` if you can share it.
+    validations:
+      required: false

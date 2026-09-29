@@ -1,0 +1,10 @@
+[package]
+name = "praxis-prime-desktop"
+version = "0.0.1"
+edition = "2021"
+publish = false
+description = "Placeholder binary. The Tauri 2 shell is not vendored yet."
+
+[[bin]]
+name = "praxis-prime-desktop"
+path = "src/main.rs"

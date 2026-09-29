@@ -1,0 +1,10 @@
+{
+  "name": "@praxis-prime/ui",
+  "private": true,
+  "version": "0.0.1",
+  "description": "React SPA stub for the Praxis Prime web and desktop UI. Not bundled.",
+  "type": "module",
+  "scripts": {
+    "dev": "echo \"UI bundling is not set up yet. See ui/README.md\" && exit 1"
+  }
+}

@@ -1,0 +1,20 @@
+# Placeholder user unit. Not installed by this skeleton.
+# TODO: ARCHITECTURE §26.
+# ~/.config/systemd/user/praxis-prime.service
+
+[Unit]
+Description=Praxis Prime agent daemon
+After=network-online.target graphical-session.target
+
+[Service]
+ExecStart=/usr/bin/praxis-primed --config %h/.config/praxis-prime/config.toml
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ReadWritePaths=%h/.local/share/praxis-prime %h/.local/state/praxis-prime %h/.cache/praxis-prime %t/praxis-prime
+Environment=PRAXIS_PRIME_LOG=info
+
+[Install]
+WantedBy=default.target
