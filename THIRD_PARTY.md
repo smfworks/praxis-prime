@@ -50,8 +50,11 @@ Prime does not use that service. See the Decision Engine note below.
 ## What this skeleton actually contains
 
 No file under this repository is a copy from Hermes, OpenClaw, Omarchy,
-TypeSafe, SMF Praxis, or SMF Swarm 2.0. Packages are placeholders with TODO
-pointers into `docs/ARCHITECTURE.md`. When a file is later copied:
+TypeSafe, SMF Praxis, or SMF Swarm 2.0. The agent loop, router, tool
+registry, and audit chain are original code that follows patterns described
+in `docs/ARCHITECTURE.md` (Hermes prompt-cache invariants, OpenClaw
+steer/cancel, Praxis approval classes, Swarm's hash-chained audit idea).
+They are not vendored modules. When a file is later copied:
 
 1. Record the source repo, path, commit, and license in the table below.
 2. Keep the original copyright header.

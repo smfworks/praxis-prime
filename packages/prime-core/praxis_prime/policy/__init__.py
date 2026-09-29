@@ -1,9 +1,10 @@
-"""Policy engine placeholder.
+"""Policy engine.
 
 The baseline spine and the compliance dials are separate. Dials default to
-off. Nothing here accepts or denies a tool call yet.
+off, and their hooks do nothing in that position. The spine cannot be
+disabled.
 
-TODO: ARCHITECTURE §16 and §17.
+ARCHITECTURE §16 and §17.
 """
 
 from praxis_prime.policy.dials import (
@@ -13,11 +14,25 @@ from praxis_prime.policy.dials import (
     default_positions,
     dial_ids,
 )
+from praxis_prime.policy.engine import (
+    HookPoint,
+    NoOpDialHook,
+    PolicyContext,
+    PolicyEngine,
+    Verdict,
+    tighten,
+)
 
 __all__ = [
     "BASELINE_SPINE_ALWAYS_ON",
     "DIAL_POSITIONS",
     "DIALS",
+    "HookPoint",
+    "NoOpDialHook",
+    "PolicyContext",
+    "PolicyEngine",
+    "Verdict",
     "default_positions",
     "dial_ids",
+    "tighten",
 ]

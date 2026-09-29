@@ -1,6 +1,11 @@
-"""Hash-chained audit log stub.
+"""Audit log.
 
-Nothing is written. The planned log is append-only SHA-256, following the Swarm 2.0 design.
+Tool calls and approvals are appended to a SHA-256 hash chain in the
+session database. Daily signatures and export formats are later work.
 
-TODO: ARCHITECTURE §18.
+ARCHITECTURE §18.
 """
+
+from praxis_prime.audit.log import AuditLog
+
+__all__ = ["AuditLog"]

@@ -8,4 +8,4 @@ The Hatchling build maps `packages/prime-core/` onto the wheel root, so imports 
 - `pprime` (alias)
 - `praxis-primed` (daemon stub)
 
-TODO: ARCHITECTURE §23 and §24. Runtime dependencies (FastAPI, Pydantic, and the rest) are intentionally absent until the kernel needs them.
+The running kernel lives here: `loop/`, `router/`, `policy/`, `approvals/`, `tools/`, `sandbox/`, `memory/`, and `audit/`. FastAPI and Pydantic stay out until the gateway needs them (ARCHITECTURE §23 and §24).

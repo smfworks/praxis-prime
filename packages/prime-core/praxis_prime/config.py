@@ -26,8 +26,8 @@ _CONFIG_HEADER = """\
 # read or stored.
 #
 # Compliance dials default to off (ARCHITECTURE §17). A dial position is one
-# of: off, monitor, enforce. Changing a value does not enforce anything yet.
-# The policy engine is a stub. The baseline safety spine is not a dial.
+# of: off, monitor, enforce. Dial hooks do nothing while a dial is off.
+# The baseline safety spine is not a dial and cannot be turned off.
 """
 
 _PROFILE_HEADER = """\
