@@ -2,6 +2,8 @@
 
 The daemon still binds `127.0.0.1` only. These notes are the operator rules for accounts, profiles, and the loopback bearer token. They are not legal advice.
 
+Owner login under a 200-connection flood takes about 1 to 1.3s. That is the argon2id check plus the login concurrency cap. It is not a hang, and it is not something this build tries to make faster.
+
 ## One owner
 
 The first account is the owner. A second owner cannot be created. Admins cover day-to-day management. The owner can hand the role to an existing admin:

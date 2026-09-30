@@ -39,6 +39,7 @@ class AuditLog:
         self._fail_user: dict[str, float] = {}
         self._fail_at: list[float] = []
         self._suppressed: dict[tuple[str, str], int] = {}
+        self._timer: threading.Timer | None = None
         # A second connection. Chat writes hold transactions on ``db.conn``,
         # and ``BEGIN IMMEDIATE`` on that same connection raises.
         self._conn = sqlite3.connect(self.db.path, check_same_thread=False)
@@ -48,7 +49,14 @@ class AuditLog:
         self._conn.execute("PRAGMA foreign_keys=ON")
 
     def close(self) -> None:
+        """Flush a partial auth.fail summary, then close the connection."""
         with self._lock:
+            self._cancel_timer()
+            if self._conn is not None and self._suppressed:
+                try:
+                    self._write_summary()
+                except sqlite3.Error:
+                    pass
             conn = self._conn
             self._conn = None
         if conn is not None:
@@ -170,6 +178,32 @@ class AuditLog:
         host = ip[:64] if isinstance(ip, str) else ""
         key = (user, host)
         self._suppressed[key] = self._suppressed.get(key, 0) + 1
+        self._arm_timer()
+
+    def _arm_timer(self) -> None:
+        """Write a short burst even when the process stays up past the window."""
+        if self._timer is not None:
+            return
+        timer = threading.Timer(_AUTH_FAIL_WINDOW, self._flush_due)
+        timer.daemon = True
+        self._timer = timer
+        timer.start()
+
+    def _flush_due(self) -> None:
+        with self._lock:
+            self._timer = None
+            if self._conn is None or not self._suppressed:
+                return
+            try:
+                self._write_summary()
+            except sqlite3.Error:
+                return
+
+    def _cancel_timer(self) -> None:
+        timer = self._timer
+        self._timer = None
+        if timer is not None:
+            timer.cancel()
 
     def _should_summarize(self) -> bool:
         if not self._suppressed:

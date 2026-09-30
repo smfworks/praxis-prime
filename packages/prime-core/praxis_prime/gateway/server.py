@@ -390,7 +390,10 @@ class GatewayServer:
                 return 404, _error("not_found", str(exc))
             except ValueError as exc:
                 return 400, _error("bad_request", str(exc))
-            return 200, {"ok": True, "approval": item}
+            return 200, {
+                "ok": True,
+                "approval": self._hide_foreign_session(principal, item),
+            }
         if method == "POST" and route in {"/v1/decide", "/v1/systemone"}:
             return self._http_decide(body)
         fired = _ROUTINE_FIRE.fullmatch(route)
@@ -640,7 +643,10 @@ class GatewayServer:
         except ValueError as exc:
             outgoing.put(_frame_error(frame_id, "bad_request", str(exc)))
             return
-        outgoing.put({"type": "result", "id": frame_id, "ok": True, "payload": {"approval": item}})
+        visible = self._hide_foreign_session(principal, item)
+        outgoing.put(
+            {"type": "result", "id": frame_id, "ok": True, "payload": {"approval": visible}}
+        )
 
     def _chat(
         self,
