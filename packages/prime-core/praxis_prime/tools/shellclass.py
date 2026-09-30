@@ -10,7 +10,8 @@ The allowlist is small on purpose: ``ls``, ``cat`` / ``head`` / ``tail`` of
 concrete paths inside the workspace, ``git status``, ``git diff`` of existing
 non-secret files (or ``--stat`` / ``--name-only`` / ``--name-status``),
 ``git log`` without ``-p``, and ``pytest --collect-only`` (check mode,
-including ``python -m pytest``). Secret filenames use
+including ``python -m pytest``). A directory, ``.``, or other on-disk non-file
+beside those files asks unless a summary flag is present. Secret filenames use
 :func:`praxis_prime.policy.boundary.is_secret_path`, including git pathspecs.
 Globs, ``rev:path``, and exclude or stacked pathspec magic are not allowlisted.
 """
@@ -425,6 +426,7 @@ def _git(tokens: list[str], workspace: Path | None) -> bool:
     allowed = {"status": _GIT_STATUS, "diff": _GIT_DIFF, "log": _GIT_LOG}[sub]
     summary = False
     pathspecs: list[str] = []
+    saw_nonfile = False
     while index < len(tokens):
         arg = tokens[index]
         if arg == "--":
@@ -433,9 +435,11 @@ def _git(tokens: list[str], workspace: Path | None) -> bool:
                 operand = tokens[index]
                 if not _safe_git_operand(operand, workspace):
                     return False
+                if sub == "diff" and not _is_explicit_safe_file(operand, workspace):
+                    # After ``--`` every operand is a pathspec, including a
+                    # directory. Summary flags do not relax that.
+                    return False
                 if sub == "diff":
-                    if not _is_explicit_safe_file(operand, workspace):
-                        return False
                     pathspecs.append(operand)
                 index += 1
             break
@@ -490,11 +494,18 @@ def _git(tokens: list[str], workspace: Path | None) -> bool:
             return False
         if not _safe_git_operand(arg, workspace):
             return False
-        if sub == "diff" and _is_explicit_safe_file(arg, workspace):
-            pathspecs.append(arg)
+        if sub == "diff":
+            if _is_explicit_safe_file(arg, workspace):
+                pathspecs.append(arg)
+            elif _operand_exists_as_nonfile(arg, workspace):
+                # A directory, ``.``, or trailing slash is a pathspec. Skipping
+                # it lets ``git diff note.txt config`` print the directory.
+                saw_nonfile = True
         index += 1
     if sub != "diff":
         return True
+    if saw_nonfile and not summary:
+        return False
     if not pathspecs:
         return summary
     return all(_is_explicit_safe_file(item, workspace) for item in pathspecs)
@@ -579,6 +590,27 @@ def _single_safe_magic(token: str) -> bool:
         path = rest[1:]
         return bool(path) and not _has_glob(path) and ":" not in path
     return False
+
+
+def _operand_exists_as_nonfile(arg: str, workspace: Path | None) -> bool:
+    """True when ``arg`` is on disk and is not a regular file.
+
+    Missing names stay revisions (``v1.0``, ``origin/main``). A directory,
+    ``.``, ``./``, or a trailing slash is a pathspec git will expand.
+    """
+    if workspace is None or not _safe_git_operand(arg, workspace):
+        return False
+    body = _concrete_path(arg)
+    if not body or ".." in Path(body).parts:
+        return False
+    path = Path(body)
+    candidate = path if path.is_absolute() else workspace / path
+    try:
+        if candidate.is_file():
+            return False
+        return candidate.exists()
+    except OSError:
+        return False
 
 
 def _is_explicit_safe_file(arg: str, workspace: Path | None) -> bool:

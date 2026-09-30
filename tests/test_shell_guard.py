@@ -260,6 +260,35 @@ def test_revision_names_and_deleted_dirs_are_not_safe_files(tmp_path: Path):
     assert named.force_approval is False
 
 
+def test_directory_beside_a_file_requires_approval(tmp_path: Path):
+    (tmp_path / "note.txt").write_text("alpha\n", encoding="utf-8")
+    (tmp_path / "config").mkdir()
+    (tmp_path / "sub").mkdir()
+    blocked = (
+        "git diff config note.txt",
+        "git diff note.txt config",
+        "git diff note.txt config/",
+        "git diff note.txt .",
+        "git diff note.txt ./",
+        "git diff note.txt sub",
+        "git diff HEAD note.txt config",
+        "git diff HEAD~1 note.txt config",
+        "git diff v1.0 note.txt config",
+        "git diff --cached note.txt config",
+    )
+    for command in blocked:
+        prepared = classify_command(command, sandbox_ready=True, workspace=tmp_path)
+        assert prepared.force_approval is True, command
+        assert classify_shell(command, workspace=tmp_path).allowlisted is False, command
+    stat = classify_command(
+        "git diff --stat note.txt config",
+        sandbox_ready=True,
+        workspace=tmp_path,
+    )
+    assert stat.force_approval is False
+    assert classify_shell("git diff --stat note.txt config", workspace=tmp_path).allowlisted is True
+
+
 def test_unapproved_delete_does_not_run_and_ro_bind_blocks_the_write(tmp_path: Path):
     target = tmp_path / "note.txt"
     target.write_text("safe\n", encoding="utf-8")
