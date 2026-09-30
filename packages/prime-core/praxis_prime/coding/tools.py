@@ -93,7 +93,7 @@ def classify_run_command(
     """Risk for a worktree command. Push, force, and tracked deletes always ask."""
     command = arguments.get("command")
     text = command if isinstance(command, str) else ""
-    base = classify_command(text, sandbox_ready=sandbox_ready)
+    base = classify_command(text, sandbox_ready=sandbox_ready, workspace=root)
     risk = base.risk
     force = base.force_approval
     reason = base.force_reason
@@ -117,6 +117,7 @@ def classify_run_command(
         force_approval=force,
         force_reason=reason,
         summary=text.strip()[:180],
+        write_capable=base.write_capable or risk != Risk.READ,
     )
 
 
@@ -402,8 +403,9 @@ def _run_command_tool(root: Path) -> Tool:
         name="run_command",
         description=(
             "Run a bash command in the task worktree. Uses bubblewrap with no "
-            "network when bwrap is installed. git push, force operations, and "
-            "deletes of tracked files always need approval."
+            "network when bwrap is installed. The worktree is mounted read-only "
+            "unless this command was approved as a write. Commands that are not "
+            "on the read-only allowlist always need approval."
         ),
         parameters={
             **_OBJECT,

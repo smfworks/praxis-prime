@@ -37,6 +37,10 @@ class ToolContext:
 
     ``host_shell_approved`` is true only after a person approved an
     unsandboxed shell command. A missing sandbox must not imply it.
+    ``shell_approved`` is true after a person approved this command,
+    sandboxed or not. ``session_write_approved`` is the coding-mode grant
+    for one worktree. ``write_scope`` is that worktree; ``main_checkout``
+    is never a legal read-write bind.
     ``session_id`` is the chat session when the loop is running one.
     """
 
@@ -46,6 +50,12 @@ class ToolContext:
     session_id: str | None = None
     read_access: ReadAccess | None = None
     inode_cache: InodeScanCache | None = None
+    shell_approved: bool = False
+    session_write_approved: bool = False
+    write_scope: str = ""
+    main_checkout: str = ""
+    audit: object | None = None
+    dial_mode: str = "off"
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,6 +67,7 @@ class PreparedCall:
     force_approval: bool
     force_reason: str
     summary: str
+    write_capable: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,6 +96,7 @@ class Tool:
                     force_approval=prepared.force_approval,
                     force_reason=prepared.force_reason,
                     summary=prepared.summary,
+                    write_capable=prepared.write_capable,
                 )
             return prepared
         summary = _summarize(arguments)

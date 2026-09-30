@@ -1,11 +1,16 @@
 """Bubblewrap launcher for shell commands.
 
 bubblewrap is LGPL-2.0+ and is invoked as a system binary. It is not linked
-into this process. ``--unshare-all`` drops the network namespace. If the
-binary is missing, callers must not run the command on the host unless a
-person has approved that command.
+into this process. ``--unshare-all`` drops the network namespace. The
+workspace is mounted read-only unless the caller has an approved write scope.
+That scope is one directory: a task worktree or the approved command's
+cwd. It is never ``$HOME`` and never the main checkout when one is named.
+Bash is started with ``--noprofile --norc`` so a login alias cannot rewrite
+an allowlisted command.
 
-A failed sandbox does not fall back to an unsandboxed run.
+If the binary is missing, callers must not run the command on the host unless
+a person has approved that command. A failed sandbox does not fall back to an
+unsandboxed run.
 """
 
 from __future__ import annotations
@@ -35,14 +40,57 @@ def bwrap_available() -> bool:
     return shutil.which("bwrap") is not None
 
 
+def writable_scope_ok(
+    cwd: Path,
+    scope: Path | None,
+    main_checkout: Path | None = None,
+) -> bool:
+    """True when ``cwd`` is the one directory this write may mount."""
+    if scope is None:
+        return False
+    try:
+        resolved = cwd.resolve()
+        allowed = scope.resolve()
+        home = Path.home().resolve()
+    except OSError:
+        return False
+    if resolved != allowed:
+        return False
+    if resolved == home or _contains(resolved, home):
+        return False
+    if main_checkout is not None:
+        try:
+            if resolved == main_checkout.resolve():
+                return False
+        except OSError:
+            return False
+    return True
+
+
 def build_bwrap_argv(
     command: str,
     cwd: Path,
     *,
     ro_binds: list[tuple[str, str]] | None = None,
+    writable: bool = False,
+    scope: Path | None = None,
+    main_checkout: Path | None = None,
 ) -> list[str]:
-    """Return a bwrap command that runs ``command`` with network unshared."""
+    """Return a bwrap command that runs ``command`` with network unshared.
+
+    The workspace mount is ``--ro-bind`` unless ``writable`` is set and
+    ``scope`` is exactly ``cwd``, and that directory is not ``$HOME`` or
+    ``main_checkout``.
+    """
     work = cwd.resolve()
+    mount = "--ro-bind"
+    if writable:
+        if not writable_scope_ok(work, scope, main_checkout):
+            raise SandboxError(
+                "refusing read-write bind outside the approved worktree; "
+                "the command was not run"
+            )
+        mount = "--bind"
     argv = [
         "bwrap",
         "--unshare-all",
@@ -67,7 +115,7 @@ def build_bwrap_argv(
         "/dev",
         "--tmpfs",
         "/tmp",
-        "--bind",
+        mount,
         str(work),
         "/workspace",
         "--chdir",
@@ -79,7 +127,7 @@ def build_bwrap_argv(
     for src, dest in ro_binds or []:
         if Path(src).exists():
             argv.extend(["--ro-bind", src, dest])
-    argv.extend(["--", "bash", "-lc", command])
+    argv.extend(["--", "bash", "--noprofile", "--norc", "-c", command])
     return argv
 
 
@@ -90,13 +138,22 @@ def run_bwrap(
     *,
     timeout: float = 30,
     env: Mapping[str, str] | None = None,
+    writable: bool = False,
+    scope: Path | None = None,
+    main_checkout: Path | None = None,
 ) -> str:
     """Run ``command`` inside bubblewrap. Never falls back to the host."""
     if not bwrap_available():
         raise SandboxError(
             "bubblewrap is not available; the command was not run on the host"
         )
-    argv = build_bwrap_argv(command, cwd)
+    argv = build_bwrap_argv(
+        command,
+        cwd,
+        writable=writable,
+        scope=scope,
+        main_checkout=main_checkout,
+    )
     source = os.environ if env is None else env
     try:
         return run_process(
@@ -120,13 +177,22 @@ def run_bwrap_status(
     timeout: float = 30,
     env: Mapping[str, str] | None = None,
     stdin: str = "",
+    writable: bool = False,
+    scope: Path | None = None,
+    main_checkout: Path | None = None,
 ) -> CommandStatus:
     """Run ``command`` inside bubblewrap and return its exit code."""
     if not bwrap_available():
         raise SandboxError(
             "bubblewrap is not available; the command was not run on the host"
         )
-    argv = build_bwrap_argv(command, cwd)
+    argv = build_bwrap_argv(
+        command,
+        cwd,
+        writable=writable,
+        scope=scope,
+        main_checkout=main_checkout,
+    )
     source = os.environ if env is None else env
     try:
         return run_captured(
@@ -160,7 +226,7 @@ def run_host_status(
     """
     source = os.environ if env is None else env
     return run_captured(
-        ["bash", "-lc", command],
+        ["bash", "--noprofile", "--norc", "-c", command],
         cwd=cwd,
         cancelled=cancelled,
         timeout=timeout,
@@ -180,7 +246,7 @@ def run_host_shell(
     """Run a command on the host. Callers must already have an approval."""
     source = os.environ if env is None else env
     return run_process(
-        ["bash", "-lc", command],
+        ["bash", "--noprofile", "--norc", "-c", command],
         cwd=cwd,
         cancelled=cancelled,
         timeout=timeout,
@@ -201,9 +267,12 @@ def scrub_env(source: Mapping[str, str]) -> dict[str, str]:
         "GH_TOKEN",
         "NPM_TOKEN",
     )
+    blocked_names = {"BASH_ENV", "ENV", "SHELLOPTS"}
     cleaned: dict[str, str] = {}
     for key, value in source.items():
         upper = key.upper()
+        if upper in blocked_names or upper.startswith("BASH_FUNC_"):
+            continue
         if upper.startswith(blocked_prefixes):
             continue
         if any(part in upper for part in ("SECRET", "TOKEN", "PASSWORD", "API_KEY", "APIKEY")):
@@ -299,6 +368,15 @@ def run_process(
     finally:
         if proc.poll() is None:
             _kill(proc)
+
+
+def _contains(parent: Path, child: Path) -> bool:
+    """True when ``child`` is strictly inside ``parent``."""
+    try:
+        child.relative_to(parent)
+    except ValueError:
+        return False
+    return parent != child
 
 
 def _kill(proc: subprocess.Popen[str]) -> None:

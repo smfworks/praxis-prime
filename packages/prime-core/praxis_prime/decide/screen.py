@@ -104,7 +104,11 @@ class ActionScreener:
 
 
 def is_always_ask(ctx: PolicyContext) -> bool:
-    """Push, force, tracked deletes, writes outside the worktree, and the spine."""
+    """Push, force, tracked deletes, writes outside the worktree, and the spine.
+
+    Shell commands that are not on the read-only allowlist always ask. The
+    decision engine cannot turn that into an allow.
+    """
     blob = f"{ctx.summary}\n{ctx.force_reason}"
     if ctx.risk in CONSEQUENTIAL_RISKS:
         return True
@@ -115,7 +119,23 @@ def is_always_ask(ctx: PolicyContext) -> bool:
         return True
     if "outside the task worktree" in lowered or "outside the worktree" in lowered:
         return True
+    if ctx.tool in {"shell", "run_command", "run_tests"} and _shell_needs_approval(ctx):
+        return True
     return False
+
+
+def _shell_needs_approval(ctx: PolicyContext) -> bool:
+    from praxis_prime.tools.shell import classify_command
+
+    command = ctx.summary
+    if ctx.arguments:
+        raw = ctx.arguments.get("command")
+        if isinstance(raw, str) and raw.strip():
+            command = raw
+    if not command.strip():
+        return True
+    prepared = classify_command(command, sandbox_ready=ctx.sandboxed)
+    return prepared.force_approval or prepared.risk in CONSEQUENTIAL_RISKS
 
 
 def clearly_unsafe(ctx: PolicyContext) -> bool:

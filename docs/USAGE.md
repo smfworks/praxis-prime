@@ -65,7 +65,7 @@ praxis-prime approvals deny ap_0123abcd
 
 `approve` is once. `--session` allows that same action for the rest of the session that asked. A text message, including "yes" or `/approve`, is not a decision.
 
-`shell` uses bubblewrap when `bwrap` is installed. The sandbox has no network. If bubblewrap is missing, or it fails to start, the command is not silently run on the host: every unsandboxed command needs approval, and a failed sandbox is reported as a failure.
+`shell` uses bubblewrap when `bwrap` is installed. The sandbox has no network, and the workspace is mounted read-only unless a write was approved for that directory. Only `ls`, `cat` (and `head` / `tail`) inside the workspace, `git status`, `git diff`, `git log`, and `pytest --collect-only` skip approval. Anything else asks, including deletes, redirects, and interpreters. If bubblewrap is missing, or it fails to start, the command is not silently run on the host: every unsandboxed command needs approval, and a failed sandbox is reported as a failure.
 
 ## Models
 

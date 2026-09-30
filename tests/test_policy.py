@@ -77,21 +77,39 @@ def test_sandboxed_delete_still_asks():
     assert verdict.decision == "ask"
 
 
-def test_sandboxed_echo_is_allowed():
+def test_sandboxed_echo_requires_approval_and_git_status_does_not():
     prepared = classify_command("echo hi", sandbox_ready=True)
     assert prepared.risk == Risk.READ
-    assert prepared.force_approval is False
+    assert prepared.force_approval is True
     verdict = PolicyEngine().evaluate(
         PolicyContext(
             hook=HookPoint.H3_PRE_TOOL,
             tool="shell",
-            risk=prepared.risk,
+            risk=Risk.READ,
             sandboxed=True,
-            force_approval=prepared.force_approval,
+            force_approval=False,
             summary=prepared.summary,
+            arguments={"command": "echo hi"},
         )
     )
-    assert verdict.decision == "allow"
+    assert verdict.decision == "ask"
+    assert "allowlist" in verdict.reason
+
+    status = classify_command("git status", sandbox_ready=True)
+    assert status.risk == Risk.READ
+    assert status.force_approval is False
+    allowed = PolicyEngine().evaluate(
+        PolicyContext(
+            hook=HookPoint.H3_PRE_TOOL,
+            tool="shell",
+            risk=status.risk,
+            sandboxed=True,
+            force_approval=status.force_approval,
+            summary=status.summary,
+            arguments={"command": "git status"},
+        )
+    )
+    assert allowed.decision == "allow"
 
 
 def test_dials_off_are_not_consulted_and_cannot_weaken_the_spine():
@@ -151,7 +169,8 @@ def test_plan_mode_denies_shell():
 
 def test_shell_command_classes():
     assert classify_command("echo hi > out.txt", sandbox_ready=True).risk == Risk.DESTRUCTIVE
-    assert classify_command("echo hi >> out.txt", sandbox_ready=True).risk == Risk.READ
+    assert classify_command("echo hi >> out.txt", sandbox_ready=True).risk == Risk.DESTRUCTIVE
+    assert classify_command("echo hi >> out.txt", sandbox_ready=True).force_approval is True
     assert classify_command("git push origin main", sandbox_ready=True).risk == Risk.SEND
     protected = classify_command("printf x > AGENTS.md", sandbox_ready=True)
     assert protected.risk == Risk.DESTRUCTIVE

@@ -84,8 +84,9 @@ def _shell_tool() -> Tool:
         name="shell",
         description=(
             "Run a bash command. Uses bubblewrap with no network when bwrap is installed. "
-            "Without bubblewrap, every command needs approval. Delete, send, spend, and "
-            "share still need approval inside the sandbox."
+            "The workspace is mounted read-only unless the command was approved as a write. "
+            "Only a small read-only allowlist runs without approval. Without bubblewrap, "
+            "every command needs approval."
         ),
         parameters={
             **_OBJECT,

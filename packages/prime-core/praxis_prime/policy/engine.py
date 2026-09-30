@@ -187,18 +187,23 @@ class PolicyEngine:
 
     def evaluate(self, ctx: PolicyContext) -> Verdict:
         verdict = self._spine(ctx)
-        if not self.dials_active():
-            return verdict
-        from praxis_prime.compliance.evaluate import apply_compliance
+        if self.dials_active():
+            from praxis_prime.compliance.evaluate import apply_compliance
 
-        verdict = apply_compliance(self, ctx, verdict)
-        for hook in self.hooks:
-            position = self.positions.get(hook.dial_id, "off")
-            if position == "off":
-                continue
-            proposed = hook.apply(ctx, verdict)
-            verdict = tighten(verdict, proposed)
-        return self._deny_blocked_read(ctx, verdict)
+            verdict = apply_compliance(self, ctx, verdict)
+            for hook in self.hooks:
+                position = self.positions.get(hook.dial_id, "off")
+                if position == "off":
+                    continue
+                proposed = hook.apply(ctx, verdict)
+                verdict = tighten(verdict, proposed)
+        verdict = self._deny_blocked_read(ctx, verdict)
+        return self._shell_guard(ctx, verdict)
+
+    def _shell_guard(self, ctx: PolicyContext, verdict: Verdict) -> Verdict:
+        from praxis_prime.policy.shellguard import apply_shell_guard
+
+        return apply_shell_guard(self, ctx, verdict)
 
     def _spine(self, ctx: PolicyContext) -> Verdict:
         if ctx.hook == HookPoint.H3_PRE_TOOL:
