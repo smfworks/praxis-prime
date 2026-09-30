@@ -2,10 +2,14 @@
 
 Only a small read-only allowlist runs without approval. Deletes, writes,
 interpreters, and anything the parser cannot classify need a human, including
-inside bubblewrap. The workspace bind is read-only unless that command was
-approved as a write, or a coding session was approved for its own worktree.
-When bubblewrap is missing, every command needs approval. A sandbox failure
-never reruns the command on the host.
+inside bubblewrap. A content ``git diff``, ``git log -p``, or ``git show``
+that the classifier would auto-approve is checked again: the same revisions
+and pathspecs run as ``git --name-only`` inside the read-only sandbox. If
+that probe fails, or git lists a secret or a path the classifier did not
+approve, the command asks. The workspace bind is read-only unless that
+command was approved as a write, or a coding session was approved for its
+own worktree. When bubblewrap is missing, every command needs approval. A
+sandbox failure never reruns the command on the host.
 """
 
 from __future__ import annotations
@@ -15,13 +19,17 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from praxis_prime.sandbox.bwrap import (
+    CommandStatus,
     SandboxError,
     bwrap_available,
     run_bwrap,
+    run_bwrap_status,
     run_host_shell,
 )
 from praxis_prime.tools.registry import PreparedCall, Risk, ToolContext
-from praxis_prime.tools.shellclass import classify_shell
+from praxis_prime.tools.shellclass import GitProbe, classify_shell, listed_paths_are_approved
+
+_GIT_PROBE_TIMEOUT = 5.0
 
 _SECRET_VALUE = re.compile(
     r"(?i)((?:api[_-]?key|token|secret|password|authorization)\s*[=:]\s*)\S+"
@@ -60,8 +68,12 @@ def classify_command(
         bubble = "bubblewrap is not available; every shell command needs approval"
         force_reason = f"{force_reason}; {bubble}" if force_reason else bubble
     if verdict.allowlisted and ready and not _mentions_protected(command):
-        force = False
-        force_reason = ""
+        if verdict.probes and not _git_probes_allow(verdict.probes, workspace):
+            force = True
+            force_reason = "git would show a path outside the approved files"
+        else:
+            force = False
+            force_reason = ""
     return PreparedCall(
         risk=risk,
         sandboxed=ready,
@@ -70,6 +82,46 @@ def classify_command(
         summary=command.strip()[:180],
         write_capable=verdict.write_capable,
     )
+
+
+def _git_probes_allow(probes: tuple[GitProbe, ...], workspace: Path | None) -> bool:
+    """True when each probe's ``--name-only`` list is the approved file set."""
+    if workspace is None:
+        return False
+    try:
+        for probe in probes:
+            status = run_bwrap_status(
+                probe.command,
+                workspace,
+                _not_cancelled,
+                timeout=_GIT_PROBE_TIMEOUT,
+            )
+            paths = _name_only_paths(status)
+            if paths is None or not listed_paths_are_approved(paths, probe.approved, workspace):
+                return False
+        return True
+    except (SandboxError, OSError):
+        return False
+
+
+def _not_cancelled() -> bool:
+    return False
+
+
+def _name_only_paths(status: CommandStatus) -> list[str] | None:
+    if status.code not in (0, 1):
+        return None
+    found: list[str] = []
+    for raw in status.output.splitlines():
+        line = raw.strip()
+        if not line or line == "(no output)" or line.startswith("(exit"):
+            continue
+        if line.startswith(("fatal:", "error:")):
+            return None
+        if line.startswith("warning:"):
+            continue
+        found.append(line)
+    return found
 
 
 def execute_shell(arguments: Mapping[str, object], context: ToolContext) -> str:

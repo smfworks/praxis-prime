@@ -8,6 +8,8 @@ paths now fail closed.
 from __future__ import annotations
 
 import os
+import shutil
+import subprocess
 from pathlib import Path
 
 from praxis_prime.audit.log import AuditLog
@@ -23,7 +25,12 @@ from praxis_prime.sandbox.bwrap import (
 from praxis_prime.state import StateDB
 from praxis_prime.tools.registry import Risk, ToolContext
 from praxis_prime.tools.shell import classify_command, execute_shell
-from praxis_prime.tools.shellclass import classify_shell
+from praxis_prime.tools.shellclass import (
+    GitProbe,
+    ShellClass,
+    build_name_only_command,
+    classify_shell,
+)
 
 # Delete and overwrite forms that the old denylist did not force into approval
 # when bubblewrap was present. Interpreter bodies, append redirects, find -exec,
@@ -119,8 +126,30 @@ def test_delete_variants_that_bypassed_the_classifier_require_approval():
         assert verdict.decision == "ask", command
 
 
+def _git(*args: str, cwd: Path) -> None:
+    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
+
+
+def _track_note(root: Path) -> None:
+    """Commit ``note.txt`` so a content diff's name-only probe can succeed."""
+    _git("init", "-q", cwd=root)
+    _git("add", "--", "note.txt", cwd=root)
+    _git(
+        "-c",
+        "user.email=tester@example.com",
+        "-c",
+        "user.name=tester",
+        "commit",
+        "-q",
+        "-m",
+        "init",
+        cwd=root,
+    )
+
+
 def test_read_only_allowlist_skips_approval_inside_the_workspace(tmp_path: Path):
     (tmp_path / "note.txt").write_text("alpha\n", encoding="utf-8")
+    _track_note(tmp_path)
     allowed = (
         "ls",
         "ls -la",
@@ -155,6 +184,7 @@ def test_read_only_allowlist_skips_approval_inside_the_workspace(tmp_path: Path)
 def test_git_operands_use_the_shared_secret_denylist(tmp_path: Path):
     (tmp_path / "note.txt").write_text("alpha\n", encoding="utf-8")
     (tmp_path / "README").write_text("hi\n", encoding="utf-8")
+    _track_note(tmp_path)
     blocked = (
         "git diff secrets.env",
         "git log -p .env",
@@ -188,6 +218,7 @@ def test_globs_rev_paths_and_patch_dumps_require_approval(tmp_path: Path):
     (tmp_path / "note.txt").write_text("alpha\n", encoding="utf-8")
     (tmp_path / "README").write_text("hi\n", encoding="utf-8")
     (tmp_path / "subdir").mkdir()
+    _track_note(tmp_path)
     blocked = (
         "git diff -- '*.env'",
         "git diff -- 'secrets.en?'",
@@ -236,6 +267,7 @@ def test_globs_rev_paths_and_patch_dumps_require_approval(tmp_path: Path):
 
 def test_revision_names_and_deleted_dirs_are_not_safe_files(tmp_path: Path):
     (tmp_path / "note.txt").write_text("alpha\n", encoding="utf-8")
+    _track_note(tmp_path)
     blocked = (
         "git diff origin/main",
         "git diff feature/x",
@@ -287,6 +319,95 @@ def test_directory_beside_a_file_requires_approval(tmp_path: Path):
     )
     assert stat.force_approval is False
     assert classify_shell("git diff --stat note.txt config", workspace=tmp_path).allowlisted is True
+
+
+def test_icase_magic_and_dangling_symlinks_require_approval(tmp_path: Path):
+    (tmp_path / "note.txt").write_text("alpha\n", encoding="utf-8")
+    (tmp_path / "lnk").symlink_to("missing")
+    blocked = (
+        "git diff note.txt ':(icase)CONFIG'",
+        "git diff ':(icase)upper'",
+        "git diff HEAD note.txt ':(icase)CONFIG'",
+        "git diff note.txt lnk",
+        "git diff HEAD note.txt lnk",
+        "git diff ':(icase)note.txt'",
+    )
+    for command in blocked:
+        prepared = classify_command(command, sandbox_ready=True, workspace=tmp_path)
+        assert prepared.force_approval is True, command
+        assert classify_shell(command, workspace=tmp_path).allowlisted is False, command
+    for command in (
+        "git diff ':(literal)note.txt'",
+        "git diff ':(top)note.txt'",
+        "git diff ':/note.txt'",
+    ):
+        assert classify_shell(command, workspace=tmp_path).allowlisted is True, command
+
+
+def _repo_with_secret_diffs(root: Path) -> None:
+    (root / "note.txt").write_text("alpha\n", encoding="utf-8")
+    (root / "config").mkdir()
+    (root / "config" / ".env").write_text("one\n", encoding="utf-8")
+    (root / "Upper").mkdir()
+    (root / "Upper" / "creds.txt").write_text("one\n", encoding="utf-8")
+    (root / "lnk").mkdir()
+    (root / "lnk" / ".env").write_text("one\n", encoding="utf-8")
+    _git("init", "-q", cwd=root)
+    _git("add", "--", "note.txt", "config/.env", "Upper/creds.txt", "lnk/.env", cwd=root)
+    _git(
+        "-c",
+        "user.email=tester@example.com",
+        "-c",
+        "user.name=tester",
+        "commit",
+        "-q",
+        "-m",
+        "init",
+        cwd=root,
+    )
+    (root / "note.txt").write_text("beta\n", encoding="utf-8")
+    (root / "config" / ".env").write_text("two\n", encoding="utf-8")
+    (root / "Upper" / "creds.txt").write_text("two\n", encoding="utf-8")
+    shutil.rmtree(root / "lnk")
+    (root / "lnk").symlink_to("missing")
+
+
+def test_name_only_backstop_catches_a_fooled_classifier(tmp_path: Path, monkeypatch):
+    if not _live_bwrap():
+        return
+    _repo_with_secret_diffs(tmp_path)
+
+    def fooled(command: str, *, workspace: Path | None = None) -> ShellClass:
+        del workspace
+        probe = build_name_only_command(command)
+        assert probe is not None, command
+        return ShellClass(True, Risk.READ, "", False, (GitProbe(probe, frozenset({"note.txt"})),))
+
+    monkeypatch.setattr("praxis_prime.tools.shell.classify_shell", fooled)
+    blocked = (
+        "git diff note.txt ':(icase)CONFIG'",
+        "git diff ':(icase)upper'",
+        "git diff HEAD note.txt ':(icase)CONFIG'",
+        "git diff note.txt lnk",
+        "git diff HEAD note.txt lnk",
+    )
+    for command in blocked:
+        prepared = classify_command(command, sandbox_ready=True, workspace=tmp_path)
+        assert prepared.force_approval is True, command
+    allowed = classify_command("git diff note.txt", sandbox_ready=True, workspace=tmp_path)
+    assert allowed.force_approval is False
+
+
+def test_name_only_backstop_asks_when_the_probe_fails(tmp_path: Path, monkeypatch):
+    (tmp_path / "note.txt").write_text("alpha\n", encoding="utf-8")
+
+    def boom(*_args, **_kwargs):
+        raise SandboxError("probe failed")
+
+    monkeypatch.setattr("praxis_prime.tools.shell.run_bwrap_status", boom)
+    prepared = classify_command("git diff note.txt", sandbox_ready=True, workspace=tmp_path)
+    assert prepared.force_approval is True
+    assert "approved files" in prepared.force_reason
 
 
 def test_unapproved_delete_does_not_run_and_ro_bind_blocks_the_write(tmp_path: Path):

@@ -11,13 +11,17 @@ concrete paths inside the workspace, ``git status``, ``git diff`` of existing
 non-secret files (or ``--stat`` / ``--name-only`` / ``--name-status``),
 ``git log`` without ``-p``, and ``pytest --collect-only`` (check mode,
 including ``python -m pytest``). A directory, ``.``, or other on-disk non-file
-beside those files asks unless a summary flag is present. Secret filenames use
+beside those files asks unless a summary flag is present. An operand that
+starts with ``:`` is a pathspec, allowlisted only when it is an existing
+non-secret file. Secret filenames use
 :func:`praxis_prime.policy.boundary.is_secret_path`, including git pathspecs.
-Globs, ``rev:path``, and exclude or stacked pathspec magic are not allowlisted.
+Globs, ``rev:path``, case-folding magic, and exclude or stacked pathspec
+magic are not allowlisted.
 """
 
 from __future__ import annotations
 
+import os
 import re
 import shlex
 from dataclasses import dataclass
@@ -158,7 +162,7 @@ _GIT_LOG = frozenset(
     }
 )
 _SUMMARY_FLAGS = frozenset({"--stat", "--name-only", "--name-status"})
-_SAFE_PATHSPEC_MAGIC = frozenset({"literal", "top", "icase"})
+_SAFE_PATHSPEC_MAGIC = frozenset({"literal", "top"})
 _PYTEST_FLAGS = frozenset(
     {"--collect-only", "--co", "-q", "--quiet", "--disable-warnings"}
 )
@@ -176,6 +180,18 @@ _METACHAR_RISK = frozenset(
 
 
 @dataclass(frozen=True, slots=True)
+class GitProbe:
+    """A read-only ``--name-only`` check for one content-showing git command.
+
+    ``approved`` is the explicit safe-file set the classifier accepted.
+    ``command`` asks git which paths that command would show.
+    """
+
+    command: str
+    approved: frozenset[str]
+
+
+@dataclass(frozen=True, slots=True)
 class ShellClass:
     """Whether a command is confidently read-only, and the risk if it is not."""
 
@@ -183,6 +199,13 @@ class ShellClass:
     risk: Risk
     reason: str
     write_capable: bool
+    probes: tuple[GitProbe, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class _GitView:
+    allowed: bool
+    probe: GitProbe | None = None
 
 
 def classify_shell(command: str, *, workspace: Path | None = None) -> ShellClass:
@@ -191,13 +214,11 @@ def classify_shell(command: str, *, workspace: Path | None = None) -> ShellClass
     if not text:
         return ShellClass(False, Risk.READ, "empty shell command requires approval", True)
     segments, problem = _segments(text)
-    if (
-        problem == ""
-        and segments is not None
-        and all(_allowlisted_segment(segment, workspace) for segment in segments)
-        and _label(text)[0] == Risk.READ
-    ):
-        return ShellClass(True, Risk.READ, "", False)
+    if problem == "" and segments is not None and _label(text)[0] == Risk.READ:
+        decisions = [_allowlisted_segment(segment, workspace) for segment in segments]
+        if all(allowed for allowed, _probe in decisions):
+            probes = tuple(probe for _allowed, probe in decisions if probe is not None)
+            return ShellClass(True, Risk.READ, "", False, probes)
     risk, reason = _label(text)
     if problem:
         meta = Risk.DESTRUCTIVE if problem in _METACHAR_RISK else Risk.READ
@@ -340,34 +361,35 @@ def _word_start(command: str, index: int) -> bool:
     return command[index - 1].isspace() or command[index - 1] in ";&|("
 
 
-def _allowlisted_segment(segment: str, workspace: Path | None) -> bool:
+def _allowlisted_segment(segment: str, workspace: Path | None) -> tuple[bool, GitProbe | None]:
     try:
         tokens = shlex.split(segment, posix=True)
     except ValueError:
-        return False
+        return False, None
     if not tokens:
-        return False
+        return False, None
     command = tokens[0]
     if "/" in command or command.startswith("."):
-        return False
+        return False, None
     if command == "ls":
-        return _ls(tokens, workspace)
+        return _ls(tokens, workspace), None
     if command == "cat":
-        return _reader(tokens, workspace, flags=False)
+        return _reader(tokens, workspace, flags=False), None
     if command in {"head", "tail"}:
-        return _head_tail(tokens, workspace)
+        return _head_tail(tokens, workspace), None
     if command == "git":
-        return _git(tokens, workspace)
+        decision = _git(tokens, workspace)
+        return decision.allowed, decision.probe
     if command in {"pytest", "py.test"}:
-        return _pytest(tokens[1:], workspace)
+        return _pytest(tokens[1:], workspace), None
     if (
         command in {"python", "python3"}
         and len(tokens) >= 3
         and tokens[1] == "-m"
         and tokens[2] == "pytest"
     ):
-        return _pytest(tokens[3:], workspace)
-    return False
+        return _pytest(tokens[3:], workspace), None
+    return False, None
 
 
 def _ls(tokens: list[str], workspace: Path | None) -> bool:
@@ -409,20 +431,20 @@ def _head_tail(tokens: list[str], workspace: Path | None) -> bool:
     return True
 
 
-def _git(tokens: list[str], workspace: Path | None) -> bool:
+def _git(tokens: list[str], workspace: Path | None) -> _GitView:
     if len(tokens) < 2:
-        return False
+        return _GitView(False)
     index = 1
     while index < len(tokens) and tokens[index].startswith("-"):
         if tokens[index] != "--no-pager":
-            return False
+            return _GitView(False)
         index += 1
     if index >= len(tokens):
-        return False
+        return _GitView(False)
     sub = tokens[index]
     index += 1
     if sub not in {"status", "diff", "log"}:
-        return False
+        return _GitView(False)
     allowed = {"status": _GIT_STATUS, "diff": _GIT_DIFF, "log": _GIT_LOG}[sub]
     summary = False
     pathspecs: list[str] = []
@@ -434,18 +456,19 @@ def _git(tokens: list[str], workspace: Path | None) -> bool:
             while index < len(tokens):
                 operand = tokens[index]
                 if not _safe_git_operand(operand, workspace):
-                    return False
-                if sub == "diff" and not _is_explicit_safe_file(operand, workspace):
-                    # After ``--`` every operand is a pathspec, including a
-                    # directory. Summary flags do not relax that.
-                    return False
+                    return _GitView(False)
+                if operand.startswith(":") or sub == "diff":
+                    # After ``--`` every diff operand is a pathspec. A leading
+                    # ``:`` is a pathspec for every subcommand, never a revision.
+                    if not _is_explicit_safe_file(operand, workspace):
+                        return _GitView(False)
                 if sub == "diff":
                     pathspecs.append(operand)
                 index += 1
             break
         if arg.startswith("-"):
             if arg in {"-p", "--patch"}:
-                return False
+                return _GitView(False)
             if arg in _SUMMARY_FLAGS:
                 summary = True
             if arg in allowed:
@@ -456,7 +479,7 @@ def _git(tokens: list[str], workspace: Path | None) -> bool:
                 continue
             if sub == "log" and arg in {"-n", "--max-count"}:
                 if index + 1 >= len(tokens) or re.fullmatch(r"\d+", tokens[index + 1]) is None:
-                    return False
+                    return _GitView(False)
                 index += 2
                 continue
             if (
@@ -476,13 +499,13 @@ def _git(tokens: list[str], workspace: Path | None) -> bool:
                 continue
             if sub == "log" and arg in {"--since", "--until", "--author", "--grep"}:
                 if index + 1 >= len(tokens) or not _safe_value(tokens[index + 1]):
-                    return False
+                    return _GitView(False)
                 index += 2
                 continue
             prefixes = ("--since", "--until", "--author", "--grep")
             if sub == "log" and any(arg.startswith(prefix + "=") for prefix in prefixes):
                 if not _safe_value(arg.split("=", 1)[1]):
-                    return False
+                    return _GitView(False)
                 index += 1
                 continue
             if sub == "status" and arg in {"-u", "--untracked-files"}:
@@ -491,9 +514,16 @@ def _git(tokens: list[str], workspace: Path | None) -> bool:
                     continue
                 index += 1
                 continue
-            return False
+            return _GitView(False)
+        if arg.startswith(":"):
+            if not _is_explicit_safe_file(arg, workspace):
+                return _GitView(False)
+            if sub == "diff":
+                pathspecs.append(arg)
+            index += 1
+            continue
         if not _safe_git_operand(arg, workspace):
-            return False
+            return _GitView(False)
         if sub == "diff":
             if _is_explicit_safe_file(arg, workspace):
                 pathspecs.append(arg)
@@ -503,12 +533,109 @@ def _git(tokens: list[str], workspace: Path | None) -> bool:
                 saw_nonfile = True
         index += 1
     if sub != "diff":
-        return True
+        return _GitView(True)
     if saw_nonfile and not summary:
-        return False
+        return _GitView(False)
     if not pathspecs:
-        return summary
-    return all(_is_explicit_safe_file(item, workspace) for item in pathspecs)
+        return _GitView(summary)
+    if not all(_is_explicit_safe_file(item, workspace) for item in pathspecs):
+        return _GitView(False)
+    if summary:
+        return _GitView(True)
+    probe = build_name_only_command(shlex.join(tokens))
+    if probe is None:
+        return _GitView(False)
+    approved = frozenset(_normalized_path(item, workspace) for item in pathspecs)
+    return _GitView(True, GitProbe(probe, approved))
+
+
+def build_name_only_command(segment: str) -> str | None:
+    """Return ``git <sub> --name-only`` for a content diff, log, or show.
+
+    Summary commands (``--stat``, ``--name-only``, ``--name-status``) and
+    ``git log`` without ``-p`` are not content commands. The returned command
+    keeps revisions, pathspecs, and ``--cached`` so git decides the path list.
+    """
+    try:
+        tokens = shlex.split(segment, posix=True)
+    except ValueError:
+        return None
+    if not tokens or tokens[0] != "git":
+        return None
+    index = 1
+    while index < len(tokens) and tokens[index].startswith("-"):
+        if tokens[index] != "--no-pager":
+            return None
+        index += 1
+    if index >= len(tokens):
+        return None
+    sub = tokens[index]
+    index += 1
+    if sub not in {"diff", "log", "show"}:
+        return None
+    cached = False
+    patch = False
+    summary = False
+    positionals: list[str] = []
+    while index < len(tokens):
+        arg = tokens[index]
+        if arg == "--":
+            positionals.append("--")
+            positionals.extend(tokens[index + 1 :])
+            break
+        if arg in {"-p", "--patch"}:
+            patch = True
+        if arg in _SUMMARY_FLAGS:
+            summary = True
+        if arg in {"--cached", "--staged"}:
+            cached = True
+        if not arg.startswith("-"):
+            positionals.append(arg)
+        index += 1
+    if sub == "log":
+        content = patch
+    elif summary and not patch:
+        content = False
+    else:
+        content = True
+    if not content:
+        return None
+    parts = ["git", "--no-optional-locks", sub, "--name-only"]
+    if cached:
+        parts.append("--cached")
+    parts.extend(positionals)
+    return shlex.join(parts)
+
+
+def listed_paths_are_approved(
+    paths: list[str],
+    approved: frozenset[str],
+    workspace: Path,
+) -> bool:
+    """True when every path git listed is an approved non-secret file."""
+    for raw in paths:
+        name = raw.strip().replace("\\", "/")
+        if name.startswith("./"):
+            name = name[2:]
+        if not name or name.endswith("/") or name in {".", ".."}:
+            return False
+        if _path_is_secret(name, workspace) or name not in approved:
+            return False
+    return True
+
+
+def _normalized_path(arg: str, workspace: Path | None) -> str:
+    body = _concrete_path(arg) or arg
+    path = Path(body)
+    if workspace is not None and path.is_absolute():
+        try:
+            path = path.resolve().relative_to(workspace.resolve())
+        except (OSError, ValueError):
+            return body
+    text = path.as_posix()
+    if text.startswith("./"):
+        text = text[2:]
+    return text
 
 
 def _pytest(args: list[str], workspace: Path | None) -> bool:
@@ -608,7 +735,9 @@ def _operand_exists_as_nonfile(arg: str, workspace: Path | None) -> bool:
     try:
         if candidate.is_file():
             return False
-        return candidate.exists()
+        # lexists is true for a dangling symlink. exists() would follow it
+        # and treat the broken link as a missing revision.
+        return os.path.lexists(candidate)
     except OSError:
         return False
 
