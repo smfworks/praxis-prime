@@ -12,8 +12,12 @@ from __future__ import annotations
 import importlib.util
 import shutil
 import tempfile
+from collections.abc import Callable, Collection
 from pathlib import Path
 from typing import Protocol
+
+from praxis_prime.browser.guard import BrowserFetchGuard
+from praxis_prime.policy.boundary import ReadDenied
 
 
 def playwright_available() -> bool:
@@ -49,6 +53,7 @@ class PlaywrightDriver:
         self._profile = profile_dir
         self._url = ""
         self._allow_download = False
+        self._guard: BrowserFetchGuard | None = None
         self._pw = sync_playwright().start()
         self._context = self._pw.chromium.launch_persistent_context(
             user_data_dir=str(profile_dir),
@@ -59,13 +64,22 @@ class PlaywrightDriver:
         self._page = self._context.pages[0] if self._context.pages else self._context.new_page()
         self._watch(self._page)
 
+    def arm(self, fetch_allow: Collection[str]) -> None:
+        """Install the fetch guard on every request, redirect, and subresource."""
+        self._guard = BrowserFetchGuard(fetch_allow)
+        self._context.route("**/*", self._guard.handle_route)
+
     def navigate(self, url: str) -> str:
         self._allow_download = False
-        response = self._page.goto(url, wait_until="domcontentloaded", timeout=20_000)
-        self._url = self._page.url
-        status = response.status if response is not None else 0
-        title = self._page.title()
-        return f"url: {self._url}\nstatus: {status}\ntitle: {title}"
+
+        def _go() -> str:
+            response = self._page.goto(url, wait_until="domcontentloaded", timeout=20_000)
+            self._url = self._page.url
+            status = response.status if response is not None else 0
+            title = self._page.title()
+            return f"url: {self._url}\nstatus: {status}\ntitle: {title}"
+
+        return self._guarded_call(_go)
 
     def snapshot(self) -> str:
         try:
@@ -74,9 +88,12 @@ class PlaywrightDriver:
             return self.extract_text()
 
     def click(self, selector: str) -> str:
-        self._page.click(selector, timeout=5_000)
-        self._url = self._page.url
-        return f"clicked {selector}\nurl: {self._url}"
+        def _click() -> str:
+            self._page.click(selector, timeout=5_000)
+            self._url = self._page.url
+            return f"clicked {selector}\nurl: {self._url}"
+
+        return self._guarded_call(_click)
 
     def type_text(self, selector: str, text: str) -> str:
         self._page.fill(selector, text, timeout=5_000)
@@ -111,6 +128,19 @@ class PlaywrightDriver:
 
     def current_url(self) -> str:
         return self._url
+
+    def _guarded_call(self, action: Callable[[], str]) -> str:
+        if self._guard is not None:
+            self._guard.denied.clear()
+        try:
+            return action()
+        except ReadDenied:
+            raise
+        except Exception as exc:
+            denial = None if self._guard is None else self._guard.take_denial()
+            if denial is not None:
+                raise denial from exc
+            raise
 
     def _watch(self, page: object) -> None:
         def _gate(download: object) -> None:

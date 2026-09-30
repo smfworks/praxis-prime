@@ -14,6 +14,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
+from praxis_prime.browser.guard import browser_fetch_allow
 from praxis_prime.tools.builtin import validate_fetch_url
 from praxis_prime.tools.registry import PreparedCall, Risk
 
@@ -114,7 +115,7 @@ def classify_browser(
 
 def check_url(url: str, policy: BrowserPolicy) -> str:
     """Return the URL when the host is allowed. Raise ``ValueError`` when it is not."""
-    cleaned = validate_fetch_url(url, fetch_allow=policy.fetch_allow)
+    cleaned = validate_fetch_url(url, fetch_allow=browser_fetch_allow(policy.fetch_allow))
     host = (urlparse(cleaned).hostname or "").lower().rstrip(".")
     if not host:
         raise ValueError("browser URL needs a host")

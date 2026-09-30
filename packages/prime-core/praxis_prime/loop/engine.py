@@ -13,6 +13,7 @@ import asyncio
 import re
 from collections.abc import AsyncIterator, Callable, Iterator, Mapping
 from pathlib import Path
+from urllib.parse import urlparse, urlunparse
 
 from praxis_prime.approvals.gate import (
     ApprovalDecision,
@@ -635,5 +636,15 @@ def _redact(arguments: Mapping[str, object]) -> dict[str, str]:
         if _SECRET_KEY.search(name):
             cleaned[name] = "[redacted]"
         else:
-            cleaned[name] = _short(str(value), 180)
+            cleaned[name] = _redact_text(str(value))
     return cleaned
+
+
+def _redact_text(text: str) -> str:
+    """Drop query strings and fragments so a fetched token is not audited."""
+    stripped = text.strip()
+    parsed = urlparse(stripped)
+    if parsed.scheme in {"http", "https"} and (parsed.query or parsed.fragment):
+        query = "[redacted]" if parsed.query else ""
+        stripped = urlunparse(parsed._replace(query=query, fragment=""))
+    return _short(stripped, 180)
