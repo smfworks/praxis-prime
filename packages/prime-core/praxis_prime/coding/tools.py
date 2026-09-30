@@ -16,7 +16,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from praxis_prime.policy.boundary import (
@@ -29,7 +29,7 @@ from praxis_prime.policy.boundary import (
     is_secret_path,
     read_confined_bytes,
     readable_file,
-    secret_inode_set,
+    secret_scan,
 )
 from praxis_prime.tools.builtin import builtin_registry
 from praxis_prime.tools.registry import PreparedCall, Risk, Tool, ToolContext, ToolRegistry
@@ -266,7 +266,7 @@ def execute_glob(arguments: Mapping[str, object], context: ToolContext) -> str:
     assert_readable(base, requested=Path(raw_path), cache=context.inode_cache)
     if not base.is_dir():
         raise ValueError(f"not a directory: {base}")
-    inodes = secret_inode_set(context.inode_cache)
+    inodes, capped = secret_scan(context.inode_cache)
     matches: list[str] = []
     for path in sorted(base.glob(pattern)):
         if _skipped(path) or is_secret_path(path):
@@ -275,7 +275,13 @@ def execute_glob(arguments: Mapping[str, object], context: ToolContext) -> str:
             resolved = path.resolve(strict=False)
         except (OSError, RuntimeError, ValueError):
             continue
-        if not readable_file(resolved, cwd=context.cwd, access=access, inodes=inodes):
+        if not readable_file(
+            resolved,
+            cwd=context.cwd,
+            access=access,
+            inodes=inodes,
+            capped_roots=capped,
+        ):
             if not (resolved.is_dir() and not is_secret_path(resolved)):
                 continue
             try:
@@ -577,8 +583,8 @@ def _python_grep(
     except re.error as exc:
         raise ValueError(f"invalid grep pattern: {exc}") from exc
     lines: list[str] = []
-    inodes = secret_inode_set(cache)
-    for path in _search_files(base, cwd=cwd, access=access, inodes=inodes):
+    inodes, capped = secret_scan(cache)
+    for path in _search_files(base, cwd=cwd, access=access, inodes=inodes, capped_roots=capped):
         try:
             data = read_confined_bytes(
                 path,
@@ -607,9 +613,16 @@ def _search_files(
     cwd: str,
     access: ReadAccess,
     inodes: set[tuple[int, int]],
+    capped_roots: Sequence[Path] = (),
 ) -> list[Path]:
     if base.is_file() or base.is_symlink():
-        if readable_file(base, cwd=cwd, access=access, inodes=inodes):
+        if readable_file(
+            base,
+            cwd=cwd,
+            access=access,
+            inodes=inodes,
+            capped_roots=capped_roots,
+        ):
             return [base.resolve(strict=False)]
         return []
     found: list[Path] = []
@@ -627,7 +640,13 @@ def _search_files(
         dirnames[:] = kept
         for name in filenames:
             path = Path(dirpath) / name
-            if not readable_file(path, cwd=cwd, access=access, inodes=inodes):
+            if not readable_file(
+                path,
+                cwd=cwd,
+                access=access,
+                inodes=inodes,
+                capped_roots=capped_roots,
+            ):
                 continue
             try:
                 found.append(path.resolve(strict=False))

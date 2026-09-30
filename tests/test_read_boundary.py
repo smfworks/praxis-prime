@@ -207,25 +207,42 @@ def test_hardlink_to_a_known_secret_is_rejected(tmp_path: Path, monkeypatch):
     assert SECRET not in str(denial)
 
 
-def test_inode_scan_cap_denies_the_read(tmp_path: Path, monkeypatch, caplog):
-    ssh = tmp_path / "ssh"
-    ssh.mkdir()
-    for name in ("id_rsa", "id_ed25519", "id_ecdsa", "id_dsa"):
-        (ssh / name).write_text("x", encoding="utf-8")
+def test_named_secret_cap_denies_only_that_tree(tmp_path: Path, monkeypatch, caplog):
+    """A named walk that hits the secret-file cap denies that tree only.
+
+    Inodes already recorded still match hard links. A hard link of a secret
+    the walk did not reach, stored outside the tree, stays readable.
+    """
+    profile = tmp_path / "chromium"
+    profile.mkdir()
+    (profile / "Login Data").write_text(SECRET, encoding="utf-8")
+    (profile / "Cookies").write_text(SECRET, encoding="utf-8")
+    nested = profile / "Default"
+    nested.mkdir()
+    missed = nested / "Web Data"
+    missed.write_text(SECRET, encoding="utf-8")
+    plain = nested / "Preferences"
+    plain.write_text("plain\n", encoding="utf-8")
     root = tmp_path / "ws"
     root.mkdir()
     (root / "note.txt").write_text("hello\n", encoding="utf-8")
-    monkeypatch.setattr("praxis_prime.policy.boundary._inode_candidates", lambda: [ssh])
+    os.link(profile / "Login Data", root / "login.txt")
+    os.link(missed, root / "missed.txt")
+    monkeypatch.setattr("praxis_prime.policy.boundary._inode_candidates", lambda: [profile])
     monkeypatch.setattr("praxis_prime.policy.boundary._MAX_INODE_FILES", 2)
+    ctx = _ctx(root, ReadAccess(allow_paths=(str(profile),)))
     with caplog.at_level(logging.WARNING, logger="praxis_prime.policy.boundary"):
-        denial = _denied(execute_read_file, {"path": "note.txt"}, _ctx(root))
-    assert denial.code == "inode_scan_capped"
-    assert "hello" not in str(denial)
-    assert "cap" in caplog.text.lower()
-    assert "denying the read" in caplog.text.lower()
+        assert execute_read_file({"path": "note.txt"}, ctx) == "hello\n"
+        assert execute_read_file({"path": "missed.txt"}, ctx) == SECRET
+    assert "secret-file cap" in caplog.text
+    assert "denying reads under that tree" in caplog.text
+    denial = _denied(execute_read_file, {"path": str(plain)}, ctx)
+    assert denial.code == "secret_path"
+    assert _denied(execute_read_file, {"path": "login.txt"}, ctx).code == "secret_path"
 
     monkeypatch.setattr("praxis_prime.policy.boundary._MAX_INODE_FILES", 4)
-    assert execute_read_file({"path": "note.txt"}, _ctx(root)) == "hello\n"
+    assert execute_read_file({"path": str(plain)}, ctx) == "plain\n"
+    assert _denied(execute_read_file, {"path": "missed.txt"}, ctx).code == "secret_path"
 
 
 def test_profile_cache_does_not_trip_the_inode_cap(tmp_path: Path, monkeypatch):
@@ -249,23 +266,37 @@ def test_profile_cache_does_not_trip_the_inode_cap(tmp_path: Path, monkeypatch):
     assert SECRET not in str(denial)
 
 
-def test_skipped_profile_secret_still_fails_closed(tmp_path: Path, monkeypatch, caplog):
-    profile = tmp_path / "chromium"
-    profile.mkdir()
-    for name in ("Login Data", "Cookies", "Web Data", "key4.db"):
-        (profile / name).write_text("x", encoding="utf-8")
-    for index in range(10):
-        (profile / f"cache-{index}").write_text("x", encoding="utf-8")
+def test_snap_directory_is_entry_budgeted(tmp_path: Path, monkeypatch, caplog):
+    home = tmp_path / "home"
+    snap = home / "snap" / "brave"
+    snap.mkdir(parents=True)
+    for index in range(5):
+        (snap / f"n{index}").write_text("x", encoding="utf-8")
     root = tmp_path / "ws"
     root.mkdir()
-    (root / "note.txt").write_text("hello\n", encoding="utf-8")
-    monkeypatch.setattr("praxis_prime.policy.boundary._inode_candidates", lambda: [profile])
-    monkeypatch.setattr("praxis_prime.policy.boundary._MAX_INODE_FILES", 2)
+    (root / "hello.txt").write_text("hello\n", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    monkeypatch.setattr("praxis_prime.policy.boundary._inode_candidates", lambda: [snap])
+    monkeypatch.setattr("praxis_prime.policy.boundary._MAX_SCAN_ENTRIES", 1)
     with caplog.at_level(logging.WARNING, logger="praxis_prime.policy.boundary"):
-        denial = _denied(execute_read_file, {"path": "note.txt"}, _ctx(root))
+        denial = _denied(execute_read_file, {"path": "hello.txt"}, _ctx(root))
     assert denial.code == "inode_scan_capped"
+    assert "directory-entry cap" in caplog.text
     assert "hello" not in str(denial)
-    assert "secret-file cap" in caplog.text
+
+
+def test_ordinary_directory_has_no_entry_budget(tmp_path: Path, monkeypatch):
+    folder = tmp_path / "notes"
+    folder.mkdir()
+    for index in range(5):
+        (folder / f"n{index}").write_text("x", encoding="utf-8")
+    root = tmp_path / "ws"
+    root.mkdir()
+    (root / "hello.txt").write_text("hello\n", encoding="utf-8")
+    monkeypatch.setattr("praxis_prime.policy.boundary._inode_candidates", lambda: [folder])
+    monkeypatch.setattr("praxis_prime.policy.boundary._MAX_SCAN_ENTRIES", 1)
+    assert execute_read_file({"path": "hello.txt"}, _ctx(root)) == "hello\n"
 
 
 def test_kube_cache_does_not_trip_the_inode_cap(tmp_path: Path, monkeypatch):
@@ -460,6 +491,13 @@ def test_snap_revision_profile_denies_direct_reads_and_hardlinks(
         denial = _denied(execute_read_file, {"path": str(path)}, ctx)
         assert denial.code == "secret_path"
         assert SECRET not in str(denial)
+    # The whole snap prefix is a direct-read deny, so a plain file there is
+    # secret by path. A second walk of ``current`` would still trip the cap.
+    found, capped = boundary_mod.secret_scan()
+    assert capped == ()
+    for source in (login, cookies):
+        st = source.stat()
+        assert (st.st_dev, st.st_ino) in found
     assert execute_read_file({"path": "hello.txt"}, ctx) == "hello\n"
     for name in ("login.txt", "cookies.txt"):
         denial = _denied(execute_read_file, {"path": name}, ctx)
@@ -487,6 +525,24 @@ def test_symlinked_home_still_denies_snap_and_flatpak(tmp_path: Path, monkeypatc
     assert is_secret_path(flatpak)
     assert is_secret_path(via_link)
     assert not is_secret_path(workspace)
+
+
+def test_relative_xdg_config_home_is_ignored(tmp_path: Path, monkeypatch):
+    home = tmp_path / "home"
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", "xdg")
+    relative = tmp_path / "xdg" / "vivaldi" / "Default" / "Login Data"
+    relative.parent.mkdir(parents=True)
+    relative.write_text(SECRET, encoding="utf-8")
+    native = home / ".config" / "vivaldi" / "Default" / "Login Data"
+    native.parent.mkdir(parents=True)
+    native.write_text(SECRET, encoding="utf-8")
+    assert not is_secret_path(relative)
+    assert is_secret_path(native)
+    found = set(_inode_candidates())
+    assert tmp_path / "xdg" / "vivaldi" not in found
+    assert home / ".config" / "vivaldi" in found
 
 
 def test_xdg_config_home_browser_profile_is_denied(tmp_path: Path, monkeypatch):
@@ -866,7 +922,7 @@ def test_ssh_symlink_to_home_over_budget_denies_top_level_key(
     assert SECRET not in str(denial)
 
 
-def test_ssh_symlink_to_usr_over_budget_skips_the_walk(tmp_path: Path, monkeypatch, caplog):
+def test_ssh_symlink_to_usr_over_budget_fails_closed(tmp_path: Path, monkeypatch, caplog):
     home = tmp_path / "home"
     link = home / ".ssh"
     link.parent.mkdir()
@@ -878,9 +934,11 @@ def test_ssh_symlink_to_usr_over_budget_skips_the_walk(tmp_path: Path, monkeypat
     monkeypatch.setattr("praxis_prime.policy.boundary._inode_candidates", lambda: [link])
     monkeypatch.setattr("praxis_prime.policy.boundary._MAX_SCAN_ENTRIES", 1)
     with caplog.at_level(logging.WARNING, logger="praxis_prime.policy.boundary"):
-        assert execute_read_file({"path": "hello.txt"}, _ctx(root)) == "hello\n"
-    assert "skipping inode walk" in caplog.text
-    assert "inode_scan_capped" not in caplog.text
+        denial = _denied(execute_read_file, {"path": "hello.txt"}, _ctx(root))
+    assert denial.code == "inode_scan_capped"
+    assert "directory-entry cap" in caplog.text
+    assert "skipping inode walk" not in caplog.text
+    assert "hello" not in str(denial)
 
 
 def test_ssh_symlink_under_usr_over_budget_fails_closed(tmp_path: Path, monkeypatch, caplog):

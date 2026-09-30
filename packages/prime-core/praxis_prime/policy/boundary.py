@@ -352,8 +352,14 @@ def inode_is_secret(
         return False
     if not stat.S_ISREG(st.st_mode):
         return False
-    known = secret_inode_set(cache) if inodes is None else inodes
-    return (st.st_dev, st.st_ino) in known
+    roots: tuple[Path, ...] = ()
+    if inodes is None:
+        inodes, roots = _load_secret_scan(cache)
+    elif cache is not None and cache.ready:
+        roots = cache.capped_roots
+    if _under_capped_root(path, roots):
+        return True
+    return (st.st_dev, st.st_ino) in inodes
 
 
 class InodeScanCache:
@@ -368,12 +374,21 @@ class InodeScanCache:
     def __init__(self) -> None:
         self.ready = False
         self.found: set[tuple[int, int]] | None = None
+        self.capped_roots: tuple[Path, ...] = ()
         self.error: ReadDenied | None = None
 
     def clear(self) -> None:
         self.ready = False
         self.found = None
+        self.capped_roots = ()
         self.error = None
+
+
+def secret_scan(
+    cache: InodeScanCache | None = None,
+) -> tuple[set[tuple[int, int]], tuple[Path, ...]]:
+    """Secret inodes, and roots whose named walk hit the secret-file cap."""
+    return _load_secret_scan(cache)
 
 
 def secret_inode_set(cache: InodeScanCache | None = None) -> set[tuple[int, int]]:
@@ -381,18 +396,28 @@ def secret_inode_set(cache: InodeScanCache | None = None) -> set[tuple[int, int]
 
     Credential directories contribute every file except ``.kube/cache`` and
     ``.kube/http-cache`` directly under ``.kube``. Browser and gcloud trees
-    contribute secret-named files. A root that cannot be finished denies the
-    read. ``cache`` reuses one scan until the loop clears it. ``found`` is
-    published before ``ready``.
+    contribute secret-named files. A root that cannot be finished under the
+    entry budget or the credential-file cap denies the read. A named walk
+    that hits the secret-file cap instead records that root: reads under it
+    are denied, and inodes already seen stay secret, but other reads continue.
+    ``cache`` reuses one scan until the loop clears it. ``found`` is published
+    before ``ready``.
     """
+    found, _roots = _load_secret_scan(cache)
+    return found
+
+
+def _load_secret_scan(
+    cache: InodeScanCache | None,
+) -> tuple[set[tuple[int, int]], tuple[Path, ...]]:
     if cache is not None and cache.ready:
         if cache.error is not None:
             raise cache.error
         if cache.found is None:
-            return set()
-        return cache.found
+            return set(), cache.capped_roots
+        return cache.found, cache.capped_roots
     try:
-        found = _scan_secret_inodes()
+        found, capped = _scan_secret_inodes()
     except ReadDenied as exc:
         if cache is not None:
             cache.error = exc
@@ -400,18 +425,23 @@ def secret_inode_set(cache: InodeScanCache | None = None) -> set[tuple[int, int]
         raise
     if cache is not None:
         cache.found = found
+        cache.capped_roots = capped
         cache.ready = True
-    return found
+    return found, capped
 
 
-def _scan_secret_inodes() -> set[tuple[int, int]]:
+def _scan_secret_inodes() -> tuple[set[tuple[int, int]], tuple[Path, ...]]:
     found: set[tuple[int, int]] = set()
+    capped: list[Path] = []
     for path in _inode_candidates():
         hit = _collect_inodes(path, found)
-        if hit is not None:
-            limit, kind = hit
-            _refuse_capped_inode_scan(limit, kind)
-    return found
+        if hit is None:
+            continue
+        if hit.scoped:
+            capped.append(hit.root)
+            continue
+        _refuse_capped_inode_scan(hit.limit, hit.kind)
+    return found, tuple(capped)
 
 
 def assert_readable(
@@ -451,7 +481,8 @@ def read_confined_bytes(
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):
             raise ReadDenied("refusing to read a non-regular file", "outside_workspace")
-        if (st.st_dev, st.st_ino) in secret_inode_set(cache):
+        found, capped = _load_secret_scan(cache)
+        if _under_capped_root(path, capped) or (st.st_dev, st.st_ino) in found:
             raise ReadDenied(
                 f"refusing to read secret file {path.name}",
                 "secret_path",
@@ -471,6 +502,7 @@ def readable_file(
     cwd: str,
     access: ReadAccess,
     inodes: set[tuple[int, int]],
+    capped_roots: Sequence[Path] = (),
 ) -> bool:
     """False when a search result is secret, outside the workspace, or unsafe."""
     if any(part in _SKIP_WALK for part in path.parts):
@@ -485,7 +517,13 @@ def readable_file(
         return False
     if not _inside_any(resolved, roots):
         return False
-    if is_secret_path(path) or is_secret_path(resolved) or inode_is_secret(resolved, inodes):
+    if (
+        _under_capped_root(path, capped_roots)
+        or _under_capped_root(resolved, capped_roots)
+        or is_secret_path(path)
+        or is_secret_path(resolved)
+        or inode_is_secret(resolved, inodes)
+    ):
         return False
     try:
         st = path.stat(follow_symlinks=True)
@@ -720,17 +758,35 @@ def _home_browser_prefix(parts: Sequence[str]) -> bool:
     return False
 
 
-def _xdg_config_browser(parts: Sequence[str]) -> bool:
-    """True when ``parts`` is a native browser dir under ``$XDG_CONFIG_HOME``.
+def _absolute_xdg_config_home() -> Path | None:
+    """Absolute ``$XDG_CONFIG_HOME``, or None when unset, empty, or relative.
 
-    Unset ``XDG_CONFIG_HOME`` stays on the ``~/.config/<name>`` rows. A set
-    value is checked both as given and resolved.
+    The XDG base directory spec says a relative value is invalid and must be
+    ignored. Native ``~/.config/<name>`` rows cover that fallback.
     """
     raw = os.environ.get("XDG_CONFIG_HOME")
     if not raw:
+        return None
+    try:
+        path = Path(raw).expanduser()
+    except (OSError, RuntimeError, ValueError):
+        return None
+    if not path.is_absolute():
+        return None
+    return path
+
+
+def _xdg_config_browser(parts: Sequence[str]) -> bool:
+    """True when ``parts`` is a native browser dir under ``$XDG_CONFIG_HOME``.
+
+    Unset, empty, or relative ``XDG_CONFIG_HOME`` stays on the ``~/.config``
+    rows. An absolute value is checked both as given and resolved.
+    """
+    config_home = _absolute_xdg_config_home()
+    if config_home is None:
         return False
     try:
-        prefixes = _path_part_prefixes(Path(raw).expanduser())
+        prefixes = _path_part_prefixes(config_home)
     except (OSError, RuntimeError, ValueError):
         return False
     for prefix in prefixes:
@@ -749,13 +805,9 @@ def _special_file(path: Path) -> bool:
 
 
 def _xdg_browser_roots(home: Path) -> list[Path]:
-    """Native browser dirs under ``$XDG_CONFIG_HOME`` when that is not ``~/.config``."""
-    raw = os.environ.get("XDG_CONFIG_HOME")
-    if not raw:
-        return []
-    try:
-        config_home = Path(raw).expanduser()
-    except (OSError, RuntimeError, ValueError):
+    """Native browser dirs under an absolute ``$XDG_CONFIG_HOME`` other than ``~/.config``."""
+    config_home = _absolute_xdg_config_home()
+    if config_home is None:
         return []
     if _same_resolved(config_home, home / ".config"):
         return []
@@ -859,6 +911,21 @@ def _same_dir(left: Path, right: Path) -> bool:
     return os.path.normcase(os.path.abspath(left)) == os.path.normcase(os.path.abspath(right))
 
 
+@dataclass(frozen=True, slots=True)
+class _CapHit:
+    """A scan root that stopped early.
+
+    ``scoped`` is the named secret-file cap: reads under ``root`` are denied
+    and inodes already recorded stay secret, but the rest of the scan
+    continues. Anything else fails the whole scan closed.
+    """
+
+    limit: int
+    kind: str
+    scoped: bool
+    root: Path
+
+
 def _refuse_capped_inode_scan(limit: int, kind: str) -> None:
     message = (
         f"secret inode scan hit the {limit} {kind} cap; "
@@ -866,32 +933,6 @@ def _refuse_capped_inode_scan(limit: int, kind: str) -> None:
     )
     _log.warning(message)
     raise ReadDenied(message, "inode_scan_capped")
-
-
-def _named_root_budget_skips(path: Path, root: Path) -> bool:
-    """True when a credential symlink to exactly ``/usr`` may be skipped.
-
-    ``/usr`` is larger than the entry budget and is not a secret store.
-    A credential root that resolves to ``$HOME``, or to anything under
-    ``/usr``, still fails closed once the budget is exceeded, so a top-level
-    key such as ``id_ed25519`` is not left readable. Every other root fails
-    closed too.
-    """
-    if path.name.lower() not in _CREDENTIAL_ROOTS:
-        return False
-    try:
-        posix = root.resolve(strict=False).as_posix()
-    except (OSError, RuntimeError, ValueError):
-        return False
-    return posix == "/usr"
-
-
-def _warn_skipped_inode_root(path: Path, limit: int) -> None:
-    message = (
-        f"skipping inode walk of {path.name} after {limit} directory entries; "
-        "direct reads of secret names under that tree are still denied"
-    )
-    _log.warning(message)
 
 
 def _contains(root: Path, path: Path) -> bool:
@@ -905,6 +946,10 @@ def _contains(root: Path, path: Path) -> bool:
 
 def _inside_home(path: Path, home: Path) -> bool:
     return _contains(home, path)
+
+
+def _under_capped_root(path: Path, roots: Sequence[Path]) -> bool:
+    return any(_contains(root, path) for root in roots)
 
 
 def _dir_inode(path: Path) -> tuple[int, int] | None:
@@ -938,6 +983,15 @@ def _is_unbounded_scan_root(path: Path) -> bool:
     return (here.st_dev, here.st_ino) == (root_stat.st_dev, root_stat.st_ino)
 
 
+def _is_browser_scan_root(path: Path) -> bool:
+    """True for a native, snap, flatpak, or ``$XDG_CONFIG_HOME`` browser root."""
+    home = Path.home()
+    candidates = [home.joinpath(*profile.scan) for profile in _BROWSER_PROFILES]
+    candidates.extend(_xdg_browser_roots(home))
+    candidates.append(home / ".mozilla")
+    return any(_same_resolved(path, candidate) for candidate in candidates)
+
+
 def _resolve_scan_root(path: Path) -> tuple[Path, bool] | None:
     """Return the path to scan, and whether the walk has an entry budget.
 
@@ -946,15 +1000,18 @@ def _resolve_scan_root(path: Path) -> tuple[Path, bool] | None:
     ``/dev`` are walked with ``_MAX_SCAN_ENTRIES``, as is any other symlink
     outside ``$HOME``. A symlink that resolves to ``$HOME`` itself uses that
     budget too, so ``~/.ssh -> $HOME`` does not walk the home directory
-    without a cap.
+    without a cap. Browser scan roots use the same entry budget even when
+    they are real directories, so ``~/snap/<app>`` cannot walk without a cap.
+    Hitting that budget fails the scan closed, the same as a credential root.
     """
     try:
+        browser = _is_browser_scan_root(path)
         if not path.is_symlink():
-            return path, False
+            return path, browser
         resolved = path.resolve(strict=False)
         if _is_unbounded_scan_root(resolved):
             return None
-        return resolved, _scan_root_needs_budget(resolved, Path.home())
+        return resolved, browser or _scan_root_needs_budget(resolved, Path.home())
     except (OSError, RuntimeError, ValueError):
         return None
 
@@ -981,10 +1038,13 @@ def _file_counts(name: str, directory: Path, mode: str) -> bool:
     return _inode_file_is_secret(name, directory)
 
 
-def _collect_inodes(
-    path: Path, found: set[tuple[int, int]]
-) -> tuple[int, str] | None:
-    """Scan one candidate. Return ``(limit, kind)`` when a candidate was skipped."""
+def _collect_inodes(path: Path, found: set[tuple[int, int]]) -> _CapHit | None:
+    """Scan one candidate.
+
+    Return a hit when the walk stops early. A named secret-file cap is
+    scoped to that root. An entry-budget or credential-file cap is not:
+    the caller fails the whole scan closed.
+    """
     resolved = _resolve_scan_root(path)
     if resolved is None:
         return None
@@ -1025,15 +1085,27 @@ def _collect_inodes(
         if budget is not None:
             entries += len(dirnames) + len(filenames)
             if entries > budget:
-                if _named_root_budget_skips(path, root):
-                    _warn_skipped_inode_root(path, budget)
-                    return None
-                return budget, "directory-entry"
+                return _CapHit(budget, "directory-entry", False, root)
         for name in filenames:
             if not _file_counts(name, directory, mode):
                 continue
             if count >= cap:
-                return cap, "secret-file"
+                # Named trees (browser and gcloud profiles) can hold more
+                # secret-named files than ``_MAX_INODE_FILES``. Stop this
+                # root only: reads under it are denied, inodes already
+                # recorded still match hard links, and a read outside the
+                # root is allowed. A hard link of a file this walk did not
+                # reach is not caught. Credential directories keep the
+                # global fail-closed file cap.
+                if mode == "named":
+                    _log.warning(
+                        "secret inode scan hit the %s secret-file cap under %s; "
+                        "denying reads under that tree",
+                        cap,
+                        root,
+                    )
+                    return _CapHit(cap, "secret-file", True, root)
+                return _CapHit(cap, "secret-file", False, root)
             count = _add_inode(directory / name, found, count)
     return None
 
