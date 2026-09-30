@@ -140,14 +140,53 @@ def build_bwrap_argv(
         "--chdir",
         "/workspace",
     ]
+    mounts: list[tuple[Path, str]] = [(work, "/workspace")]
     for optional in ("/usr", "/bin", "/lib", "/lib64", "/etc"):
         if Path(optional).exists():
             argv.extend(["--ro-bind", optional, optional])
+            mounts.append((Path(optional), optional))
     for src, dest in ro_binds or []:
         if Path(src).exists():
             argv.extend(["--ro-bind", src, dest])
+            mounts.append((Path(src), dest))
+    argv.extend(_data_dir_mask(mounts))
     argv.extend(["--", "bash", "--noprofile", "--norc", "-c", command])
     return argv
+
+
+def _data_dir_mask(mounts: list[tuple[Path, str]]) -> list[str]:
+    """Hide the account data directory when a bind mount contains it.
+
+    A later ``--tmpfs`` covers that path inside the sandbox, so no command
+    string can read profiles, backups, or ``accounts.db``. The directory is
+    left alone when it is not on any mount.
+    """
+    from praxis_prime.policy.boundary import _data_root
+    from praxis_prime.statfile import StatKind, lstat_kind
+
+    root = _data_root()
+    if root is None:
+        return []
+    try:
+        data = Path(os.path.realpath(root, strict=False))
+    except OSError:
+        return []
+    if lstat_kind(data) is not StatKind.DIR:
+        return []
+    masked: list[str] = []
+    seen: set[str] = set()
+    for src, dest in mounts:
+        try:
+            src_real = Path(os.path.realpath(src, strict=False))
+            relative = data.relative_to(src_real)
+        except (OSError, ValueError):
+            continue
+        sandbox = str(Path(dest) / relative)
+        if sandbox in seen:
+            continue
+        seen.add(sandbox)
+        masked.extend(["--tmpfs", sandbox])
+    return masked
 
 
 def run_bwrap(

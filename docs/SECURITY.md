@@ -51,3 +51,7 @@ The session cookie is `HttpOnly`, `Secure`, and `SameSite=Strict`. Browsers send
 `account passwd`, `account disable`, and `account role` revoke that account's sessions and WebSocket tickets. A ticket is bound to the session that minted it, so logout invalidates a ticket that was issued before the logout. An open WebSocket is checked again on the next frame. `profile unassign` removes a membership; the next chat on that profile is refused.
 
 `gateway.bearer` defaults to `true`. After an account exists, set `bearer = false` in `config.toml` and restart to refuse the token. Cookie sessions and WebSocket tickets still work. Before any account exists the flag does not apply, so the gateway is not left open and the first-run token still works.
+
+## Shell and the data directory
+
+Bubblewrap mounts that contain the account data directory get an empty tmpfs over that directory, so a shell command cannot read `profiles/`, `backups/`, or `accounts.db` by changing directory, expanding a glob, or calling `git grep`. The token denylist still refuses the obvious forms. Without bubblewrap the card says `HOST: runs unsandboxed`, and a command whose working directory or tokens can resolve into the data directory is refused on that card and is not run. `read_file` of `org/policy.toml` stays allowed.
