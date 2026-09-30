@@ -6,11 +6,14 @@ cancels that turn. Ctrl-D leaves the chat.
 
 from __future__ import annotations
 
+import select
 import sys
 from collections.abc import Callable
 
 from praxis_prime import __version__
+from praxis_prime.approvals.card import format_approval_card
 from praxis_prime.approvals.gate import ApprovalDecision, ApprovalRequest
+from praxis_prime.gateway.client import GatewayClient, GatewayError
 from praxis_prime.loop.control import TurnControl
 from praxis_prime.loop.events import StatusEvent, TurnEnded
 from praxis_prime.router.types import TextDelta
@@ -257,3 +260,201 @@ def _paint(text: str, code: str, enabled: bool) -> str:
     if not enabled:
         return text
     return f"\033[{code}m{text}\033[0m"
+
+
+def run_remote_repl(
+    client: GatewayClient,
+    *,
+    read_line: ReadLine,
+    write: Write,
+    color: bool = False,
+    interactive: bool = False,
+) -> int:
+    """Chat through a running daemon. Approvals can be answered here or elsewhere."""
+    try:
+        body = client.status()
+    except GatewayError as exc:
+        write(f"praxis-prime chat: {exc}\n")
+        return 1
+    model = str(body.get("model", ""))
+    write(_banner(model, "daemon"))
+    session_id: str | None = None
+    while True:
+        try:
+            line = read_line("you> ")
+        except EOFError:
+            write("\n")
+            return 0
+        except KeyboardInterrupt:
+            write("\n")
+            return 0
+        command = line.strip()
+        if not command:
+            continue
+        if command in {"/quit", "/exit"}:
+            return 0
+        if command == "/help":
+            write(HELP)
+            continue
+        if command == "/model":
+            try:
+                current = client.status()
+            except GatewayError as exc:
+                write(f"{exc}\n")
+                continue
+            write(f"model {current.get('model', '')}\n")
+            continue
+        if command.startswith("/model "):
+            spec = command.split(None, 1)[1].strip()
+            try:
+                chosen = client.set_model(spec)
+            except GatewayError as exc:
+                write(f"{exc}\n")
+                continue
+            write(f"model {chosen}\n")
+            continue
+        if command == "/clear":
+            if session_id:
+                try:
+                    client.drop_session(session_id)
+                except GatewayError as exc:
+                    write(f"{exc}\n")
+            session_id = None
+            write("new session\n")
+            continue
+        if command.startswith("/"):
+            write("Unknown command. Type /help.\n")
+            continue
+        decider = tty_decider(write) if interactive else None
+        try:
+            result = client.chat(
+                command,
+                session_id=session_id,
+                on_event=lambda payload: _render_remote(payload, write, color=color),
+                decider=decider,
+            )
+        except KeyboardInterrupt:
+            write("\n  (interrupt)\n")
+            continue
+        except GatewayError as exc:
+            write(f"{exc}\n")
+            continue
+        payload = result.get("payload")
+        if isinstance(payload, dict) and isinstance(payload.get("sessionId"), str):
+            session_id = payload["sessionId"]
+        write("\n")
+
+
+def run_remote_ask(
+    client: GatewayClient,
+    prompt: str,
+    *,
+    write_out: Write,
+    write_err: Write,
+    color: bool = False,
+    decider: Callable[[dict[str, object]], str | None] | None = None,
+    session_id: str | None = None,
+) -> int:
+    try:
+        result = client.chat(
+            prompt,
+            session_id=session_id,
+            on_event=lambda payload: _render_remote_ask(payload, write_out, write_err, color=color),
+            decider=decider,
+        )
+    except KeyboardInterrupt:
+        write_err("\n(turn cancelled)\n")
+        return 130
+    except GatewayError as exc:
+        write_err(f"{exc}\n")
+        return 1
+    write_out("\n")
+    payload = result.get("payload")
+    if isinstance(payload, dict):
+        if payload.get("cancelled"):
+            write_err("(turn cancelled)\n")
+            return 130
+        if payload.get("error"):
+            write_err(str(payload["error"]) + "\n")
+            return 1
+    return 0
+
+
+def tty_decider(write: Write) -> Callable[[dict[str, object]], str | None]:
+    """Non-blocking y/n/a prompt. Returns None until the user answers."""
+    state = {"id": "", "prompted": False}
+
+    def decide(approval: dict[str, object]) -> str | None:
+        approval_id = str(approval.get("id", ""))
+        if state["id"] != approval_id:
+            state["id"] = approval_id
+            state["prompted"] = False
+        if not state["prompted"]:
+            write("allow? [y/n/a] ")
+            state["prompted"] = True
+        if not _stdin_ready():
+            return None
+        try:
+            answer = sys.stdin.readline()
+        except KeyboardInterrupt:
+            return "deny"
+        return _parse_allow(answer.strip().lower(), write)
+
+    return decide
+
+
+def _parse_allow(answer: str, write: Write) -> str | None:
+    if answer in {"y", "yes"}:
+        return "allow_once"
+    if answer in {"a", "always", "always-for-session"}:
+        return "allow_session"
+    if answer in {"n", "no", ""}:
+        return "deny"
+    write("Answer y, n, or a.\n")
+    return None
+
+
+def _stdin_ready() -> bool:
+    if sys.stdin.closed:
+        return False
+    try:
+        ready, _, _ = select.select([sys.stdin], [], [], 0)
+    except (OSError, ValueError):
+        return False
+    return bool(ready)
+
+
+def _render_remote(payload: dict[str, object], write: Write, *, color: bool) -> None:
+    kind = payload.get("kind")
+    if kind == "text":
+        write(str(payload.get("text", "")))
+        return
+    if kind == "status":
+        event = StatusEvent(str(payload.get("phase", "")), str(payload.get("detail", "")))
+        write(format_status(event, color=color) + "\n")
+        return
+    if kind == "approval":
+        approval = payload.get("approval")
+        if isinstance(approval, dict):
+            write("\n" + format_approval_card(approval) + "\n")
+
+
+def _render_remote_ask(
+    payload: dict[str, object],
+    write_out: Write,
+    write_err: Write,
+    *,
+    color: bool,
+) -> None:
+    kind = payload.get("kind")
+    if kind == "text":
+        write_out(str(payload.get("text", "")))
+        return
+    if kind == "status":
+        event = StatusEvent(str(payload.get("phase", "")), str(payload.get("detail", "")))
+        write_err(format_status(event, color=color) + "\n")
+        return
+    if kind == "approval":
+        approval = payload.get("approval")
+        if isinstance(approval, dict):
+            write_err(format_approval_card(approval) + "\n")

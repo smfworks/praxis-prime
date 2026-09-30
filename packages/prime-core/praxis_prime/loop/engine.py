@@ -14,7 +14,13 @@ import re
 from collections.abc import AsyncIterator, Iterator, Mapping
 from pathlib import Path
 
-from praxis_prime.approvals.gate import ApprovalDecision, ApprovalGate, ApprovalRequest
+from praxis_prime.approvals.gate import (
+    ApprovalDecision,
+    ApprovalGate,
+    ApprovalRequest,
+    approval_actor,
+    approval_session_id,
+)
 from praxis_prime.audit.log import AuditLog
 from praxis_prime.loop.control import TurnControl
 from praxis_prime.loop.events import LoopEvent, StatusEvent, TurnEnded
@@ -258,7 +264,14 @@ class AgentLoop:
                 grant_key=verdict.grant_key,
                 sandboxed=prepared.sandboxed,
             )
-            decision = self.gate.authorize(request)
+            session_token = approval_session_id.set(self.session_id)
+            actor_token = approval_actor.set("")
+            try:
+                decision = self.gate.authorize(request)
+                actor = approval_actor.get()
+            finally:
+                approval_session_id.reset(session_token)
+                approval_actor.reset(actor_token)
             self._audit(
                 "approval",
                 decision.value,
@@ -268,6 +281,7 @@ class AgentLoop:
                     "grant_key": verdict.grant_key,
                     "arguments": _redact(call.arguments),
                     "sandboxed": prepared.sandboxed,
+                    "actor": actor,
                 },
             )
             if decision not in {ApprovalDecision.ALLOW_ONCE, ApprovalDecision.ALLOW_SESSION}:

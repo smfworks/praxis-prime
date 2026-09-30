@@ -11,6 +11,8 @@ from praxis_prime.approvals.gate import (
     ApprovalGate,
     ApprovalRequest,
     Approver,
+    approval_actor,
+    approval_session_id,
 )
 
 __all__ = [
@@ -18,4 +20,6 @@ __all__ = [
     "ApprovalGate",
     "ApprovalRequest",
     "Approver",
+    "approval_actor",
+    "approval_session_id",
 ]

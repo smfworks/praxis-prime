@@ -14,3 +14,5 @@ node_modules/
 target/
 *.tmp
 .DS_Store
+secrets.env
+secrets.env.age

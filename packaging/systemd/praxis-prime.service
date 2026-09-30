@@ -1,20 +1,28 @@
-# Placeholder user unit. Not installed by this skeleton.
-# TODO: ARCHITECTURE §26.
-# ~/.config/systemd/user/praxis-prime.service
-
+# systemd --user unit for Ubuntu 22.04+ and Arch/Omarchy.
+# Installed by `praxis-prime service install`.
+# ARCHITECTURE §26. Linger is not enabled.
 [Unit]
 Description=Praxis Prime agent daemon
+Documentation=https://github.com/smfworks/praxis-prime
 After=network-online.target graphical-session.target
 
 [Service]
+Type=simple
 ExecStart=/usr/bin/praxis-primed --config %h/.config/praxis-prime/config.toml
 Restart=on-failure
 RestartSec=3
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
+UMask=0077
 ReadWritePaths=%h/.local/share/praxis-prime %h/.local/state/praxis-prime %h/.cache/praxis-prime %t/praxis-prime
+RuntimeDirectory=praxis-prime
+StateDirectory=praxis-prime
+CacheDirectory=praxis-prime
+WorkingDirectory=%h
 Environment=PRAXIS_PRIME_LOG=info
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
 
 [Install]
 WantedBy=default.target

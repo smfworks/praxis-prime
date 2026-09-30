@@ -1,7 +1,8 @@
 """SQLite state file under the XDG data directory.
 
-Sessions and the audit log share ``prime.db``. The gateway does not open
-this file. Clients in this process are the only writers.
+Sessions and the audit log share ``prime.db``. The daemon is the writer
+when it is running. ``check_same_thread`` is off because the daemon
+serializes every use of this connection on one lock.
 
 TODO: ARCHITECTURE §10 and §18. FTS5, sqlite-vec, and a separate ``audit.db``
 are later work. This module is the MVP store.
@@ -28,7 +29,7 @@ class StateDB:
     def __init__(self, path: Path) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(self.path)
+        self.conn = sqlite3.connect(self.path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA foreign_keys=ON")

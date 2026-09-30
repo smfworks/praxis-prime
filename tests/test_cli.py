@@ -1,4 +1,4 @@
-"""CLI entry points: version, doctor, config, and the daemon stub."""
+"""CLI entry points: version, doctor, config, and the daemon bind rule."""
 
 import importlib
 import importlib.util
@@ -77,13 +77,12 @@ def test_config_command_writes_dials_off(tmp_path, capsys):
     assert profile["profile"]["dials"] == []
 
 
-def test_daemon_stub_does_not_claim_to_listen(capsys):
+def test_daemon_version_and_refuses_a_public_bind(capsys):
     assert daemon_main(["--version"]) == 0
     assert __version__ in capsys.readouterr().out
-    assert daemon_main(["--config", "/tmp/praxis-prime-does-not-exist.toml"]) == 0
-    message = capsys.readouterr().out
-    assert "not running" in message
-    assert "praxis-prime-does-not-exist.toml" in message
+    assert daemon_main(["--listen", "0.0.0.0:18790"]) == 2
+    message = capsys.readouterr().err
+    assert "loopback" in message
 
 
 def test_console_scripts_when_installed():

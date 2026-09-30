@@ -5,7 +5,7 @@
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-3776AB)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-**Status: pre-alpha.** The first milestone runs a local agent loop: terminal chat, a model router, four tools, and a session audit log. The gateway, swarm, Decision Engine, voice layer, and desktop UI are still stubs. Compliance dials still default to off.
+**Status: pre-alpha.** A local agent loop is running: terminal chat, a model router, four tools, a session audit log, and a loopback daemon (`praxis-primed`) with a WebSocket and HTTP gateway. Telegram can chat and approve. Swarm, Decision Engine, voice, and the desktop UI are still stubs. Compliance dials still default to off.
 
 Praxis Prime is an open-source, local-first autonomous AI agent for Linux, by [SMF Works](https://github.com/smfworks) (Michael Gannotti). It is the flagship evolution of [SMF Praxis](https://github.com/smfworks/smf-praxis): a governed agent that can read, research, and draft on its own, and that stops for a human when an action has consequences. Sending, deleting, spending, sharing, and publishing stay behind that approval spine. Regulatory overlays are optional dials, and they ship **off**.
 
@@ -67,9 +67,9 @@ $XDG_CONFIG_HOME/praxis-prime/config.toml
 $XDG_CONFIG_HOME/praxis-prime/policy/profile.toml
 ```
 
-With `XDG_CONFIG_HOME` unset, those paths are under `~/.config/praxis-prime/`. Every compliance dial in that file is `off`, and `policy/profile.toml` lists no active dials. The baseline approval spine is not a dial. Jarvis is disabled. The sandbox network default is `off`. The gateway address in the file is loopback `127.0.0.1:18790`, and the daemon does not bind it.
+With `XDG_CONFIG_HOME` unset, those paths are under `~/.config/praxis-prime/`. Every compliance dial in that file is `off`, and `policy/profile.toml` lists no active dials. The baseline approval spine is not a dial. Jarvis is disabled. The sandbox network default is `off`. The gateway address in the file is loopback `127.0.0.1:18790`. `praxis-primed` binds that address and refuses any other host.
 
-`praxis-primed` is a stub. It prints a message and exits. It does not listen.
+`praxis-prime daemon start` runs the daemon in the background. `chat` and `ask` attach to it when it is healthy, and run in-process when it is not (`--local` always stays in-process). `praxis-prime service install` enables the systemd user unit on Ubuntu and on Arch/Omarchy. Setup for the service and the Telegram bot is in [docs/USAGE.md](docs/USAGE.md).
 
 ## Feature overview
 
@@ -80,10 +80,10 @@ With `XDG_CONFIG_HOME` unset, those paths are under `~/.config/praxis-prime/`. E
 | Compliance dials | HIPAA, FERPA, COPPA, GDPR, 13 Praxis state packs, a new North Carolina pack, then SOC 2, EU AI Act, CCPA, PCI, NIST AI RMF, and ISO 42001. Off, monitor, or enforce. **Default off.** | Catalog and config defaults. No enforcement. [§17](docs/ARCHITECTURE.md) |
 | Agent swarms | Workers, a blackboard, and the Swarm 2.0 personas as jury lenses. | Package stub. [§15](docs/ARCHITECTURE.md) |
 | Coding-agent mode | Worktrees, diffs, tests, and `AGENTS.md` / `CLAUDE.md` / `.cursor` rules. | Package stub. [§14](docs/ARCHITECTURE.md) |
-| Gateway | One typed WebSocket protocol for CLI, TUI, web, desktop, channels, and nodes. Loopback only. | Package stub. Port reserved, not opened. [§4](docs/ARCHITECTURE.md) |
+| Gateway | One typed WebSocket protocol for CLI, TUI, web, desktop, channels, and nodes. Loopback only. | Loopback HTTP and WebSocket, token auth, Telegram channel. TUI and web UI are not served yet. [§4](docs/ARCHITECTURE.md) |
 | Jarvis voice layer | Optional wake word, local STT/TTS, Home Assistant, desktop control. Separate user service, off by default. | Package stub. [§19](docs/ARCHITECTURE.md) |
 | Desktop and web UI | One React SPA inside a Tauri 2 shell, also served by the daemon. | Source stubs, not bundled. [§21](docs/ARCHITECTURE.md) |
-| Packaging | `.deb`, APT repo, AppImage, AUR, systemd user units, Omarchy bar plugin. | Placeholders only. Nothing is published. [§26](docs/ARCHITECTURE.md), [§27](docs/ARCHITECTURE.md) |
+| Packaging | `.deb`, APT repo, AppImage, AUR, systemd user units, Omarchy bar plugin. | User unit `praxis-prime.service` installs with `praxis-prime service install`. Packages are not published. [§26](docs/ARCHITECTURE.md), [§27](docs/ARCHITECTURE.md) |
 
 The full comparison with Hermes, OpenClaw, Praxis, Swarm 2.0, and the Jev reference column is in [docs/CAPABILITY-MATRIX.md](docs/CAPABILITY-MATRIX.md).
 
