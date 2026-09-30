@@ -42,7 +42,8 @@ praxis-prime packs info law_firm
 
 - A pack cannot select an LLM or send data to a provider. Hard-coded `model` and `provider` fields are ignored and a warning is logged.
 - JavaScript, WASM, and `web/` dashboard CSS or HTML are not copied, loaded, or served. A warning is logged for each file.
-- Pack Python is not imported. Declared `praxis.verticals` entry points are recorded and skipped. The allowlist `ALLOWLISTED_ENTRY_POINTS` in `praxis_prime.packs.legacy` is empty, so nothing on that list runs today.
+- Pack Python is not imported. Declared `praxis.verticals` entry points are recorded and skipped. The allowlist `ALLOWLISTED_ENTRY_POINTS` in `praxis_prime.packs.legacy` is empty, so nothing on that list runs today. If that allowlist is ever non-empty, the import must run inside the sandbox, not in the daemon process.
+- The install directory name must be a single segment matching `^[a-z0-9][a-z0-9._-]{0,63}$` (no leading dot). Absolute names, `..`, and `/` or `\\` are refused before anything is created or deleted. Zip members are extracted one by one under that same containment check. Symlink members are refused.
 - Git URLs that use a remote helper (`ext::` and similar) are refused.
 
 ## Compliance TOML packs

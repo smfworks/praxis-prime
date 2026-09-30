@@ -10,6 +10,7 @@ TODO: ARCHITECTURE §17 and §32. Addendum A §7.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import stat
@@ -36,6 +37,9 @@ _SCAN_CODES = frozenset(
     }
 )
 _GIT_URL = re.compile(r"^(https://|http://|ssh://|git@)[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]+$")
+# One path segment. Underscore is included because public pack.json names use it
+# (law_firm, school_system). No leading dot, no slash, no backslash, max 64 chars.
+_PACK_DIR_NAME = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 _MAX_ZIP_FILES = 200
 _MAX_ZIP_BYTES = 15 * 1024 * 1024
 _PROVENANCE = "provenance.json"
@@ -78,7 +82,8 @@ def install_pack(
                 loaded,
                 provenance=replace(loaded.provenance, license="unknown"),
             )
-        destination = root / loaded.name
+        # Reject the name before rmtree, mkdir, or skill writes.
+        destination = contained_child(root, loaded.name, pack_dir=True)
         if destination.exists():
             shutil.rmtree(destination)
         destination.mkdir(parents=True)
@@ -259,24 +264,28 @@ def _find_distribution(public: PublicPack) -> object | None:
 
 def _copy_data(source: Path, dest: Path, pack: LegacyPack) -> None:
     manifest = _manifest_file(source, pack)
-    shutil.copy2(manifest, dest / "pack.json")
+    shutil.copy2(manifest, contained_child(dest, "pack.json"))
     pack_dir = manifest.parent
     for record in pack.knowledge:
         relative = Path(record.filename)
-        if relative.is_absolute() or ".." in relative.parts:
-            continue
-        origin = pack_dir / relative
+        if not record.filename or relative.is_absolute() or ".." in relative.parts:
+            raise PackError(f"refusing knowledge path {record.filename!r}")
+        origin = (pack_dir / relative).resolve()
+        try:
+            origin.relative_to(pack_dir.resolve())
+        except ValueError as exc:
+            raise PackError(f"refusing knowledge path {record.filename!r}") from exc
         if not origin.is_file():
             continue
-        target = dest / relative
+        target = contained_child(dest, *relative.parts)
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(origin, target)
     license_file = _find_named(source, pack_dir, ("LICENSE", "LICENSE.txt", "LICENSE.md"))
     if license_file is not None:
-        shutil.copy2(license_file, dest / license_file.name)
+        shutil.copy2(license_file, contained_child(dest, license_file.name))
     notice = _find_named(source, pack_dir, ("NOTICE", "NOTICE.md"))
     if notice is not None:
-        shutil.copy2(notice, dest / notice.name)
+        shutil.copy2(notice, contained_child(dest, notice.name))
 
 
 def _manifest_file(source: Path, pack: LegacyPack) -> Path:
@@ -310,9 +319,10 @@ def _find_named(root: Path, pack_dir: Path, names: tuple[str, ...]) -> Path | No
 
 def _write_skills(dest: Path, pack: LegacyPack) -> None:
     for skill in pack.skills:
-        folder = dest / "skills" / "pack" / pack.name / skill.name
+        folder = contained_child(dest, "skills", "pack", pack.name, skill.name)
         folder.mkdir(parents=True, exist_ok=True)
-        (folder / "SKILL.md").write_text(skill_markdown(skill), encoding="utf-8")
+        skill_file = contained_child(folder, "SKILL.md")
+        skill_file.write_text(skill_markdown(skill), encoding="utf-8")
 
 
 def _write_provenance(dest: Path, pack: LegacyPack) -> None:
@@ -329,7 +339,10 @@ def _write_provenance(dest: Path, pack: LegacyPack) -> None:
         "declared_entry_points": list(pack.declared_entry_points),
         "warnings": [{"code": item.code, "message": item.message} for item in pack.warnings],
     }
-    (dest / _PROVENANCE).write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    contained_child(dest, _PROVENANCE).write_text(
+        json.dumps(payload, indent=2) + "\n",
+        encoding="utf-8",
+    )
 
 
 def _read_provenance(directory: Path) -> dict[str, object]:
@@ -394,23 +407,107 @@ def _strings(value: object) -> tuple[str, ...]:
 
 
 def _extract_zip(path: Path, dest: Path) -> None:
+    """Extract members one by one under ``dest``. Refuse escapes and symlinks."""
+    root = dest.resolve()
+    root.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(path) as archive:
         infos = archive.infolist()
         if len(infos) > _MAX_ZIP_FILES:
             raise PackError("pack archive has too many files")
+        planned: list[tuple[zipfile.ZipInfo, Path]] = []
         total = 0
         for info in infos:
-            mode = (info.external_attr >> 16) & 0xFFFF
-            if stat.S_ISLNK(mode):
-                raise PackError("pack archive contains a symlink")
-            name = info.filename
-            relative = Path(name)
-            if name.startswith("/") or ".." in relative.parts:
-                raise PackError("pack archive path escapes the archive")
+            _reject_zip_member(info)
             total += info.file_size
             if total > _MAX_ZIP_BYTES:
                 raise PackError("pack archive is too large")
-        archive.extractall(dest)
+            target = _zip_member_path(root, info.filename)
+            planned.append((info, target))
+        for info, target in planned:
+            if info.is_dir():
+                target.mkdir(parents=True, exist_ok=True)
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            _write_zip_member(archive, info, target)
+
+
+def _reject_zip_member(info: zipfile.ZipInfo) -> None:
+    mode = (info.external_attr >> 16) & 0xFFFF
+    if stat.S_ISLNK(mode):
+        raise PackError("pack archive contains a symlink")
+    name = info.filename
+    if not name or "\x00" in name:
+        raise PackError("pack archive path escapes the archive")
+    if name.startswith(("/", "\\")) or "\\" in name:
+        raise PackError("pack archive path escapes the archive")
+    head = name.split("/", 1)[0]
+    if len(head) >= 2 and head[1] == ":":
+        raise PackError("pack archive path escapes the archive")
+    relative = Path(name)
+    if relative.is_absolute() or ".." in relative.parts:
+        raise PackError("pack archive path escapes the archive")
+
+
+def _zip_member_path(root: Path, name: str) -> Path:
+    relative = Path(name)
+    parts = [part for part in relative.parts if part not in {"", "."}]
+    if not parts:
+        raise PackError("pack archive path escapes the archive")
+    return contained_child(root, *parts)
+
+
+def _write_zip_member(archive: zipfile.ZipFile, info: zipfile.ZipInfo, target: Path) -> None:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(target, flags, 0o644)
+    with os.fdopen(descriptor, "wb") as out, archive.open(info, "r") as src:
+        shutil.copyfileobj(src, out)
+
+
+def contained_child(root: Path, *parts: str, pack_dir: bool = False) -> Path:
+    """Resolve ``root/parts`` and refuse anything that is not a strict child.
+
+    ``pack_dir=True`` is the install directory name. It must match
+    ``^[a-z0-9][a-z0-9._-]{0,63}$`` (no leading dot). Call this before
+    ``rmtree``, ``mkdir``, or skill writes.
+    """
+    if not parts:
+        raise PackError("refusing empty pack path")
+    if pack_dir:
+        if len(parts) != 1:
+            raise PackError("refusing pack path")
+        _require_pack_name(parts[0])
+    for part in parts:
+        _reject_segment(part)
+    base = Path(root).resolve()
+    candidate = base.joinpath(*parts).resolve()
+    if candidate == base or base not in candidate.parents:
+        raise PackError("refusing pack path outside the install directory")
+    return candidate
+
+
+def _require_pack_name(name: str) -> None:
+    if not isinstance(name, str) or not _PACK_DIR_NAME.fullmatch(name):
+        raise PackError(f"refusing pack name {name!r}")
+    if name.startswith(".") or "/" in name or "\\" in name or Path(name).is_absolute():
+        raise PackError(f"refusing pack name {name!r}")
+    if name in {".", ".."} or ".." in Path(name).parts:
+        raise PackError(f"refusing pack name {name!r}")
+
+
+def _reject_segment(segment: str) -> None:
+    if (
+        not isinstance(segment, str)
+        or not segment
+        or segment in {".", ".."}
+        or "/" in segment
+        or "\\" in segment
+        or "\x00" in segment
+        or Path(segment).is_absolute()
+        or ".." in Path(segment).parts
+    ):
+        raise PackError(f"refusing path segment {segment!r}")
 
 
 def installed_index(data: Path) -> dict[str, LegacyPack]:

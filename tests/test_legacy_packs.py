@@ -4,15 +4,17 @@ from __future__ import annotations
 
 import json
 import logging
+import stat
 import subprocess
 import sys
+import zipfile
 from pathlib import Path
 
 import pytest
 
 from praxis_prime.audit.log import AuditLog
 from praxis_prime.cli import main
-from praxis_prime.packs.install import install_pack, load_installed
+from praxis_prime.packs.install import _extract_zip, install_pack, load_installed
 from praxis_prime.packs.legacy import PackError, load_legacy_pack
 from praxis_prime.skills.format import parse_skill
 from praxis_prime.state import StateDB
@@ -290,3 +292,124 @@ def test_cli_packs_list_install_and_info(tmp_path: Path, capsys: pytest.CaptureF
     assert "MIT" in info
     assert main(["packs", "info", "missing", *base]) == 1
     assert main(["packs"]) == 2
+
+
+_EVIL_NAMES = (
+    "/tmp/praxis-prime-pack-escape-59f9",
+    "../decoy",
+    "../...",
+    "a/b",
+    "a\\b",
+    "",
+    ".",
+    "..",
+)
+
+
+def _outside_markers(tmp_path: Path, data: Path) -> tuple[Path, Path]:
+    outside = tmp_path / "outside.txt"
+    outside.write_text("keep", encoding="utf-8")
+    decoy = data / "decoy"
+    decoy.mkdir(parents=True)
+    marker = decoy / "keep.txt"
+    marker.write_text("keep", encoding="utf-8")
+    return outside, marker
+
+
+def _assert_contained(data: Path, outside: Path, marker: Path) -> None:
+    assert outside.read_text(encoding="utf-8") == "keep"
+    assert marker.is_file()
+    assert marker.read_text(encoding="utf-8") == "keep"
+    assert not Path("/tmp/praxis-prime-pack-escape-59f9").exists()
+    packs = data / "vertical-packs"
+    if not packs.exists():
+        return
+    root = packs.resolve()
+    for path in packs.rglob("*"):
+        assert path.resolve().is_relative_to(root)
+
+
+@pytest.mark.parametrize("name", _EVIL_NAMES)
+def test_local_install_refuses_a_path_escape(tmp_path: Path, name: str):
+    source = tmp_path / "source"
+    _write_pack(source, name=name, javascript=False, python=False)
+    data = tmp_path / "data"
+    outside, marker = _outside_markers(tmp_path, data)
+    with pytest.raises(PackError, match="refusing"):
+        install_pack(str(source), data)
+    _assert_contained(data, outside, marker)
+
+
+def test_zip_and_git_install_refuse_a_path_escape(tmp_path: Path):
+    data = tmp_path / "data"
+    outside, marker = _outside_markers(tmp_path, data)
+    staged = tmp_path / "staged"
+    _write_pack(staged, name="../decoy", javascript=False, python=False)
+    archive_path = tmp_path / "evil.zip"
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        for path in staged.rglob("*"):
+            if path.is_file():
+                archive.write(path, path.relative_to(staged).as_posix())
+    with pytest.raises(PackError, match="refusing"):
+        install_pack(str(archive_path), data)
+    _assert_contained(data, outside, marker)
+
+    def runner(argv: list[str]) -> None:
+        target = Path(argv[-1])
+        _write_pack(
+            target,
+            name="/tmp/praxis-prime-pack-escape-59f9",
+            javascript=False,
+            python=False,
+        )
+
+    with pytest.raises(PackError, match="refusing"):
+        install_pack(
+            "https://example.invalid/evil-pack.git",
+            data,
+            git_runner=runner,
+        )
+    _assert_contained(data, outside, marker)
+
+
+def test_zip_members_cannot_escape_or_symlink(tmp_path: Path):
+    outside = tmp_path / "outside.txt"
+    absolute = tmp_path / "abs-member"
+    dest = tmp_path / "extract"
+    cases = (
+        ("../outside.txt", "pwned", None),
+        (str(absolute), "pwned", None),
+        ("link", "target", (stat.S_IFLNK | 0o777) << 16),
+    )
+    for filename, payload, mode in cases:
+        archive_path = tmp_path / f"{abs(hash(filename)) & 0xFFFF:x}.zip"
+        with zipfile.ZipFile(archive_path, "w") as archive:
+            info = zipfile.ZipInfo(filename)
+            if mode is not None:
+                info.external_attr = mode
+            archive.writestr(info, payload)
+            archive.writestr("pack.json", "{}")
+        with pytest.raises(PackError, match="archive"):
+            _extract_zip(archive_path, dest)
+        assert not outside.exists()
+        assert not absolute.exists()
+        if dest.exists():
+            for path in dest.rglob("*"):
+                assert not path.is_symlink()
+                assert path.resolve().is_relative_to(dest.resolve())
+
+
+def test_safe_zip_install_stays_under_vertical_packs(tmp_path: Path):
+    staged = tmp_path / "staged"
+    _write_pack(staged, name="demo_pack", javascript=False, python=False)
+    archive_path = tmp_path / "ok.zip"
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        for path in staged.rglob("*"):
+            if path.is_file():
+                archive.write(path, path.relative_to(staged).as_posix())
+    data = tmp_path / "data"
+    installed = install_pack(str(archive_path), data)
+    root = (data / "vertical-packs").resolve()
+    assert installed.path.resolve().is_relative_to(root)
+    assert installed.path.name == "demo_pack"
+    assert (installed.path / "pack.json").is_file()

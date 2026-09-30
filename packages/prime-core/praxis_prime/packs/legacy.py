@@ -98,7 +98,12 @@ def load_legacy_pack(
     raw = _read_manifest(manifest_path)
     warnings: list[PackWarning] = []
     pack_dir = manifest_path.parent
-    name = _text(raw.get("name")) or pack_dir.name
+    # An explicit empty name stays empty so install can reject it. A missing
+    # name falls back to the directory, which is not a path from the manifest.
+    if "name" not in raw or raw.get("name") is None:
+        name = pack_dir.name
+    else:
+        name = _text(raw.get("name"))
     version = _text(raw.get("version")) or "0"
     model_suggestion, provider_suggestion = _ignore_pins(raw, warnings)
     javascript, dashboard, modules = _scan_tree(base)
@@ -378,6 +383,12 @@ def _run_allowlisted(
 
 
 def _import_allowlisted(root: Path, value: str) -> None:
+    """Import one entry point that is already on ``ALLOWLISTED_ENTRY_POINTS``.
+
+    The allowlist is empty, so this does not run for installed packs. Any
+    future non-empty allowlist must run this import inside the sandbox, not
+    in the daemon process.
+    """
     module_name, separator, attr = value.partition(":")
     if not separator or not _MODULE.fullmatch(module_name) or (attr and not _ATTR.fullmatch(attr)):
         raise PackError(f"refusing entry point {value!r}")
