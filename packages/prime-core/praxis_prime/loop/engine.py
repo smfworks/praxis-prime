@@ -331,6 +331,9 @@ class AgentLoop:
             self._add_tool(call.id, content)
             yield StatusEvent("check", f"{call.name} · unknown tool · deny")
             return
+        # A write marks the scan dirty. Drop it before classify so prepare
+        # and the policy check share a fresh cache. Read-only tools leave
+        # the flag clear and reuse the scan.
         if self._inode_cache_dirty:
             self.inode_cache.clear()
             self._inode_cache_dirty = False
