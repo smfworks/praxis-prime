@@ -5,7 +5,7 @@
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-3776AB)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-**Status: pre-alpha.** This repository is the public skeleton of Praxis Prime. The agent loop, gateway, swarm, Decision Engine, voice layer, and desktop UI are named and stubbed. They do not run yet. What works today is the CLI: version, `doctor`, and a default config whose compliance dials are all off.
+**Status: pre-alpha.** The first milestone runs a local agent loop: terminal chat, a model router, four tools, and a session audit log. The gateway, swarm, Decision Engine, voice layer, and desktop UI are still stubs. Compliance dials still default to off.
 
 Praxis Prime is an open-source, local-first autonomous AI agent for Linux, by [SMF Works](https://github.com/smfworks) (Michael Gannotti). It is the flagship evolution of [SMF Praxis](https://github.com/smfworks/smf-praxis): a governed agent that can read, research, and draft on its own, and that stops for a human when an action has consequences. Sending, deleting, spending, sharing, and publishing stay behind that approval spine. Regulatory overlays are optional dials, and they ship **off**.
 
@@ -28,7 +28,30 @@ praxis-primed --version
 
 praxis-prime doctor
 praxis-prime config
+praxis-prime chat
+praxis-prime ask "summarize the files in this directory"
 ```
+
+`chat` is an interactive session. Replies stream. Tool calls show up as a plan → check → act timeline. When a tool needs approval the prompt is `y` (once), `n` (deny), or `a` (always this exact action for the session). `/help`, `/model`, `/model ollama:qwen3:8b`, and `/clear` work in the session. Ctrl-C cancels the current turn. Ctrl-D exits.
+
+`ask` runs one turn and prints the answer on stdout. The timeline goes to stderr.
+
+Ollama is the default provider (`ollama:qwen3:32b` in the generated config). Start it with `ollama serve`. If it is down, the error names the host and does not call a cloud API unless you configured one. API keys are environment variables, never config entries:
+
+```bash
+# optional cloud or local OpenAI-compatible servers
+export PRAXIS_PRIME_MODEL=ollama:qwen3:8b
+export PRAXIS_PRIME_OLLAMA_HOST=http://127.0.0.1:11434
+export PRAXIS_PRIME_OPENAI_COMPATIBLE_BASE_URL=http://127.0.0.1:8080/v1   # llama.cpp or vLLM
+export PRAXIS_PRIME_FALLBACK_MODELS=openai-compatible:local
+# export PRAXIS_PRIME_OPENAI_API_KEY=...        # or OPENAI_API_KEY
+# export PRAXIS_PRIME_ANTHROPIC_API_KEY=...     # or ANTHROPIC_API_KEY
+# export PRAXIS_PRIME_XAI_API_KEY=...           # or XAI_API_KEY
+```
+
+`shell` runs inside bubblewrap when `bwrap` is on `PATH` (no network). Without bubblewrap, every command asks first. Delete, send, spend, and share ask even inside the sandbox. Tool output is wrapped as untrusted data. Sessions and the audit log are SQLite at `$XDG_DATA_HOME/praxis-prime/prime.db` (or `~/.local/share/praxis-prime/prime.db`).
+
+A longer usage note is in [docs/USAGE.md](docs/USAGE.md).
 
 `doctor` checks four things and exits 0 unless Python is older than 3.12:
 
@@ -52,7 +75,7 @@ With `XDG_CONFIG_HOME` unset, those paths are under `~/.config/praxis-prime/`. E
 
 | Area | Plan | In this skeleton |
 |---|---|---|
-| Governed agent loop | Perceive, plan, govern, act, reflect. Hermes prompt-cache invariants. OpenClaw queue modes. | Package stub. [§5](docs/ARCHITECTURE.md) |
+| Governed agent loop | Perceive, plan, govern, act, reflect. Hermes prompt-cache invariants. OpenClaw queue modes. | Plan → check → act, streaming, steer/cancel, approval spine. [§5](docs/ARCHITECTURE.md) |
 | Local Decision Engine | Our own cascade: rules, ONNX classifiers, calibrated small-LLM judges, then a jury. Wire shape similar to a public decision API. No hosted TypeSafe service. | Package stub. [§7](docs/ARCHITECTURE.md) |
 | Compliance dials | HIPAA, FERPA, COPPA, GDPR, 13 Praxis state packs, a new North Carolina pack, then SOC 2, EU AI Act, CCPA, PCI, NIST AI RMF, and ISO 42001. Off, monitor, or enforce. **Default off.** | Catalog and config defaults. No enforcement. [§17](docs/ARCHITECTURE.md) |
 | Agent swarms | Workers, a blackboard, and the Swarm 2.0 personas as jury lenses. | Package stub. [§15](docs/ARCHITECTURE.md) |

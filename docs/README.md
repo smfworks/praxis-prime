@@ -9,4 +9,6 @@ The blueprint is the source of truth for layout, names, and stack.
 | [SOURCE-NOTES.md](SOURCE-NOTES.md) | Licenses, paths, unverified items |
 | [architecture.html](architecture.html) | Rendered copy of the three documents |
 
-These files were approved as the design. The repository skeleton points at them with `TODO: ARCHITECTURE §…` notes. It does not implement the design yet.
+These files were approved as the design. The repository still points at later sections with `TODO: ARCHITECTURE §…` notes.
+
+[USAGE.md](USAGE.md) is the operator note for the first running milestone: `praxis-prime chat`, `praxis-prime ask`, the model router, tools, and the session database.

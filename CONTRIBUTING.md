@@ -1,6 +1,6 @@
 # Contributing to Praxis Prime
 
-Thanks for looking. Praxis Prime is **pre-alpha**. The useful surface today is the CLI skeleton, the dial catalog, and the docs. Feature work should follow [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [AGENTS.md](AGENTS.md).
+Thanks for looking. Praxis Prime is **pre-alpha**. The useful surface today is `praxis-prime chat` / `ask`, the dial catalog, and the docs. Feature work should follow [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [AGENTS.md](AGENTS.md). Usage for the agent loop is in [docs/USAGE.md](docs/USAGE.md).
 
 ## Setup
 

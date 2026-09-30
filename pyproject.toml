@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "praxis-prime"
 dynamic = ["version"]
-description = "Local-first autonomous AI agent for Linux. Pre-alpha skeleton."
+description = "Local-first autonomous AI agent for Linux. Pre-alpha."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE", "NOTICE", "THIRD_PARTY.md"]
@@ -47,7 +47,7 @@ packages = ["packages/prime-core/praxis_prime"]
 package = true
 
 [tool.pytest.ini_options]
-pythonpath = ["packages/prime-core"]
+pythonpath = [".", "packages/prime-core"]
 testpaths = ["tests"]
 addopts = "-q"
 
