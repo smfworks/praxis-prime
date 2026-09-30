@@ -245,4 +245,4 @@ The kernel subpackages (`loop`, `gateway`, `decide`, `swarm`, and the rest) matc
 
 MIT. Copyright (c) 2026 SMF Works. See [LICENSE](LICENSE).
 
-Hermes Agent, OpenClaw, and Omarchy belong to their authors. SMF Works wrote SMF Praxis and SMF Swarm 2.0. The regulated Praxis packs are not in this repository. `packs/regulated/README.md` explains how they will be imported later, after their licenses are confirmed.
+Hermes Agent, OpenClaw, and Omarchy belong to their authors. SMF Works wrote SMF Praxis and SMF Swarm 2.0. The six public MIT vertical packs are not vendored here. `praxis-prime packs install` loads them as data. See [docs/PACKS-LEGACY.md](docs/PACKS-LEGACY.md).

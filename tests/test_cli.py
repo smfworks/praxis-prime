@@ -31,6 +31,7 @@ _SUBMODULES = (
     "praxis_prime.tools",
     "praxis_prime.mcp",
     "praxis_prime.skills",
+    "praxis_prime.packs",
     "praxis_prime.migrate",
 )
 

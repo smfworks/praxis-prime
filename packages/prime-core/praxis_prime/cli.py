@@ -21,6 +21,7 @@ from praxis_prime.compliance.cli import add_compliance_parsers, dispatch_complia
 from praxis_prime.config import describe_write, resolve_config_dir, write_default_config
 from praxis_prime.doctor import format_report, report_exit_code, run_system_doctor
 from praxis_prime.mcp.cli import add_mcp_parser, mcp_command
+from praxis_prime.packs.cli import add_packs_parsers, dispatch_packs
 from praxis_prime.user_commands import add_user_commands, dispatch_user_command
 
 
@@ -54,6 +55,9 @@ def main(argv: list[str] | None = None) -> int:
         return _decide_command(args)
     if args.command == "mcp":
         return mcp_command(args)
+    handled = dispatch_packs(args)
+    if handled is not None:
+        return handled
     handled = dispatch_compliance(args)
     if handled is not None:
         return handled
@@ -160,6 +164,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print a one-time code. Send it to the bot as /pair CODE.",
     )
     add_mcp_parser(commands)
+    add_packs_parsers(commands)
     add_compliance_parsers(commands)
     add_user_commands(commands)
     return parser
