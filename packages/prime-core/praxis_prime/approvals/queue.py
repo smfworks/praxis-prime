@@ -48,6 +48,7 @@ class _Item:
             "summary": self.request.summary,
             "arguments": redact_arguments(self.request.arguments),
             "sandboxed": self.request.sandboxed,
+            "mount": self.request.mount,
             "sessionId": self.session_id,
             "state": self.state,
             "actor": self.actor,

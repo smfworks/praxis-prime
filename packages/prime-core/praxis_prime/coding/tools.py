@@ -89,11 +89,17 @@ def classify_run_command(
     *,
     root: Path,
     sandbox_ready: bool | None = None,
+    cache: InodeScanCache | None = None,
 ) -> PreparedCall:
     """Risk for a worktree command. Push, force, and tracked deletes always ask."""
     command = arguments.get("command")
     text = command if isinstance(command, str) else ""
-    base = classify_command(text, sandbox_ready=sandbox_ready, workspace=root)
+    base = classify_command(
+        text,
+        sandbox_ready=sandbox_ready,
+        workspace=root,
+        cache=cache,
+    )
     risk = base.risk
     force = base.force_approval
     reason = base.force_reason
@@ -117,7 +123,7 @@ def classify_run_command(
         force_approval=force,
         force_reason=reason,
         summary=text.strip()[:180],
-        write_capable=base.write_capable or risk != Risk.READ,
+        write_capable=base.write_capable,
     )
 
 
@@ -422,12 +428,19 @@ def _run_command_tool(root: Path) -> Tool:
         },
         risk=Risk.READ,
         execute=execute_run_command,
-        classify=lambda arguments: classify_run_command(arguments, root=root),
+        classify=lambda arguments, cache=None: classify_run_command(
+            arguments,
+            root=root,
+            cache=cache,
+        ),
     )
 
 
 def _run_tests_tool(root: Path) -> Tool:
-    def classify(arguments: Mapping[str, object]) -> PreparedCall:
+    def classify(
+        arguments: Mapping[str, object],
+        cache: InodeScanCache | None = None,
+    ) -> PreparedCall:
         command = arguments.get("command")
         if not isinstance(command, str) or not command.strip():
             command = detect_test_command(root)
@@ -435,6 +448,7 @@ def _run_tests_tool(root: Path) -> Tool:
         return classify_run_command(
             {"command": command, "timeout_seconds": timeout},
             root=root,
+            cache=cache,
         )
 
     return Tool(

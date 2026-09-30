@@ -29,6 +29,7 @@ from praxis_prime.policy.boundary import (
     fetch_public,
     is_secret_path,
     secret_inode_set,
+    secret_scan,
 )
 from praxis_prime.policy.dials import default_positions
 from praxis_prime.policy.engine import HookPoint, PolicyContext, PolicyEngine
@@ -41,7 +42,7 @@ from praxis_prime.tools.builtin import (
     execute_read_file,
     execute_web_fetch,
 )
-from praxis_prime.tools.registry import Risk, Tool, ToolContext
+from praxis_prime.tools.registry import PreparedCall, Risk, Tool, ToolContext
 
 SECRET = "SUPERSECRETVALUE"
 
@@ -1036,6 +1037,93 @@ def test_readonly_calls_reuse_one_inode_scan_until_a_write(tmp_path: Path, monke
     assert any("planted" in text for text in tool_text)
     assert any("alias.txt" in text and "secret" in text.lower() for text in tool_text)
     assert all(SECRET not in text for text in tool_text)
+
+
+def test_dirty_inode_cache_is_cleared_before_prepare(tmp_path: Path, monkeypatch):
+    """Reads share one scan. A dirty cache is cleared before the next prepare.
+
+    An unconditional clear before every prepare would make the first watch
+    see an empty cache. Clearing only after prepare would let that classify
+    run against the scan from before the write.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    root = tmp_path / "ws"
+    root.mkdir()
+    (root / "hello.txt").write_text("hello\n", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    calls = {"n": 0}
+    real = boundary_mod._scan_secret_inodes
+
+    def counted():
+        calls["n"] += 1
+        return real()
+
+    monkeypatch.setattr(boundary_mod, "_scan_secret_inodes", counted)
+    seen: list[bool] = []
+    workspaces: list[Path | None] = []
+    caches: list[InodeScanCache] = []
+
+    def classify(arguments, *, workspace=None, cache=None):
+        del arguments
+        assert isinstance(cache, InodeScanCache)
+        seen.append(cache.ready)
+        workspaces.append(workspace)
+        caches.append(cache)
+        secret_scan(cache)
+        return PreparedCall(
+            risk=Risk.READ,
+            sandboxed=True,
+            force_approval=False,
+            force_reason="",
+            summary="watch",
+        )
+
+    registry = builtin_registry()
+    registry.register(
+        Tool(
+            name="watch",
+            description="Record the inode cache seen by prepare.",
+            parameters={"type": "object", "properties": {}},
+            risk=Risk.READ,
+            execute=lambda _arguments, _context: "watched",
+            classify=classify,
+        )
+    )
+    provider = ScriptedProvider(
+        [
+            AssistantFinal(
+                content="",
+                tool_calls=(
+                    ToolCall(id="c1", name="read_file", arguments={"path": "hello.txt"}),
+                ),
+            ),
+            AssistantFinal(
+                content="",
+                tool_calls=(ToolCall(id="c2", name="watch", arguments={}),),
+            ),
+            AssistantFinal(
+                content="",
+                tool_calls=(ToolCall(id="c3", name="watch", arguments={}),),
+            ),
+            AssistantFinal(content="done"),
+        ]
+    )
+    loop = AgentLoop(
+        router=ModelRouter([ModelRef("ollama", "fake")], {"ollama": provider}),
+        registry=registry,
+        policy=PolicyEngine(),
+        gate=ApprovalGate(None),
+        cwd=root,
+        max_iterations=6,
+    )
+    list(loop.run_turn("read, then watch twice"))
+    assert calls["n"] == 2
+    assert seen == [True, False]
+    assert workspaces == [root, root]
+    assert caches == [loop.inode_cache, loop.inode_cache]
+    assert loop.inode_cache.ready is True
 
 
 @pytest.mark.parametrize(

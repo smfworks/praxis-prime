@@ -13,6 +13,7 @@ from pathlib import Path
 
 from praxis_prime import __version__
 from praxis_prime.policy.boundary import (
+    InodeScanCache,
     ReadAccess,
     ReadDenied,
     assert_readable,
@@ -101,7 +102,7 @@ def _shell_tool() -> Tool:
         },
         risk=Risk.READ,
         execute=execute_shell,
-        classify=lambda arguments: classify_command(str(arguments.get("command", ""))),
+        classify=_classify_shell,
     )
 
 
@@ -202,8 +203,26 @@ def validate_fetch_url(url: str, *, fetch_allow: Collection[str] | None = None) 
     return classify_url(url, fetch_allow or ())
 
 
-def prepare_shell(arguments: Mapping[str, object]) -> PreparedCall:
-    return classify_command(str(arguments.get("command", "")))
+def _classify_shell(
+    arguments: Mapping[str, object],
+    *,
+    workspace: Path | None = None,
+    cache: InodeScanCache | None = None,
+) -> PreparedCall:
+    return classify_command(
+        str(arguments.get("command", "")),
+        workspace=workspace,
+        cache=cache,
+    )
+
+
+def prepare_shell(
+    arguments: Mapping[str, object],
+    *,
+    workspace: Path | None = None,
+    cache: InodeScanCache | None = None,
+) -> PreparedCall:
+    return _classify_shell(arguments, workspace=workspace, cache=cache)
 
 
 def _access(context: ToolContext) -> ReadAccess:

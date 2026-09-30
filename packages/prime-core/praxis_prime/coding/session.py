@@ -13,6 +13,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from praxis_prime.approvals.card import mount_phrase
 from praxis_prime.approvals.gate import (
     ApprovalDecision,
     ApprovalRequest,
@@ -202,6 +203,7 @@ def _approve_worktree_write(runtime: Runtime, work: TaskWorktree, session_id: st
         arguments={"worktree": str(work.path), "repo": str(work.repo)},
         grant_key=f"coding-write:{work.path}",
         sandboxed=True,
+        mount=mount_phrase(True),
     )
     token = approval_session_id.set(session_id)
     try:

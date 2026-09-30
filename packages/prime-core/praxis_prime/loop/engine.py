@@ -15,6 +15,7 @@ from collections.abc import AsyncIterator, Callable, Iterator, Mapping
 from pathlib import Path
 from urllib.parse import urlparse, urlunparse
 
+from praxis_prime.approvals.card import HOST_FULL_WRITE, mount_phrase
 from praxis_prime.approvals.gate import (
     ApprovalDecision,
     ApprovalGate,
@@ -330,8 +331,18 @@ class AgentLoop:
             self._add_tool(call.id, content)
             yield StatusEvent("check", f"{call.name} · unknown tool · deny")
             return
+        # A write marks the scan dirty. Drop it before classify so prepare
+        # and the policy check share a fresh cache. Read-only tools leave
+        # the flag clear and reuse the scan.
+        if self._inode_cache_dirty:
+            self.inode_cache.clear()
+            self._inode_cache_dirty = False
         try:
-            prepared = tool.prepare(call.arguments)
+            prepared = tool.prepare(
+                call.arguments,
+                workspace=self.cwd,
+                cache=self.inode_cache,
+            )
         except Exception as exc:
             content = f"Could not prepare {call.name}: {exc}"
             self._add_tool(call.id, content)
@@ -355,9 +366,6 @@ class AgentLoop:
             fetch_allow=tuple(sorted(self.read_access.fetch_allow)),
             inode_cache=self.inode_cache,
         )
-        if self._inode_cache_dirty:
-            self.inode_cache.clear()
-            self._inode_cache_dirty = False
         verdict = self.policy.evaluate(ctx)
         if self.screener is not None:
             verdict = self.screener.apply(verdict, ctx)
@@ -393,6 +401,7 @@ class AgentLoop:
                 arguments=dict(call.arguments),
                 grant_key=verdict.grant_key,
                 sandboxed=prepared.sandboxed,
+                mount=self._mount_phrase(tool.name, prepared),
             )
             decision, actor = self._authorize(request)
             self._audit(
@@ -550,6 +559,29 @@ class AgentLoop:
             payload=payload,
         )
 
+    def _mount_phrase(self, tool_name: str, prepared: PreparedCall) -> str:
+        """Say how this command runs if it is approved.
+
+        A sandboxed command is a read-only mount or a read-write mount.
+        Without bubblewrap it runs on the host, so the card says that and
+        does not describe the run as read-only.
+        """
+        if tool_name not in {"shell", "run_command", "run_tests"}:
+            return ""
+        if not prepared.sandboxed:
+            return HOST_FULL_WRITE
+        from praxis_prime.tools.shell import bind_is_writable
+
+        writable = bind_is_writable(
+            write_capable=prepared.write_capable,
+            approved=True,
+            session_write_approved=self.session_write_approved,
+            write_scope="" if self.write_scope is None else str(self.write_scope),
+            cwd=str(self.cwd),
+            main_checkout="" if self.main_checkout is None else str(self.main_checkout),
+        )
+        return mount_phrase(writable)
+
     def _authorize(self, request: ApprovalRequest) -> tuple[ApprovalDecision, str]:
         session_token = approval_session_id.set(self.session_id)
         actor_token = approval_actor.set("")
@@ -588,6 +620,7 @@ class AgentLoop:
                 arguments=dict(arguments),
                 grant_key=f"hook:{name}:{reason[:80]}",
                 sandboxed=prepared.sandboxed,
+                mount=self._mount_phrase(name, prepared),
             )
             decision, actor = self._authorize(request)
             self._audit(

@@ -90,9 +90,15 @@ def format_approval(request: ApprovalRequest, *, color: bool) -> str:
         f"  why:     {request.reason}",
         f"  sandbox: {'bubblewrap' if request.sandboxed else 'host (no bubblewrap)'}",
         f"  action:  {request.summary}",
-        "  y once    n deny    a always for this session",
-        "",
     ]
+    if request.mount:
+        lines.append(f"  mount:   {request.mount}")
+    lines.extend(
+        [
+            "  y once    n deny    a always for this session",
+            "",
+        ]
+    )
     return "\n".join(lines)
 
 

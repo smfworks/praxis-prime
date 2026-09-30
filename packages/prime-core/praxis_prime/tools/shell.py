@@ -6,9 +6,11 @@ inside bubblewrap. A content ``git diff``, ``git log -p``, or ``git show``
 that the classifier would auto-approve is checked again: the same revisions
 and pathspecs run as ``git --name-only`` inside the read-only sandbox. If
 that probe fails, or git lists a secret or a path the classifier did not
-approve, the command asks. The workspace bind is read-only unless that
-command was approved as a write, or a coding session was approved for its
-own worktree. When bubblewrap is missing, every command needs approval. A
+approve, the command asks. The workspace bind stays read-only after
+approval unless the command is write-shaped. An explicit coding-session
+write grant applies only to an approved or write-shaped command. An
+auto-approved read stays read-only. When bubblewrap is missing, every
+command needs approval and runs on the host with full write access. A
 sandbox failure never reruns the command on the host.
 """
 
@@ -18,6 +20,7 @@ import re
 from collections.abc import Mapping
 from pathlib import Path
 
+from praxis_prime.policy.boundary import InodeScanCache
 from praxis_prime.sandbox.bwrap import (
     CommandStatus,
     SandboxError,
@@ -55,10 +58,11 @@ def classify_command(
     *,
     sandbox_ready: bool | None = None,
     workspace: Path | None = None,
+    cache: InodeScanCache | None = None,
 ) -> PreparedCall:
     """Return the risk and whether policy must ask before running."""
     ready = bwrap_available() if sandbox_ready is None else sandbox_ready
-    verdict = classify_shell(command, workspace=workspace)
+    verdict = classify_shell(command, workspace=workspace, cache=cache)
     risk = verdict.risk
     reason = verdict.reason
     force = not verdict.allowlisted or risk != Risk.READ
@@ -134,7 +138,7 @@ def execute_shell(arguments: Mapping[str, object], context: ToolContext) -> str:
         raise ValueError("shell requires a command string")
     timeout = _timeout(arguments.get("timeout_seconds"))
     cwd = Path(context.cwd)
-    prepared = classify_command(command, workspace=cwd)
+    prepared = classify_command(command, workspace=cwd, cache=context.inode_cache)
     approved = context.shell_approved or context.host_shell_approved
     if prepared.force_approval and not approved:
         _audit_mount(context, command, prepared, mount="ro", ran=False, decision="deny")
@@ -180,25 +184,51 @@ def execute_shell(arguments: Mapping[str, object], context: ToolContext) -> str:
         raise RuntimeError(str(exc)) from exc
 
 
-def _writable(context: ToolContext, prepared: PreparedCall) -> bool:
-    """Read-write only for an approved write, or an approved coding worktree."""
-    if not prepared.write_capable:
+def bind_is_writable(
+    *,
+    write_capable: bool,
+    approved: bool,
+    session_write_approved: bool,
+    write_scope: str,
+    cwd: str,
+    main_checkout: str,
+) -> bool:
+    """True when this command may mount the workspace read-write.
+
+    Approval keeps ``--ro-bind`` unless the command is write-shaped.
+    ``session_write_approved`` is an explicit coding-session write grant.
+    It applies only when this command was approved or is write-shaped.
+    An auto-approved read stays read-only. The grant is not inferred.
+    """
+    session = session_write_approved and bool(write_scope)
+    if write_capable:
+        if not approved and not session:
+            return False
+    elif not (approved and session):
         return False
-    action = context.shell_approved or context.host_shell_approved
-    session = context.session_write_approved and bool(context.write_scope)
-    if not action and not session:
-        return False
-    if not context.main_checkout:
+    if not main_checkout:
         return True
-    if not context.write_scope:
+    if not write_scope:
         return False
     try:
-        cwd = Path(context.cwd).resolve()
-        main = Path(context.main_checkout).resolve()
-        scope = Path(context.write_scope).resolve()
+        cwd_path = Path(cwd).resolve()
+        main = Path(main_checkout).resolve()
+        scope = Path(write_scope).resolve()
     except OSError:
         return False
-    return cwd != main and scope != main
+    return cwd_path != main and scope != main
+
+
+def _writable(context: ToolContext, prepared: PreparedCall) -> bool:
+    """Read-write for a write-shaped command, or a grant on an approved one."""
+    return bind_is_writable(
+        write_capable=prepared.write_capable,
+        approved=context.shell_approved or context.host_shell_approved,
+        session_write_approved=context.session_write_approved,
+        write_scope=context.write_scope,
+        cwd=context.cwd,
+        main_checkout=context.main_checkout,
+    )
 
 
 def _audit_mount(
