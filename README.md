@@ -142,12 +142,25 @@ Names used throughout: distribution `praxis-prime`, import package `praxis_prime
 
 ## Roadmap
 
-Condensed from [ARCHITECTURE §29](docs/ARCHITECTURE.md). Dates are not scheduled. The phases are scope gates.
+Condensed from [ARCHITECTURE §29](docs/ARCHITECTURE.md) and [Blueprint Addendum A](docs/blueprint-addendum-2026-09.md). Dates are not scheduled. The phases are scope gates. The next build order inside them is M0–M8.
+
+| # | Milestone | Phase |
+|---|---|---|
+| **M0** | Packs ship in the wheel. Legacy `pack.json` loader ignores `ollama-cloud` model pins and pack dashboard JavaScript. | MVP completion (v0.2–0.3) |
+| **M1** | Web shell, accounts, and profiles. Loopback only. | MVP completion (v0.2–0.3) |
+| **M2** | First-run wizard. Remove the hard-coded Ollama default. | MVP completion (v0.2–0.3) |
+| **M3** | Theme packages and seven built-in themes. | MVP completion (v0.2–0.3) |
+| **M4** | NVIDIA OpenShell for regulated installs, with a visible bubblewrap/Podman fallback. | v0.5 |
+| **M5a** / **M5b** | Ubuntu and Omarchy installers, then a WSL2 supported beta. | v0.5 |
+| **M6** | Opt-in remote access and a PWA. Loopback stays the default. | v0.5 |
+| **M7** | Tauri 2 desktop shell. | v0.6–v0.8 |
+| **M8** | Microsoft 365 (Entra sign-in, Teams, Intune/winget). | v0.6–v0.8 |
 
 | Phase | Product | Decision Engine | Dials |
 |---|---|---|---|
-| **MVP (v0.1–v0.2)** | Daemon, gateway, CLI, TUI, web UI, local plus a couple of cloud providers, core tools, bubblewrap, MCP client, skills, memory, approval cards, audit chain, routines, coding mode, migrate-from-Praxis, `.deb` and AUR placeholders become real, Omarchy theme and keybind. | Rules, one local classifier tier, one local judge, `/v1/decide`. Escalate only. | Dial framework. NC data-privacy baseline. 13 state packs and regulated packs imported, monitor mode. |
-| **v0.5** | Tauri desktop, Omarchy bar plugin, more channels, swarm runtime, auto mode, hooks, Podman, plugin SDK, Jarvis alpha, APT repo and AppImage. | Jury of judges, calibration, disagreement escalation. | Enforce HIPAA, FERPA/COPPA, GDPR, the 13 state packs, and NC. |
+| **MVP (v0.1–v0.3)** | M0–M3, then the rest of this row: daemon, gateway, CLI, TUI, web UI, an explicit provider choice (no default LLM), core tools, bubblewrap, MCP client, skills, memory, approval cards, audit chain, routines, coding mode, migrate-from-Praxis, `.deb` and AUR, Omarchy theme and keybind. | Rules, one local classifier tier, one local judge, `/v1/decide`. Escalate only. | Dial framework. NC data-privacy baseline. 13 state packs and regulated packs imported, monitor mode. |
+| **v0.5** | M4–M6, then Omarchy bar plugin, more channels (Teams is M8), swarm runtime, auto mode, hooks, Podman, plugin SDK, Jarvis alpha, APT repo and AppImage. | Jury of judges, calibration, disagreement escalation. | Enforce HIPAA, FERPA/COPPA, GDPR, the 13 state packs, and NC. |
+| **v0.6–v0.8** | M7 Tauri desktop. M8 Microsoft 365. | Stays on the v0.5 and v1.0 rows, after M3. | Enforce work stays on the v0.5 row. |
 | **v1.0** | Host computer use, virtual desktop, microVM and remote sandboxes, background coding, MCP server, ACP, out-of-process plugins, signed releases, docs site. | Drift detection, per-pack calibrators, a published reliability report. | SOC 2, EU AI Act, CCPA, PCI, NIST AI RMF, ISO 42001, with evidence export. |
 
 Dials produce technical controls and evidence. They are not legal certifications. Counsel review is required before any enforce mode is recommended to anyone else. See the risks in [ARCHITECTURE §30](docs/ARCHITECTURE.md).
@@ -201,7 +214,8 @@ praxis-prime doctor
 
 | Document | What it is |
 |---|---|
-| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Source of truth for layout, names, and stack |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Source of truth for layout, names, and stack. §29 follows milestones M0–M8 |
+| [docs/blueprint-addendum-2026-09.md](docs/blueprint-addendum-2026-09.md) | Addendum A (2026-09-30): themes, no default LLM, NVIDIA OpenShell, any-device access, profiles, and the M0–M8 build order |
 | [docs/CAPABILITY-MATRIX.md](docs/CAPABILITY-MATRIX.md) | Feature-by-feature plan against the source systems |
 | [docs/SOURCE-NOTES.md](docs/SOURCE-NOTES.md) | Licenses, file paths, reuse plan, unverified items |
 | [docs/architecture.html](docs/architecture.html) | Rendered blueprint (architecture, matrix, and notes) |
@@ -221,6 +235,7 @@ praxis-prime/
 ├─ plugins/  ui/  apps/{desktop,omarchy}/
 ├─ protocol/  skills/  models/decide/  evals/
 ├─ packaging/{deb,aur,systemd,appimage,flatpak,apt-repo}/
+├─ scripts/contrast_check.py          # WCAG check for the addendum palettes
 └─ docs/
 ```
 

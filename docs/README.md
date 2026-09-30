@@ -4,10 +4,11 @@ The blueprint is the source of truth for layout, names, and stack.
 
 | File | Contents |
 |---|---|
-| [ARCHITECTURE.md](ARCHITECTURE.md) | Architecture blueprint |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | Architecture blueprint. §29 follows milestones M0–M8 |
+| [blueprint-addendum-2026-09.md](blueprint-addendum-2026-09.md) | Addendum A (2026-09-30): themes, no default LLM, NVIDIA OpenShell, any-device access (central server, WSL2, Microsoft 365), multi-user profiles, and the M0–M8 build order. **[V]** verified, **[U]** unverified, **[E]** estimate |
 | [CAPABILITY-MATRIX.md](CAPABILITY-MATRIX.md) | Comparison with the source systems and the reuse plan |
 | [SOURCE-NOTES.md](SOURCE-NOTES.md) | Licenses, paths, unverified items |
-| [architecture.html](architecture.html) | Rendered copy of the three documents |
+| [architecture.html](architecture.html) | Rendered copy of the blueprint, the matrix, and the source notes |
 
 These files were approved as the design. The repository still points at later sections with `TODO: ARCHITECTURE §…` notes.
 
