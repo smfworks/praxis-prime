@@ -5,7 +5,7 @@
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-3776AB)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-**Status: pre-alpha.** A local agent loop is running: terminal chat, a model router, tools, a session audit log, coding mode (`praxis-prime code`), and a loopback daemon (`praxis-primed`) with a WebSocket and HTTP gateway. Telegram can chat and approve. Swarm, Decision Engine, voice, and the desktop UI are still stubs. Compliance dials still default to off.
+**Status: pre-alpha.** A local agent loop is running: terminal chat, a model router, tools, a session audit log, coding mode (`praxis-prime code`), a loopback daemon (`praxis-primed`) with a WebSocket and HTTP gateway, and a local Decision Engine (`praxis-prime decide`, `POST /v1/decide`). Telegram can chat and approve. Swarm, voice, and the desktop UI are still stubs. Compliance dials, and the decision pre-screener, still default to off.
 
 Praxis Prime is an open-source, local-first autonomous AI agent for Linux, by [SMF Works](https://github.com/smfworks) (Michael Gannotti). It is the flagship evolution of [SMF Praxis](https://github.com/smfworks/smf-praxis): a governed agent that can read, research, and draft on its own, and that stops for a human when an action has consequences. Sending, deleting, spending, sharing, and publishing stay behind that approval spine. Regulatory overlays are optional dials, and they ship **off**.
 

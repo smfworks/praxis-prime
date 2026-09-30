@@ -27,6 +27,7 @@ from praxis_prime.coding.worktree import (
     keep_task,
     readable_diff,
 )
+from praxis_prime.decide.tool import install_decide_tool
 from praxis_prime.loop.engine import AgentLoop
 from praxis_prime.loop.events import StatusEvent, TurnEnded
 from praxis_prime.loop.prompt import SYSTEM_PROMPT
@@ -120,9 +121,11 @@ def _run_loop(
         model=runtime.router.primary.spec(),
         preamble=preamble,
     )
+    registry = coding_registry(work.path)
+    install_decide_tool(registry, runtime.engine)
     loop = AgentLoop(
         router=runtime.router,
-        registry=coding_registry(work.path),
+        registry=registry,
         policy=runtime.policy,
         gate=runtime.gate,
         cwd=work.path,
@@ -134,6 +137,7 @@ def _run_loop(
         audit=runtime.audit,
         session_id=session_id,
         hooks=ProjectHooks(work.repo, work.path),
+        screener=runtime.screener,
     )
     answer = ""
     error: str | None = None

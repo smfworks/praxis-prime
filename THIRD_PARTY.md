@@ -52,12 +52,15 @@ Prime does not use that service. See the Decision Engine note below.
 No file under this repository is a copy from Hermes, OpenClaw, Omarchy,
 TypeSafe, SMF Praxis, or SMF Swarm 2.0. The agent loop, router, tool
 registry, audit chain, loopback gateway, approval queue, Telegram adapter,
-systemd unit, and coding mode are original code. They follow patterns
-described in `docs/ARCHITECTURE.md`: Hermes prompt-cache invariants and the
-idea of a per-task git worktree (not a copy of `subagent_worktree.py`),
-OpenClaw's connect-first gateway and the rule that chat text cannot
-approve, Praxis approval classes, Swarm's hash-chained audit idea, and the
-public Claude Code hook event names (`PreToolUse`, exit code 2 blocks).
+systemd unit, coding mode, and local Decision Engine are original code.
+They follow patterns described in `docs/ARCHITECTURE.md`: Hermes
+prompt-cache invariants and the idea of a per-task git worktree (not a
+copy of `subagent_worktree.py`), OpenClaw's connect-first gateway and the
+rule that chat text cannot approve, Praxis approval classes, Swarm's
+hash-chained audit idea, and the public Claude Code hook event names
+(`PreToolUse`, exit code 2 blocks). Jury role names Scout, Strategist,
+Skeptic, and Forecaster are SMF Swarm 2.0's; the lens text in
+`praxis_prime.decide.judges` was written here and was not copied.
 The WebSocket handshake is the public RFC 6455 framing, written here, not
 taken from another project's socket stack. Nothing was vendored. When a
 file is later copied:
@@ -91,9 +94,10 @@ notice was written.
 
 The local Decision Engine is Praxis Prime's own code. It is not TypeSafe's
 Jev, and it does not call TypeSafe's hosted API. Jev's public request and
-response shape is a reference for the future `/v1/decide` route. TypeSafe's
-MIT SDKs are optional compatibility clients, not a dependency of this
-skeleton. The Jev model weights are proprietary and must not be copied.
+response shape is a reference for `POST /v1/decide` and the `/v1/systemone`
+alias. TypeSafe's MIT SDKs are optional compatibility clients, not a
+dependency. The Jev model weights are proprietary and must not be copied.
+No TypeSafe source is vendored in `praxis_prime.decide`.
 
 ## Runtime components that are not bundled
 

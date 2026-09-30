@@ -47,6 +47,8 @@ def main(argv: list[str] | None = None) -> int:
         return _telegram_command(args)
     if args.command == "code":
         return _code_command(args)
+    if args.command == "decide":
+        return _decide_command(args)
     parser.print_help()
     return 2
 
@@ -133,6 +135,12 @@ def build_parser() -> argparse.ArgumentParser:
     code.add_argument("--discard", action="store_true", help="Delete the task branch.")
     code.add_argument("--keep", action="store_true", help="Leave the task branch. Do not merge it.")
     _add_runtime_args(code)
+
+    decide = commands.add_parser(
+        "decide",
+        help="Ask the local Decision Engine. Does not call a hosted service.",
+    )
+    decide.add_argument("rest", nargs=argparse.REMAINDER, help=argparse.SUPPRESS)
 
     telegram = commands.add_parser("telegram", help="Pair the Telegram bot with your chat.")
     telegram_commands = telegram.add_subparsers(dest="telegram_command")
@@ -440,6 +448,152 @@ def _code_command(args: argparse.Namespace) -> int:
     finally:
         runtime.close()
     return 0 if result.ok else 1
+
+
+def _decide_command(args: argparse.Namespace) -> int:
+    parts = list(args.rest)
+    if parts and parts[0] == "--":
+        parts = parts[1:]
+    if not parts or parts[0] not in {"report", "feedback"}:
+        parts = ["ask", *parts]
+    parser = _decide_parser()
+    try:
+        parsed = parser.parse_args(parts)
+    except SystemExit as exc:
+        code = exc.code
+        return 2 if code is None else int(code)
+    if parsed.action == "report":
+        return _decide_report(parsed)
+    if parsed.action == "feedback":
+        return _decide_feedback(parsed)
+    return _decide_ask(parsed)
+
+
+def _decide_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="praxis-prime decide")
+    commands = parser.add_subparsers(dest="action", required=True)
+    ask = commands.add_parser("ask")
+    ask.add_argument("question", nargs="+")
+    ask.add_argument("--options", default="", help="Comma-separated choices. Omit for yes/no.")
+    ask.add_argument("--state", default="", help="Untrusted text the question is about.")
+    ask.add_argument("--max-tier", type=int, default=None, help="Highest tier, 0 through 4.")
+    ask.add_argument("--explain", action="store_true", help="Print the tier trace.")
+    ask.add_argument("--config-dir")
+    ask.add_argument("--data-dir")
+    report = commands.add_parser("report", help="Print a reliability report and fit a calibrator.")
+    report.add_argument("--config-dir")
+    report.add_argument("--data-dir")
+    feedback = commands.add_parser("feedback", help="Record whether a decision was correct.")
+    feedback.add_argument("decision_id")
+    feedback.add_argument("--correct", action="store_true")
+    feedback.add_argument("--incorrect", action="store_true")
+    feedback.add_argument(
+        "--label",
+        default="",
+        help="Gold label. Marks the prediction right or wrong.",
+    )
+    feedback.add_argument("--config-dir")
+    feedback.add_argument("--data-dir")
+    return parser
+
+
+def _decide_ask(args: argparse.Namespace) -> int:
+    from praxis_prime.decide.schema import DecideError, simple_request
+
+    question = " ".join(args.question).strip()
+    options = [part.strip() for part in args.options.split(",") if part.strip()]
+    try:
+        request = simple_request(
+            question,
+            options=options,
+            state=args.state,
+            max_tier=args.max_tier,
+        )
+    except DecideError as exc:
+        print(f"praxis-prime decide: {exc}", file=sys.stderr)
+        return 2
+    try:
+        runtime = _decide_runtime(args)
+    except (OSError, ValueError) as exc:
+        print(f"praxis-prime decide: {exc}", file=sys.stderr)
+        return 2
+    try:
+        response = runtime.engine.decide(request)
+    except DecideError as exc:
+        print(f"praxis-prime decide: {exc}", file=sys.stderr)
+        return 2
+    finally:
+        runtime.close()
+    answer = response.answers["q"]
+    print(
+        f"{answer.label}  tier T{answer.tier}  "
+        f"confidence {answer.confidence:.2f}  id {response.decision_id}"
+    )
+    if args.explain:
+        for line in answer.trace:
+            print(line)
+    if answer.escalate:
+        print("escalate: true")
+    return 0
+
+
+def _decide_report(args: argparse.Namespace) -> int:
+    from praxis_prime.decide.engine import fit_report
+
+    try:
+        runtime = _decide_runtime(args)
+    except (OSError, ValueError) as exc:
+        print(f"praxis-prime decide: {exc}", file=sys.stderr)
+        return 2
+    try:
+        sys.stdout.write(fit_report(runtime.engine))
+    finally:
+        runtime.close()
+    return 0
+
+
+def _decide_feedback(args: argparse.Namespace) -> int:
+    if args.correct and args.incorrect:
+        print("praxis-prime decide: pass only one of --correct and --incorrect", file=sys.stderr)
+        return 2
+    if not args.correct and not args.incorrect and not args.label:
+        print(
+            "praxis-prime decide: pass --correct, --incorrect, or --label",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        runtime = _decide_runtime(args)
+    except (OSError, ValueError) as exc:
+        print(f"praxis-prime decide: {exc}", file=sys.stderr)
+        return 2
+    try:
+        correct = True if args.correct else False if args.incorrect else None
+        changed = runtime.engine.labels.feedback(
+            args.decision_id,
+            correct=correct,
+            gold=args.label or None,
+        )
+    finally:
+        runtime.close()
+    if changed == 0:
+        print(f"praxis-prime decide: no decision {args.decision_id}", file=sys.stderr)
+        return 2
+    print(f"recorded feedback for {args.decision_id}")
+    return 0
+
+
+def _decide_runtime(args: argparse.Namespace):
+    from praxis_prime.runtime import build_runtime
+
+    config_path = Path(args.config_dir) / "config.toml" if args.config_dir else None
+    data_path = Path(args.data_dir) / "prime.db" if args.data_dir else None
+    return build_runtime(
+        env=os.environ,
+        config_path=config_path,
+        data_path=data_path,
+        cwd=Path.cwd(),
+    )
 
 
 def _config_command(explicit: str | None, *, force: bool) -> int:

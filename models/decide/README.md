@@ -1,7 +1,9 @@
-# Decision Engine assets
+# Decision Engine prompts
 
-Reserved for judge prompts, label seeds, and calibrator defaults.
+No model weights live here. Judge lenses are original strings in
+`packages/prime-core/praxis_prime/decide/judges.py`. Scout, Strategist,
+Skeptic, and Forecaster are SMF Swarm 2.0 role names used as lenses. The
+prompt text was not copied from that project.
 
-No model weights are stored in git. Download weights on first run, after a license check and an explicit yes. Prefer Apache-2.0 or MIT weights. Verify Llama and Gemma terms before using them.
-
-TODO: ARCHITECTURE §7.
+Download a local model yourself (Ollama is the default router). Do not
+commit weights, API keys, or calibration files from a real machine.

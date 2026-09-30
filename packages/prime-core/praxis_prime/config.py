@@ -28,6 +28,11 @@ _CONFIG_HEADER = """\
 # Compliance dials default to off (ARCHITECTURE §17). A dial position is one
 # of: off, monitor, enforce. Dial hooks do nothing while a dial is off.
 # The baseline safety spine is not a dial and cannot be turned off.
+#
+# The Decision Engine is local. It does not call a hosted decision service.
+# decide.prescreen defaults to false, so approvals are unchanged until you
+# turn it on. The engine cannot auto-approve git push, force operations,
+# deletes of tracked files, or writes outside the task worktree.
 """
 
 _PROFILE_HEADER = """\
@@ -63,17 +68,35 @@ def default_config_document() -> dict[str, object]:
             "embed": "local:bge-small",
         },
         "decide": {
+            "enabled": True,
+            "prescreen": False,
             "profile": "gpu-8g",
+            "max_tier": 4,
             "tiers": ["rules", "classifiers", "llm_judge", "jury"],
             "min_confidence": 0.8,
             "disagreement_js": 0.15,
+            "aggregation": "confidence-weighted",
+            "jury_size": 3,
+            "escalate_to_human": False,
             "latency_budget_ms": {"default": 800, "voice": 300},
-            "judges": {
-                "backend": "llama.cpp",
-                "models": ["qwen3:1.7b-q4", "phi-4-mini:q4"],
-                "personas": ["scout", "skeptic", "strategist"],
+            "models": {
+                "tier2": "ollama:qwen3:8b",
+                "tier4": "ollama:qwen3:32b",
             },
+            "judges": {
+                "backend": "ollama",
+                "models": ["ollama:qwen3:8b", "ollama:qwen3:1.7b"],
+                "personas": [
+                    "skeptic",
+                    "safety",
+                    "domain",
+                    "cost",
+                    "user-advocate",
+                ],
+            },
+            "budgets": {"max_usd": 0.05, "max_calls": 8},
             "calibration": {"method": "auto", "recalibrate": "nightly"},
+            "lists": {"allow": [], "deny": []},
         },
         "sandbox": {"default_tier": "bwrap", "network": "off"},
         "jarvis": {

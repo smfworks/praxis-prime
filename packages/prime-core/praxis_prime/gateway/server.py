@@ -15,6 +15,8 @@ import socket
 import threading
 
 from praxis_prime.approvals.queue import ApprovalQueue, parse_decision
+from praxis_prime.decide.engine import DecisionEngine
+from praxis_prime.decide.schema import DecideError
 from praxis_prime.gateway.auth import bearer_token, token_ok
 from praxis_prime.gateway.protocol import (
     CHAT_ROLES,
@@ -48,12 +50,14 @@ class GatewayServer:
         approvals: ApprovalQueue,
         logger: JsonLogger | None = None,
         socket_path: str | None = None,
+        decider: DecisionEngine | None = None,
     ) -> None:
         self.host = host
         self._port = port
         self.token = token
         self.agent = agent
         self.approvals = approvals
+        self.decider = decider
         self.logger = logger
         self.socket_path = socket_path
         self._stopped = threading.Event()
@@ -230,7 +234,28 @@ class GatewayServer:
             except ValueError as exc:
                 return 400, _error("bad_request", str(exc))
             return 200, {"ok": True, "approval": item}
+        if method == "POST" and route in {"/v1/decide", "/v1/systemone"}:
+            return self._http_decide(body)
         return 404, _error("not_found", "no such route")
+
+    def _http_decide(self, body: bytes) -> tuple[int, dict[str, object]]:
+        if self.decider is None:
+            return 503, _error("unavailable", "decision engine is not configured")
+        try:
+            parsed = json.loads(body.decode("utf-8") or "{}")
+        except json.JSONDecodeError:
+            return 400, _error("bad_request", "decide body must be JSON")
+        if not isinstance(parsed, dict):
+            return 400, _error("bad_request", "decide body must be an object")
+        try:
+            result = self.decider.decide(parsed)
+        except DecideError as exc:
+            return 400, _error("bad_request", str(exc))
+        except Exception:
+            if self.logger is not None:
+                self.logger.warning("decide_failed")
+            return 500, _error("error", "decision engine failed")
+        return 200, result.to_wire()
 
     def _handle_ws(
         self,
@@ -539,7 +564,14 @@ def _content_length(headers: dict[str, str]) -> int:
 
 
 def _write_http(conn: socket.socket, status: int, payload: dict[str, object]) -> None:
-    reasons = {200: "OK", 400: "Bad Request", 401: "Unauthorized", 404: "Not Found"}
+    reasons = {
+        200: "OK",
+        400: "Bad Request",
+        401: "Unauthorized",
+        404: "Not Found",
+        500: "Error",
+        503: "Unavailable",
+    }
     body = json.dumps(payload).encode("utf-8")
     head = (
         f"HTTP/1.1 {status} {reasons.get(status, 'Error')}\r\n"
