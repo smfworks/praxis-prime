@@ -8,6 +8,7 @@ import os
 import stat
 import subprocess
 import sys
+import tempfile
 import zipfile
 from pathlib import Path
 
@@ -467,7 +468,7 @@ def _assert_secret_stays(data: Path, secret: Path, exc: BaseException) -> None:
         assert _SECRET not in text
 
 
-@pytest.mark.parametrize("kind", ["LICENSE", "NOTICE", "pack.json"])
+@pytest.mark.parametrize("kind", ["LICENSE", "NOTICE", "pack.json", "knowledge.md"])
 def test_symlinked_pack_file_is_not_read(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -530,6 +531,54 @@ def test_zip_member_count_and_size_limits(tmp_path: Path, monkeypatch: pytest.Mo
         archive.writestr("pack.json", "0123456789")
     with pytest.raises(PackError, match="too large"):
         _extract_zip(big, tmp_path / "big-out")
+
+
+def test_zip_and_git_install_when_tmpdir_is_a_symlink(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    real_tmp = tmp_path / "real-tmp"
+    real_tmp.mkdir()
+    link_tmp = tmp_path / "link-tmp"
+    link_tmp.symlink_to(real_tmp, target_is_directory=True)
+    monkeypatch.setattr(tempfile, "tempdir", str(link_tmp))
+    monkeypatch.setenv("TMPDIR", str(link_tmp))
+    staged = tmp_path / "staged"
+    _write_pack(staged, name="demo_pack", javascript=False, python=False)
+    archive_path = tmp_path / "ok.zip"
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        for path in staged.rglob("*"):
+            if path.is_file():
+                archive.write(path, path.relative_to(staged).as_posix())
+    data = tmp_path / "data"
+    installed = install_pack(str(archive_path), data)
+    assert installed.path.name == "demo_pack"
+    assert (installed.path / "pack.json").is_file()
+    assert (installed.path / "knowledge.md").is_file()
+
+    def runner(argv: list[str]) -> None:
+        _write_pack(Path(argv[-1]), name="demo_pack", javascript=False, python=False)
+
+    git_installed = install_pack(
+        "https://example.invalid/demo-pack.git",
+        data,
+        git_runner=runner,
+    )
+    assert git_installed.path.name == "demo_pack"
+    assert (git_installed.path / "pack.json").is_file()
+
+
+@pytest.mark.parametrize(
+    "members",
+    [("pack.json", "pack.json/x"), ("a", "a/")],
+)
+def test_zip_file_dir_collision_is_pack_error(tmp_path: Path, members: tuple[str, str]):
+    archive_path = tmp_path / "collide.zip"
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        for name in members:
+            archive.writestr(name, b"")
+    with pytest.raises(PackError, match="duplicate"):
+        _extract_zip(archive_path, tmp_path / "out")
 
 
 def test_bad_zip_and_duplicate_members_are_pack_errors(tmp_path: Path):
