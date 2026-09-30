@@ -1,0 +1,59 @@
+# Metadata-only starter packs for dials whose full control sets are later work.
+# Turning one on does not add detectors. Dials still default to off.
+
+[[pack]]
+id = "soc2"
+dial = "soc2"
+title = "SOC 2"
+disclaimer = "Starter placeholder. Not a SOC 2 attestation. Not legal advice."
+
+[pack.meta]
+starter = true
+not_legal_advice = true
+legal_references = ["AICPA Trust Services Criteria (reference only)"]
+
+[[pack]]
+id = "eu_ai_act"
+dial = "eu_ai_act"
+title = "EU AI Act"
+disclaimer = "Starter placeholder for disclosure and traceability. Not legal advice."
+
+[pack.meta]
+starter = true
+not_legal_advice = true
+legal_references = ["Regulation (EU) 2024/1689 (EU AI Act) — reference only"]
+
+[[pack]]
+id = "ccpa"
+dial = "ccpa"
+title = "CCPA/CPRA"
+disclaimer = "Starter placeholder. Access and delete requests use praxis-prime gdpr export and erase. Not legal advice."
+
+[pack.meta]
+starter = true
+not_legal_advice = true
+legal_references = [
+  "Cal. Civ. Code §§ 1798.100–1798.199 (CCPA/CPRA) — reference only",
+]
+
+[[pack]]
+id = "nist_ai_rmf"
+dial = "nist_ai_rmf"
+title = "NIST AI RMF"
+disclaimer = "Starter placeholder for Govern, Map, Measure, and Manage. Not a certification. Not legal advice."
+
+[pack.meta]
+starter = true
+not_legal_advice = true
+legal_references = ["NIST AI Risk Management Framework 1.0 — reference only"]
+
+[[pack]]
+id = "iso_42001"
+dial = "iso_42001"
+title = "ISO/IEC 42001"
+disclaimer = "Starter placeholder for an AI management-system evidence pack. Not a certification. Not legal advice."
+
+[pack.meta]
+starter = true
+not_legal_advice = true
+legal_references = ["ISO/IEC 42001 — reference only"]

@@ -97,6 +97,7 @@ class AgentLoop:
         """Run one user turn, yielding text and timeline events as they happen."""
         control = control or TurnControl()
         self._turn_user = user_text
+        self.policy.session_id = self.session_id
         self._ingress(user_text)
         self._add_user(user_text)
         if self.session_id and self.store is not None:
@@ -113,25 +114,35 @@ class AgentLoop:
                 yield from self._cancelled("")
                 return
 
+            blocked = self._prepare_model()
+            if blocked:
+                yield StatusEvent("plan", blocked)
+                self._add_assistant(AssistantFinal(content=blocked))
+                yield TextDelta(blocked)
+                yield from self._turn_ended(blocked, error="compliance")
+                return
             model = self.router.primary.spec()
             yield StatusEvent("plan", f"iteration {iteration} · {model}")
-            self._pre_model()
             request = ChatRequest(
                 model=self.router.primary.model,
                 messages=self._messages(),
                 tools=tuple(self.registry.schemas()),
             )
             outcome = _Completion()
-            yield from self._complete(request, control, outcome)
-            if outcome.error:
-                return
-            if control.cancelled:
-                self._add_assistant(AssistantFinal(content=outcome.content))
-                yield from self._cancelled(outcome.content)
-                return
-            final = outcome.final or AssistantFinal(content=outcome.content)
-            if final.content and not outcome.streamed:
-                yield TextDelta(final.content)
+            try:
+                yield from self._complete(request, control, outcome)
+                if outcome.error:
+                    return
+                if control.cancelled:
+                    self._add_assistant(AssistantFinal(content=outcome.content))
+                    yield from self._cancelled(outcome.content)
+                    return
+                final = outcome.final or AssistantFinal(content=outcome.content)
+                final = self._scan_model_output(final)
+                if final.content and not outcome.streamed:
+                    yield TextDelta(final.content)
+            finally:
+                self._restore_chain()
             self._add_assistant(final)
             self._audit(
                 "model_call",
@@ -178,13 +189,57 @@ class AgentLoop:
 
     def _ingress(self, user_text: str) -> None:
         self.policy.evaluate(
-            PolicyContext(hook=HookPoint.H1_INGRESS, summary=_short(user_text), mode=self.mode)
+            PolicyContext(
+                hook=HookPoint.H1_INGRESS,
+                summary=_short(user_text),
+                text=user_text,
+                mode=self.mode,
+            )
         )
 
-    def _pre_model(self) -> None:
-        self.policy.evaluate(
-            PolicyContext(hook=HookPoint.H2_PRE_MODEL, mode=self.mode, tool="model")
+    def _prepare_model(self) -> str | None:
+        """Pin or block the model call. Return an error string when enforce blocks it."""
+        text = "\n".join(message.content for message in self.history)
+        verdict = self.policy.evaluate(
+            PolicyContext(
+                hook=HookPoint.H2_PRE_MODEL,
+                mode=self.mode,
+                tool="model",
+                text=text,
+                summary=_short(text),
+            )
         )
+        if verdict.decision == "deny":
+            return verdict.reason
+        allowed, message = self.policy.constrain_chain(self.router.chain, verdict)
+        if message:
+            return message
+        if allowed != list(self.router.chain):
+            self._chain_saved = list(self.router.chain)
+            self.router.chain = allowed
+        return None
+
+    def _restore_chain(self) -> None:
+        saved = getattr(self, "_chain_saved", None)
+        if saved is not None:
+            self.router.chain = saved
+            self._chain_saved = None
+
+    def _scan_model_output(self, final: AssistantFinal) -> AssistantFinal:
+        if not final.content:
+            return final
+        verdict = self.policy.evaluate(
+            PolicyContext(
+                hook=HookPoint.H4_POST_TOOL,
+                tool="model",
+                mode=self.mode,
+                text=final.content,
+                summary=_short(final.content),
+            )
+        )
+        if verdict.redact and verdict.redacted_text:
+            return AssistantFinal(content=verdict.redacted_text, tool_calls=final.tool_calls)
+        return final
 
     def _complete(
         self,
@@ -248,6 +303,7 @@ class AgentLoop:
             force_reason=prepared.force_reason,
             mode=self.mode,
             summary=prepared.summary,
+            text=prepared.summary,
         )
         verdict = self.policy.evaluate(ctx)
         if self.screener is not None:
@@ -330,15 +386,18 @@ class AgentLoop:
             raw = f"{type(exc).__name__}: {exc}"
             ok = False
         raw, ok = self._post_tool_hook(tool.name, call.arguments, raw, ok=ok)
-        self.policy.evaluate(
+        post = self.policy.evaluate(
             PolicyContext(
                 hook=HookPoint.H4_POST_TOOL,
                 tool=tool.name,
                 risk=prepared.risk,
                 mode=self.mode,
                 summary=_short(raw),
+                text=raw,
             )
         )
+        if post.redact and post.redacted_text:
+            raw = post.redacted_text
         body = raw if len(raw) <= _OUTPUT_LIMIT else raw[:_OUTPUT_LIMIT] + "\n…[truncated]"
         if tool.trusted_output:
             shown = body.replace(FENCE_END, "<<<END UNTRUSTED (quoted)>>>")
@@ -389,10 +448,16 @@ class AgentLoop:
     def _persist(self, message: ChatMessage) -> None:
         if self.store is None or not self.session_id:
             return
-        self.policy.evaluate(
-            PolicyContext(hook=HookPoint.H6_MEMORY_WRITE, tool="session", mode=self.mode)
+        verdict = self.policy.evaluate(
+            PolicyContext(
+                hook=HookPoint.H6_MEMORY_WRITE,
+                tool="session",
+                mode=self.mode,
+                text=message.content,
+                summary=_short(message.content),
+            )
         )
-        self.store.append(self.session_id, message)
+        self.store.append(self.session_id, _stored_message(message, verdict))
 
     def _audit(self, kind: str, summary: str, payload: dict[str, object]) -> None:
         if self.audit is None:
@@ -516,6 +581,22 @@ class _Completion:
         self.content = ""
         self.streamed = False
         self.error: str | None = None
+
+
+def _stored_message(message: ChatMessage, verdict: object) -> ChatMessage:
+    """Keep the live transcript. Persist a redacted copy when enforce says so."""
+    redact = bool(getattr(verdict, "redact", False))
+    decision = str(getattr(verdict, "decision", "allow"))
+    redacted = str(getattr(verdict, "redacted_text", "") or "")
+    if decision == "allow" and not redact:
+        return message
+    content = redacted if redact and redacted else "[redacted]"
+    return ChatMessage(
+        role=message.role,
+        content=content,
+        tool_calls=message.tool_calls,
+        tool_call_id=message.tool_call_id,
+    )
 
 
 def _short(text: str, limit: int = 160) -> str:

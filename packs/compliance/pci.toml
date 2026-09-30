@@ -1,0 +1,37 @@
+# PCI starter dial. Card numbers are redacted and blocked from egress.
+# Not a PCI DSS attestation.
+
+[pack]
+id = "pci"
+dial = "pci"
+title = "PCI DSS"
+disclaimer = "Starter policy. Technical card-number filter only. Not a PCI DSS attestation. Not legal advice."
+
+[meta]
+starter = true
+not_legal_advice = true
+legal_references = [
+  "PCI DSS (Payment Card Industry Data Security Standard) — cardholder data",
+]
+
+[audit]
+required_events = ["detection", "block", "redaction"]
+
+[[detectors]]
+id = "pan"
+kind = "luhn"
+data_class = "PCI"
+
+[[rules]]
+id = "pan-egress"
+action = "egress_deny"
+data_class = "PCI"
+hooks = ["H3", "H5"]
+tools = ["browser", "mcp", "telegram", "web_fetch"]
+
+[[rules]]
+id = "pan-redact"
+action = "redact"
+data_class = "PCI"
+hooks = ["H4", "H6"]
+style = "last4"

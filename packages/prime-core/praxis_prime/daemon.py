@@ -358,4 +358,5 @@ def _telegram(
         queue,
         logger,
         offset_path=state_dir(env) / "telegram-offset.txt",
+        policy=agent.runtime.policy,
     )

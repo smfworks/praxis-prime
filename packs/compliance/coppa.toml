@@ -1,0 +1,55 @@
+# COPPA starter pack. Technical controls only. Not legal advice.
+# Parental consent is a gate: enforce asks or blocks third-party egress.
+# It does not collect or verify a consent form by itself.
+
+[pack]
+id = "coppa"
+dial = "coppa"
+title = "COPPA"
+disclaimer = "Starter policy for under-13 data. Technical controls only. Not legal advice. Not a verifiable parental-consent system."
+
+[meta]
+starter = true
+not_legal_advice = true
+legal_references = [
+  "15 U.S.C. §§ 6501–6506 (COPPA)",
+  "16 CFR Part 312 (COPPA rule)",
+]
+
+[retention]
+days = 30
+
+[audit]
+required_events = ["detection", "approval", "block", "redaction", "retention"]
+
+[[detectors]]
+id = "under_13"
+kind = "age_under_13"
+data_class = "CHILD_DATA"
+
+[[rules]]
+id = "child-route"
+action = "route_local"
+data_class = "CHILD_DATA"
+hooks = ["H2"]
+provider_flags = ["local"]
+
+[[rules]]
+id = "child-egress"
+action = "egress_deny"
+data_class = "CHILD_DATA"
+hooks = ["H3", "H5"]
+tools = ["browser", "mcp", "telegram", "web_fetch"]
+
+[[rules]]
+id = "parental-consent"
+action = "require_approval"
+data_class = "CHILD_DATA"
+hooks = ["H5", "H6"]
+
+[[rules]]
+id = "child-redact"
+action = "redact"
+data_class = "CHILD_DATA"
+hooks = ["H4", "H6"]
+style = "mask"

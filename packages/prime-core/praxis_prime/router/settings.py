@@ -9,9 +9,10 @@ from __future__ import annotations
 import os
 import tomllib
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
+from praxis_prime.compliance.providers import ProviderFlags, flags_from_config
 from praxis_prime.paths import config_dir
 from praxis_prime.policy.dials import default_positions
 from praxis_prime.router.http import normalize_base
@@ -45,6 +46,7 @@ class Settings:
     memory_profile_chars: int = 4000
     memory_half_life_days: float = 14.0
     memory_episodic_ttl_days: int = 90
+    provider_flags: dict[str, ProviderFlags] = field(default_factory=dict)
 
     def __repr__(self) -> str:
         return (
@@ -120,38 +122,55 @@ def load_settings(
     if mode not in _MODES:
         mode = "ask"
 
+    ollama_host = normalize_base(
+        _first(
+            environ.get("PRAXIS_PRIME_OLLAMA_HOST"),
+            environ.get("OLLAMA_HOST"),
+            _str(ollama_cfg.get("host")),
+            "http://127.0.0.1:11434",
+        )
+    )
+    compat_url = normalize_base(
+        _first(
+            environ.get("PRAXIS_PRIME_OPENAI_COMPATIBLE_BASE_URL"),
+            _str(compat_cfg.get("base_url")),
+            "",
+        )
+    )
+    openai_url = normalize_base(
+        _first(environ.get("PRAXIS_PRIME_OPENAI_BASE_URL"), "https://api.openai.com/v1")
+    )
+    anthropic_url = normalize_base(
+        _first(environ.get("PRAXIS_PRIME_ANTHROPIC_BASE_URL"), "https://api.anthropic.com")
+    )
+    xai_url = normalize_base(
+        _first(environ.get("PRAXIS_PRIME_XAI_BASE_URL"), "https://api.x.ai/v1")
+    )
+    provider_flags = {
+        "ollama": flags_from_config("ollama", ollama_cfg, base_url=ollama_host),
+        "openai-compatible": flags_from_config(
+            "openai-compatible", compat_cfg, base_url=compat_url
+        ),
+        "openai": flags_from_config("openai", _table(providers.get("openai")), base_url=openai_url),
+        "anthropic": flags_from_config(
+            "anthropic", _table(providers.get("anthropic")), base_url=anthropic_url
+        ),
+        "xai": flags_from_config("xai", _table(providers.get("xai")), base_url=xai_url),
+    }
+
     return Settings(
         model_spec=primary,
         fallback_specs=fallbacks,
-        ollama_host=normalize_base(
-            _first(
-                environ.get("PRAXIS_PRIME_OLLAMA_HOST"),
-                environ.get("OLLAMA_HOST"),
-                _str(ollama_cfg.get("host")),
-                "http://127.0.0.1:11434",
-            )
-        ),
-        openai_compatible_base_url=normalize_base(
-            _first(
-                environ.get("PRAXIS_PRIME_OPENAI_COMPATIBLE_BASE_URL"),
-                _str(compat_cfg.get("base_url")),
-                "",
-            )
-        ),
+        ollama_host=ollama_host,
+        openai_compatible_base_url=compat_url,
         openai_compatible_model=_first(
             environ.get("PRAXIS_PRIME_OPENAI_COMPATIBLE_MODEL"),
             _str(compat_cfg.get("model")),
             "local",
         ),
-        openai_base_url=normalize_base(
-            _first(environ.get("PRAXIS_PRIME_OPENAI_BASE_URL"), "https://api.openai.com/v1")
-        ),
-        anthropic_base_url=normalize_base(
-            _first(environ.get("PRAXIS_PRIME_ANTHROPIC_BASE_URL"), "https://api.anthropic.com")
-        ),
-        xai_base_url=normalize_base(
-            _first(environ.get("PRAXIS_PRIME_XAI_BASE_URL"), "https://api.x.ai/v1")
-        ),
+        openai_base_url=openai_url,
+        anthropic_base_url=anthropic_url,
+        xai_base_url=xai_url,
         openai_api_key=_first(
             environ.get("PRAXIS_PRIME_OPENAI_API_KEY"),
             environ.get("OPENAI_API_KEY"),
@@ -180,6 +199,7 @@ def load_settings(
         memory_profile_chars=_bounded_int(_str(memory.get("profile_chars")), 4000, 200, 100_000),
         memory_half_life_days=_positive_float(_str(memory.get("episodic_half_life_days")), 14.0),
         memory_episodic_ttl_days=_bounded_int(_str(memory.get("episodic_ttl_days")), 90, 1, 3650),
+        provider_flags=provider_flags,
     )
 
 

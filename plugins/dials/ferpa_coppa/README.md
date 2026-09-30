@@ -1,5 +1,5 @@
 # ferpa_coppa
 
-Dial plugin placeholder. Default position: off. Not loaded.
+Dial plugin placeholder. The kernel reads `packs/compliance/ferpa.toml` and `coppa.toml`. Default position: off.
 
 TODO: ARCHITECTURE §17.

@@ -1,0 +1,53 @@
+# FERPA starter pack. Technical controls only. Not legal advice.
+
+[pack]
+id = "ferpa"
+dial = "ferpa"
+title = "FERPA"
+disclaimer = "Starter policy for education records. Technical controls only. Not legal advice."
+
+[meta]
+starter = true
+not_legal_advice = true
+legal_references = [
+  "20 U.S.C. § 1232g (FERPA)",
+  "34 CFR Part 99 (FERPA regulations)",
+]
+
+[retention]
+days = 365
+
+[audit]
+required_events = ["detection", "approval", "redaction", "retention"]
+
+[[detectors]]
+id = "education_record"
+kind = "phrase"
+data_class = "EDUCATION_RECORD"
+terms = ["education record", "student record", "report card"]
+
+[[detectors]]
+id = "student_id"
+kind = "regex"
+data_class = "EDUCATION_RECORD"
+pattern = '(?i)\bstudent\s*id\s*[:=#]?\s*\S+'
+
+[[detectors]]
+id = "student_email"
+kind = "email"
+data_class = "EDUCATION_RECORD"
+context = ["student", "pupil", "education record"]
+
+[[rules]]
+id = "ferpa-send"
+action = "require_approval"
+data_class = "EDUCATION_RECORD"
+hooks = ["H3", "H5"]
+tools = ["browser", "mcp", "telegram", "web_fetch"]
+
+[[rules]]
+id = "ferpa-redact"
+action = "redact"
+data_class = "EDUCATION_RECORD"
+hooks = ["H4", "H6"]
+style = "mask"

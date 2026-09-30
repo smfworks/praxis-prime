@@ -1,0 +1,94 @@
+# North Carolina Identity Theft Protection Act starter pack.
+# N.C.G.S. §§ 75-60 to 75-66. Technical controls only. Not legal advice.
+# Professional overlays (legal, medical, education, homeschool, forensic) are not
+# encoded here. SOURCE-NOTES §11 marks several of those rows S or U.
+# The 30-day breach SLA is an internal policy choice, not a statutory day count.
+# § 75-65 says notice "without unreasonable delay".
+
+[pack]
+id = "state_nc"
+dial = "state_nc"
+title = "North Carolina"
+disclaimer = "Starter policy for the NC Identity Theft Protection Act. Technical controls only. Not legal advice. Confirm with North Carolina counsel before relying on it."
+
+[meta]
+starter = true
+not_legal_advice = true
+legal_references = [
+  "N.C.G.S. § 75-61 (definitions, including personal information and security breach)",
+  "N.C.G.S. § 75-62 (SSN restrictions)",
+  "N.C.G.S. § 75-64 (disposal of personal information)",
+  "N.C.G.S. § 75-65 (security breach notification)",
+  "N.C.G.S. § 75-66 (publication of personal information)",
+]
+
+[retention]
+days = 365
+
+[audit]
+required_events = ["detection", "block", "redaction", "breach", "retention"]
+
+[breach]
+enabled = true
+sla_days = 30
+sla_is_legal_deadline = false
+
+[[detectors]]
+id = "ssn"
+kind = "ssn"
+data_classes = ["NC_PII", "NC_SSN"]
+
+[[detectors]]
+id = "named_email"
+kind = "named_email"
+data_class = "NC_PII"
+
+[[detectors]]
+id = "named_phone"
+kind = "named_phone"
+data_class = "NC_PII"
+
+[[detectors]]
+id = "card"
+kind = "luhn"
+data_class = "NC_PII"
+
+[[detectors]]
+id = "account"
+kind = "account"
+data_class = "NC_PII"
+context = ["checking account", "savings account", "account number"]
+
+[[detectors]]
+id = "drivers_license"
+kind = "regex"
+data_class = "NC_PII"
+pattern = "(?i)\\bdrivers? license\\s*[:=#]?\\s*[A-Z0-9][A-Z0-9\\-]{4,}"
+
+[[rules]]
+id = "ssn-egress"
+action = "block"
+data_class = "NC_SSN"
+hooks = ["H3", "H5"]
+tools = ["browser", "mcp", "telegram", "web_fetch", "shell"]
+
+[[rules]]
+id = "pii-send"
+action = "require_approval"
+data_class = "NC_PII"
+hooks = ["H5"]
+tools = ["telegram"]
+
+[[rules]]
+id = "pii-redact"
+action = "redact"
+data_class = "NC_PII"
+hooks = ["H4", "H6"]
+style = "last4"
+
+[[rules]]
+id = "ssn-redact"
+action = "redact"
+data_class = "NC_SSN"
+hooks = ["H4", "H6"]
+style = "last4"

@@ -143,6 +143,7 @@ class TelegramAdapter:
         logger: JsonLogger | None = None,
         *,
         offset_path: Path | None = None,
+        policy: object | None = None,
     ) -> None:
         self.transport = transport
         self.pairing = pairing
@@ -150,6 +151,7 @@ class TelegramAdapter:
         self.queue = queue
         self.logger = logger
         self.offset_path = offset_path
+        self.policy = policy
         self._sessions: dict[int, str] = {}
         self._session_lock = threading.Lock()
         self._offset = self._load_offset()
@@ -185,7 +187,34 @@ class TelegramAdapter:
         owner = self.pairing.owner_chat_id()
         if owner is None or not text.strip():
             return
-        self._send(owner, text)
+        outgoing = self._policy_outbound(text)
+        if outgoing is None:
+            return
+        self._send(owner, outgoing)
+
+    def _policy_outbound(self, text: str) -> str | None:
+        """Scan an owner-bound message. Dials that are off leave it unchanged."""
+        policy = self.policy
+        if policy is None or not policy.dials_active():
+            return text
+        from praxis_prime.policy.engine import HookPoint, PolicyContext
+        from praxis_prime.tools.registry import Risk
+
+        verdict = policy.evaluate(
+            PolicyContext(
+                hook=HookPoint.H5_PRE_SEND,
+                tool="telegram",
+                risk=Risk.READ,
+                text=text,
+                summary=text[:180],
+                mode="ask",
+            )
+        )
+        if verdict.decision in {"deny", "ask"}:
+            return None
+        if verdict.redact and verdict.redacted_text:
+            return verdict.redacted_text
+        return text
 
     def notify_resolved(self, item: dict[str, object]) -> None:
         if item.get("actor") not in {"timeout", "shutdown"}:

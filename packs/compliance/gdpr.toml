@@ -1,0 +1,64 @@
+# GDPR starter pack. Technical controls only. Not legal advice.
+# The lawful-basis note is a reminder for the owner. This pack does not pick a basis.
+# EU-transfer check: local or eu_region. zero_retention alone is not treated as a transfer basis.
+
+[pack]
+id = "gdpr"
+dial = "gdpr"
+title = "GDPR"
+disclaimer = "Starter policy. Technical controls only. Not legal advice and not a lawful-basis determination."
+
+[meta]
+starter = true
+not_legal_advice = true
+legal_references = [
+  "Regulation (EU) 2016/679 (GDPR)",
+  "GDPR Article 9 (special categories)",
+  "GDPR Articles 15 and 17 (access and erasure)",
+  "GDPR Chapter V (transfers)",
+]
+
+[retention]
+days = 30
+
+[audit]
+required_events = ["detection", "redaction", "route", "retention"]
+
+[gdpr]
+lawful_basis_note = "Record a lawful basis before enforce mode processes personal data. This pack does not choose one. Export and erase are local commands, not a completed data-subject response."
+
+[[detectors]]
+id = "special_category"
+kind = "phrase"
+data_class = "SPECIAL_CATEGORY"
+terms = [
+  "genetic data",
+  "biometric data",
+  "racial or ethnic origin",
+  "political opinion",
+  "religious belief",
+  "trade union",
+  "sexual orientation",
+  "health data",
+]
+
+[[rules]]
+id = "special-route"
+action = "route_local"
+data_class = "SPECIAL_CATEGORY"
+hooks = ["H2"]
+provider_flags = ["local", "eu_region"]
+
+[[rules]]
+id = "special-egress"
+action = "egress_deny"
+data_class = "SPECIAL_CATEGORY"
+hooks = ["H5"]
+tools = ["telegram"]
+
+[[rules]]
+id = "special-redact"
+action = "redact"
+data_class = "SPECIAL_CATEGORY"
+hooks = ["H4", "H6"]
+style = "mask"

@@ -45,11 +45,9 @@ class ActionScreener:
         if not self.enabled or verdict.decision == "deny":
             return verdict
         if clearly_unsafe(ctx):
-            return Verdict(
+            return verdict.derive(
                 "deny",
                 "decision engine auto-denied a clearly unsafe action",
-                verdict.hook,
-                verdict.grant_key,
             )
         decision = verdict.decision
         reason = verdict.reason
@@ -65,7 +63,7 @@ class ActionScreener:
         if _RANK[decision] < _RANK[verdict.decision]:
             decision = verdict.decision
             reason = verdict.reason
-        return Verdict(decision, reason, verdict.hook, verdict.grant_key)
+        return verdict.derive(decision, reason)
 
     def _recommend(self, ctx: PolicyContext) -> str:
         try:

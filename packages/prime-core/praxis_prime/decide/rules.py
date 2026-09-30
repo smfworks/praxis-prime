@@ -13,6 +13,9 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 
+from praxis_prime.compliance.detectors import luhn_ok, ssn_parts_ok
+from praxis_prime.compliance.evaluate import feed_tier0
+from praxis_prime.compliance.packs import bundled_packs
 from praxis_prime.decide.schema import Question
 
 _COUNT = re.compile(
@@ -21,8 +24,6 @@ _COUNT = re.compile(
 _COUNT_OF = re.compile(r"(?i)\bcount (?:the )?(?:word |occurrences of )?['\"]?([A-Za-z0-9_-]+)")
 _DATE_QUESTION = re.compile(r"(?i)\b(?:what|which) date\b")
 _ISO_DATE = re.compile(r"\b(\d{4}-\d{2}-\d{2})\b")
-_PAN = re.compile(r"(?<!\d)(?:\d[ -]?){13,19}(?!\d)")
-_SSN = re.compile(r"\b(\d{3})-(\d{2})-(\d{4})\b")
 _DENY_LABELS = {"deny", "no", "false", "block", "unsafe", "reject"}
 _ALLOW_LABELS = {"allow", "yes", "true", "approve", "safe"}
 
@@ -81,7 +82,26 @@ def _dial_hit(
                 _certain(question, hit),
                 "NC dial: SSN-shaped identifier (technical filter, not legal advice)",
             )
+    for data_class, rationale in feed_tier0(state, dials, bundled_packs()):
+        names = _CLASS_NAMES.get(data_class)
+        if names is None:
+            continue
+        hit = _pick(question, names, positive=True)
+        if hit is not None:
+            return RuleHit(hit, 1.0, _certain(question, hit), rationale)
     return None
+
+
+_CLASS_NAMES: dict[str, tuple[str, ...]] = {
+    "PHI": ("phi", "hipaa", "medical"),
+    "NC_PII": ("nc_pii", "ncpii", "state_nc"),
+    "NC_SSN": ("nc_pii", "ncpii", "state_nc"),
+    "PCI": ("pci", "payment_card", "card", "pci_dss"),
+    "EDUCATION_RECORD": ("education_record", "ferpa", "student"),
+    "CHILD_DATA": ("child", "coppa", "under_13"),
+    "SPECIAL_CATEGORY": ("special_category", "gdpr", "sensitive"),
+    "US_PII": ("us_pii", "personal_information", "pii"),
+}
 
 
 def _list_hit(
@@ -188,33 +208,20 @@ def _on(dials: Mapping[str, str], dial_id: str) -> bool:
     return dials.get(dial_id, "off") in {"monitor", "enforce"}
 
 
+_PAN = re.compile(r"(?<!\d)(?:\d[ -]?){13,19}(?!\d)")
+_SSN = re.compile(r"\b(\d{3})-(\d{2})-(\d{4})\b")
+
+
 def _has_pan(state: str) -> bool:
     for match in _PAN.finditer(state):
         digits = re.sub(r"\D", "", match.group(0))
-        if 13 <= len(digits) <= 19 and _luhn(digits):
+        if 13 <= len(digits) <= 19 and luhn_ok(digits):
             return True
     return False
 
 
 def _has_ssn(state: str) -> bool:
     for area, group, serial in _SSN.findall(state):
-        if area in {"000", "666"} or area.startswith("9"):
-            continue
-        if group == "00" or serial == "0000":
-            continue
-        return True
+        if ssn_parts_ok(area, group, serial):
+            return True
     return False
-
-
-def _luhn(number: str) -> bool:
-    total = 0
-    double = False
-    for character in reversed(number):
-        digit = int(character)
-        if double:
-            digit *= 2
-            if digit > 9:
-                digit -= 9
-        total += digit
-        double = not double
-    return total % 10 == 0

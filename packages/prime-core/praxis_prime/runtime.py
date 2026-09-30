@@ -10,6 +10,7 @@ from pathlib import Path
 from praxis_prime.approvals.gate import ApprovalGate, Approver
 from praxis_prime.audit.log import AuditLog
 from praxis_prime.browser.tool import BrowserSession, install_browser_tool
+from praxis_prime.compliance.positions import sync_dial_positions
 from praxis_prime.decide.engine import DecisionEngine, build_engine
 from praxis_prime.decide.screen import ActionScreener
 from praxis_prime.decide.tool import install_decide_tool
@@ -179,6 +180,14 @@ def build_runtime(
     skills = _skills(environ, work, config_path)
     install_memory_tools(tools, memory)
     install_skill_tool(tools, skills)
+    sync_dial_positions(db, audit, settings.dials)
+    policy = PolicyEngine(
+        settings.dials,
+        audit=audit,
+        provider_flags=settings.provider_flags,
+        config_dir=resolved_config.parent,
+        project_root=work,
+    )
     mcp = install_mcp_tools(
         tools,
         config_path=resolved_config,
@@ -196,7 +205,7 @@ def build_runtime(
         settings=settings,
         router=router,
         registry=tools,
-        policy=PolicyEngine(settings.dials),
+        policy=policy,
         gate=ApprovalGate(approver),
         db=db,
         store=SessionStore(db),
