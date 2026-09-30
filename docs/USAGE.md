@@ -146,6 +146,69 @@ That prints a one-time code. In Telegram, open the bot and send `/pair CODE` wit
 
 Owner messages are untrusted input to the agent. When a tool needs approval, the bot sends a card (action, risk, why) with buttons: Approve, Deny, Always this session. A text reply cannot approve, including `/approve`, "approve", and "always this session". If nobody decides before the TTL, the action is denied.
 
+## Coding mode
+
+`praxis-prime code` runs a repo-aware coding task. It has to be launched inside a git repository (or with `--repo`). The task runs on a new branch named `prime/<slug>` in a git worktree under the XDG data directory (`$XDG_DATA_HOME/praxis-prime/worktrees/`, or `~/.local/share/praxis-prime/worktrees/`). The checkout you started in is not modified until you accept.
+
+```bash
+praxis-prime code "add a failing test for the empty cart"
+```
+
+Inside `chat`, `/code <task>` does the same thing in this process, including when chat is attached to the daemon. Coding mode does not go through the daemon: the worktree is on this machine.
+
+At the end you get a diff and three choices:
+
+| Choice | Effect |
+|---|---|
+| accept | Commit on the task branch, if needed, and merge it into the current branch. Nothing is pushed. |
+| discard | Delete the worktree and the task branch. |
+| keep | Commit on the task branch, if needed, remove the worktree, and leave the branch. Nothing is merged or pushed. |
+
+`--accept`, `--discard`, and `--keep` skip the prompt. With no flag and no terminal, the branch is kept and the checkout is left alone.
+
+`git push`, force operations (`git push --force`, `git push -f`, `git reset --hard`, and similar), and deletes of tracked files always ask, including in `full` mode. Writes outside the task worktree, and writes to instruction files (`AGENTS.md`, `CLAUDE.md`, `.cursor/rules`, `.prime/`), also ask. Edits inside the worktree do not.
+
+New tools, on the same approval hook as the rest of the agent:
+
+| Tool | Risk |
+|---|---|
+| `grep`, `glob` | READ. `grep` uses `rg` when it is on `PATH`. |
+| `write_file`, `edit_file` | DRAFT inside the worktree. `edit_file` replaces one exact `old_string`. If that text is missing or matches more than once, the file is not modified. |
+| `run_command`, `run_tests` | Same sandbox as `shell`. `run_tests` reads a `test:` line in `AGENTS.md` or `CLAUDE.md`, otherwise a manifest (`pytest`, `npm test`, `make test`, `cargo test`, `go test`). |
+
+### Instruction files
+
+Instructions are read from the checkout you launched in, then appended into the first user message. The system prompt stays fixed. Later text wins. The merged size is capped at 32 KiB and the CLI reports when it truncates.
+
+Precedence, lowest first:
+
+1. Global files in the config directory: `AGENTS.override.md` if it exists, otherwise `AGENTS.md`, then `CLAUDE.md`.
+2. Each directory from the git root down to the working directory. In each directory:
+   - `AGENTS.override.md`, or `AGENTS.md` when there is no override
+   - `CLAUDE.md`, then `.claude/rules/**/*.md`
+   - `.cursor/rules/*.mdc` and `*.md`. `alwaysApply: true` rules are included as always-on text. Other rules keep their `globs` and `description` and apply only when those files are in play.
+   - `.github/copilot-instructions.md`
+   - `.prime/rules/**/*.md`, then `.prime/environment.toml` and `.prime/config.toml`
+
+A directory closer to the working directory outranks the repo root. An override file replaces `AGENTS.md` in that same directory only.
+
+The prompt also gets a short file tree and a keyword search for files that overlap the task. There is no embedding index in this build.
+
+### Hooks
+
+Project hooks live in `.prime/hooks.toml`. `.prime/hooks` is also read when it is a TOML file or a directory of `*.toml` files. `.claude/settings.json` and `.cursor/hooks.json` are read when they use command hooks.
+
+```toml
+[[hook]]
+event = "PreToolUse"          # or PostToolUse, or Stop
+matcher = "write_file|edit_file"
+command = "python3 .prime/hooks/guard.py"
+```
+
+`PreToolUse` runs before the tool. Exit code 2 blocks it. Any other non-zero exit blocks too. Exit 0 allows, and a JSON line `{"decision": "deny", "reason": "..."}` or `"ask"` can still tighten that. A hook cannot turn a policy denial into an allow. `Stop` is the on-finish hook.
+
+Hooks run inside bubblewrap when `bwrap` is installed (no network). Without bubblewrap they run with a scrubbed environment. HTTP and MCP hook handlers are not implemented.
+
 ## Not in this milestone
 
-Decision Engine, MCP, skills, semantic memory, regulatory dial enforcement, the TUI, and the web UI are still stubs. Ed25519 device pairing, an approval Edit button, and channels other than Telegram are not in this build. See [ARCHITECTURE.md](ARCHITECTURE.md) §29 for the rest of the roadmap.
+Decision Engine, MCP, skills, semantic memory (including a coding embedding index), regulatory dial enforcement, the TUI, and the web UI are still stubs. Per-hunk diff review, the `auto` coding classifier, background cloud coding, Ed25519 device pairing, an approval Edit button, and channels other than Telegram are not in this build. See [ARCHITECTURE.md](ARCHITECTURE.md) §29 for the rest of the roadmap.

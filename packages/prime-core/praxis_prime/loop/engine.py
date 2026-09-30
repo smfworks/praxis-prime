@@ -24,6 +24,7 @@ from praxis_prime.approvals.gate import (
 from praxis_prime.audit.log import AuditLog
 from praxis_prime.loop.control import TurnControl
 from praxis_prime.loop.events import LoopEvent, StatusEvent, TurnEnded
+from praxis_prime.loop.hooks import HookDecision, HookResult, LoopHooks
 from praxis_prime.loop.prompt import SYSTEM_PROMPT, fence_untrusted
 from praxis_prime.memory.store import SessionStore
 from praxis_prime.policy.engine import HookPoint, PolicyContext, PolicyEngine
@@ -38,7 +39,7 @@ from praxis_prime.router.types import (
     TextDelta,
     ToolCall,
 )
-from praxis_prime.tools.registry import ToolContext, ToolRegistry
+from praxis_prime.tools.registry import PreparedCall, ToolContext, ToolRegistry
 
 _OUTPUT_LIMIT = 16_000
 _SECRET_KEY = re.compile(r"(?i)(api[_-]?key|token|secret|password|authorization)")
@@ -63,6 +64,7 @@ class AgentLoop:
         store: SessionStore | None = None,
         audit: AuditLog | None = None,
         session_id: str | None = None,
+        hooks: LoopHooks | None = None,
     ) -> None:
         self.router = router
         self.registry = registry
@@ -77,6 +79,7 @@ class AgentLoop:
         self.store = store
         self.audit = audit
         self.session_id = session_id
+        self.hooks = hooks
 
     def run_turn(
         self,
@@ -130,7 +133,7 @@ class AgentLoop:
                 },
             )
             if not final.tool_calls:
-                yield TurnEnded(text=final.content)
+                yield from self._turn_ended(final.content)
                 return
             for call in final.tool_calls:
                 if control.cancelled:
@@ -144,7 +147,7 @@ class AgentLoop:
         message = f"Stopped after {self.max_iterations} iterations without a final answer."
         self._add_assistant(AssistantFinal(content=message))
         yield TextDelta(message)
-        yield TurnEnded(text=message, error="max_iterations")
+        yield from self._turn_ended(message, error="max_iterations")
 
     async def stream_turn(
         self,
@@ -199,7 +202,7 @@ class AgentLoop:
             outcome.error = message
             self._audit("model_error", "model provider failed", {"error": _short(message, 400)})
             yield StatusEvent("plan", message)
-            yield TurnEnded(text=outcome.content, error=message)
+            yield from self._turn_ended(outcome.content, error=message)
             return
         if outcome.final is None:
             outcome.final = AssistantFinal(content="".join(parts))
@@ -264,14 +267,7 @@ class AgentLoop:
                 grant_key=verdict.grant_key,
                 sandboxed=prepared.sandboxed,
             )
-            session_token = approval_session_id.set(self.session_id)
-            actor_token = approval_actor.set("")
-            try:
-                decision = self.gate.authorize(request)
-                actor = approval_actor.get()
-            finally:
-                approval_session_id.reset(session_token)
-                approval_actor.reset(actor_token)
+            decision, actor = self._authorize(request)
             self._audit(
                 "approval",
                 decision.value,
@@ -292,6 +288,12 @@ class AgentLoop:
             host_approved = not prepared.sandboxed
             yield StatusEvent("check", f"{tool.name} · approved · {decision.value}")
 
+        blocked = self._pre_tool_hook(tool.name, call.arguments, prepared)
+        if blocked is not None:
+            self._add_tool(call.id, blocked)
+            yield StatusEvent("result", f"{tool.name} · hook blocked")
+            return
+
         if control.cancelled:
             content = f"Tool {tool.name} was not run. The turn was cancelled."
             self._add_tool(call.id, content)
@@ -309,6 +311,7 @@ class AgentLoop:
         except Exception as exc:
             raw = f"{type(exc).__name__}: {exc}"
             ok = False
+        raw, ok = self._post_tool_hook(tool.name, call.arguments, raw, ok=ok)
         self.policy.evaluate(
             PolicyContext(
                 hook=HookPoint.H4_POST_TOOL,
@@ -375,6 +378,95 @@ class AgentLoop:
             summary=summary,
             payload=payload,
         )
+
+    def _authorize(self, request: ApprovalRequest) -> tuple[ApprovalDecision, str]:
+        session_token = approval_session_id.set(self.session_id)
+        actor_token = approval_actor.set("")
+        try:
+            decision = self.gate.authorize(request)
+            actor = approval_actor.get()
+        finally:
+            approval_session_id.reset(session_token)
+            approval_actor.reset(actor_token)
+        return decision, actor
+
+    def _pre_tool_hook(
+        self,
+        name: str,
+        arguments: Mapping[str, object],
+        prepared: PreparedCall,
+    ) -> str | None:
+        """Return a tool message when a hook blocks or its ask is denied."""
+        if self.hooks is None:
+            return None
+        try:
+            result = self.hooks.pre_tool(name, arguments)
+        except Exception as exc:
+            result = HookResult(HookDecision.DENY, f"pre-tool hook failed: {exc}")
+        if result.decision == HookDecision.DENY:
+            reason = result.reason or "pre-tool hook blocked this action"
+            self._audit("hook", reason, {"tool": name, "event": "PreToolUse", "decision": "deny"})
+            return f"Tool {name} was not run. Hook blocked it. {reason}"
+        if result.decision == HookDecision.ASK:
+            reason = result.reason or "project hook asked for approval"
+            request = ApprovalRequest(
+                tool=name,
+                risk=prepared.risk,
+                reason=reason,
+                summary=prepared.summary or name,
+                arguments=dict(arguments),
+                grant_key=f"hook:{name}:{reason[:80]}",
+                sandboxed=prepared.sandboxed,
+            )
+            decision, actor = self._authorize(request)
+            self._audit(
+                "approval",
+                decision.value,
+                {"tool": name, "actor": actor, "hook": "PreToolUse"},
+            )
+            if decision not in {ApprovalDecision.ALLOW_ONCE, ApprovalDecision.ALLOW_SESSION}:
+                return f"Tool {name} was not run. Hook asked and approval was denied. {reason}"
+        return None
+
+    def _post_tool_hook(
+        self,
+        name: str,
+        arguments: Mapping[str, object],
+        raw: str,
+        *,
+        ok: bool,
+    ) -> tuple[str, bool]:
+        if self.hooks is None:
+            return raw, ok
+        try:
+            result = self.hooks.post_tool(name, arguments, raw, ok=ok)
+        except Exception as exc:
+            result = HookResult(HookDecision.DENY, f"post-tool hook failed: {exc}")
+        if result.decision == HookDecision.DENY:
+            reason = result.reason or "post-tool hook blocked this result"
+            self._audit("hook", reason, {"tool": name, "event": "PostToolUse", "decision": "deny"})
+            return f"{raw}\nHook blocked this result. {reason}", False
+        return raw, ok
+
+    def _turn_ended(
+        self,
+        text: str,
+        *,
+        cancelled: bool = False,
+        error: str | None = None,
+    ) -> Iterator[LoopEvent]:
+        if not cancelled and self.hooks is not None:
+            try:
+                result = self.hooks.on_finish(text)
+            except Exception as exc:
+                result = HookResult(HookDecision.DENY, f"on-finish hook failed: {exc}")
+            if result.decision == HookDecision.DENY:
+                reason = result.reason or "on-finish hook blocked"
+                self._audit("hook", reason, {"event": "Stop", "decision": "deny"})
+                yield StatusEvent("check", f"on-finish · blocked · {reason}")
+                text = f"{text}\n{reason}".strip()
+                error = error or reason
+        yield TurnEnded(text=text, cancelled=cancelled, error=error)
 
     def _cancelled(self, text: str) -> Iterator[LoopEvent]:
         self._audit("turn_cancelled", "turn cancelled", {})

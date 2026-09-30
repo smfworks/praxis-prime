@@ -52,13 +52,15 @@ Prime does not use that service. See the Decision Engine note below.
 No file under this repository is a copy from Hermes, OpenClaw, Omarchy,
 TypeSafe, SMF Praxis, or SMF Swarm 2.0. The agent loop, router, tool
 registry, audit chain, loopback gateway, approval queue, Telegram adapter,
-and systemd unit are original code. They follow patterns described in
-`docs/ARCHITECTURE.md`: Hermes prompt-cache invariants, OpenClaw's
-connect-first gateway and the rule that chat text cannot approve, Praxis
-approval classes, and Swarm's hash-chained audit idea. The WebSocket
-handshake is the public RFC 6455 framing, written here, not taken from
-another project's socket stack. Nothing was vendored. When a file is later
-copied:
+systemd unit, and coding mode are original code. They follow patterns
+described in `docs/ARCHITECTURE.md`: Hermes prompt-cache invariants and the
+idea of a per-task git worktree (not a copy of `subagent_worktree.py`),
+OpenClaw's connect-first gateway and the rule that chat text cannot
+approve, Praxis approval classes, Swarm's hash-chained audit idea, and the
+public Claude Code hook event names (`PreToolUse`, exit code 2 blocks).
+The WebSocket handshake is the public RFC 6455 framing, written here, not
+taken from another project's socket stack. Nothing was vendored. When a
+file is later copied:
 
 1. Record the source repo, path, commit, and license in the table below.
 2. Keep the original copyright header.

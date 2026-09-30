@@ -9,6 +9,7 @@ from __future__ import annotations
 import select
 import sys
 from collections.abc import Callable
+from pathlib import Path
 
 from praxis_prime import __version__
 from praxis_prime.approvals.card import format_approval_card
@@ -27,6 +28,7 @@ HELP = """\
 /model                show the active model and fallbacks
 /model <spec>         switch model, for example /model ollama:qwen3:8b
 /clear                start a fresh session
+/code <task>          coding mode: worktree, diff, then accept, discard, or keep
 /quit                 leave the chat
 
 Ctrl-C                cancel the current turn
@@ -180,6 +182,9 @@ def run_repl(
             active_id, loop = runtime.open_loop(None)
             write(f"new session {active_id}\n")
             continue
+        if command == "/code" or command.startswith("/code "):
+            _run_code_command(command, runtime, read_line=read_line, write=write, color=color)
+            continue
         if command.startswith("/"):
             write("Unknown command. Type /help.\n")
             continue
@@ -235,6 +240,39 @@ def run_ask(
     if error:
         return 1
     return 0
+
+
+def _run_code_command(
+    command: str,
+    runtime: Runtime,
+    *,
+    read_line: ReadLine,
+    write: Write,
+    color: bool,
+) -> None:
+    """``/code <task>`` runs in a worktree and then asks accept, discard, or keep."""
+    del color
+    task = command[5:].strip()
+    if not task:
+        write(
+            "Usage: /code <task>\n"
+            "The task runs on a prime/<slug> branch. "
+            "Your checkout is unchanged until you accept.\n"
+        )
+        return
+    from praxis_prime.coding.session import run_coding_task
+    from praxis_prime.coding.worktree import CodingError
+
+    try:
+        run_coding_task(
+            task,
+            runtime,
+            read_line=read_line,
+            write=write,
+            interactive=True,
+        )
+    except CodingError as exc:
+        write(f"praxis-prime code: {exc}\n")
 
 
 def stdout_writer(stream: object | None = None) -> Write:
@@ -321,6 +359,19 @@ def run_remote_repl(
                     write(f"{exc}\n")
             session_id = None
             write("new session\n")
+            continue
+        if command == "/code" or command.startswith("/code "):
+            write("coding mode runs in this process so the worktree stays on this machine.\n")
+            from praxis_prime.runtime import build_runtime
+
+            local = build_runtime(
+                approver=terminal_approver(read_line, write, color=color),
+                cwd=Path.cwd(),
+            )
+            try:
+                _run_code_command(command, local, read_line=read_line, write=write, color=color)
+            finally:
+                local.close()
             continue
         if command.startswith("/"):
             write("Unknown command. Type /help.\n")

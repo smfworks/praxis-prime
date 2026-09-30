@@ -127,8 +127,8 @@ class PolicyEngine:
         )
 
     def _pre_tool(self, ctx: PolicyContext) -> Verdict:
-        if ctx.mode == "plan" and ctx.tool == "shell":
-            return Verdict("deny", "plan mode does not run shell commands", ctx.hook.value)
+        if ctx.mode == "plan" and ctx.tool in {"shell", "run_command", "run_tests"}:
+            return Verdict("deny", "plan mode does not run commands", ctx.hook.value)
         if ctx.mode == "plan" and ctx.risk != Risk.READ:
             return Verdict("deny", "plan mode is read-only", ctx.hook.value)
         if ctx.risk in CONSEQUENTIAL_RISKS:
@@ -164,7 +164,8 @@ def grant_key(ctx: PolicyContext) -> str:
     """
     sandbox = "bwrap" if ctx.sandboxed else "host"
     base = f"{ctx.tool}:{ctx.risk.value}:{sandbox}"
-    if ctx.tool == "shell":
+    exact = {"shell", "run_command", "run_tests", "write_file", "edit_file"}
+    if ctx.tool in exact:
         digest = hashlib.sha256(ctx.summary.encode()).hexdigest()[:12]
         return f"{base}:{digest}"
     return base

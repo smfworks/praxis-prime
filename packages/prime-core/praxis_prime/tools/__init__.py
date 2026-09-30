@@ -3,7 +3,8 @@
 Risk classes are READ, DRAFT, SEND, DESTRUCTIVE, SPEND, and SHARE. The
 policy engine reads them before a tool runs.
 
-ARCHITECTURE §8. The MVP set is read_file, list_dir, shell, and web_fetch.
+ARCHITECTURE §8. Chat ships read_file, list_dir, shell, and web_fetch.
+Coding mode adds write_file, edit_file, grep, glob, run_command, and run_tests.
 """
 
 from praxis_prime.tools.builtin import builtin_registry
