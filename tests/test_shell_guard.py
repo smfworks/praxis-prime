@@ -681,6 +681,12 @@ def test_attr_source_pin_follows_git_version(monkeypatch):
     status = command_for_sandbox("git status")
     assert "--attr-source=HEAD" in status
     assert "--no-ext-diff" not in status
+    assert "diff.ignoreSubmodules=all" in status
+    assert "--ignore-submodules=all" in status
+    assert "--ignore-submodules=all" in pinned
+    logged = command_for_sandbox("git log")
+    assert "diff.ignoreSubmodules=all" in logged
+    assert "--ignore-submodules" not in logged
 
     monkeypatch.setattr(
         "praxis_prime.tools.shellclass._git_supports_attr_source",
@@ -769,6 +775,137 @@ def test_config_worktree_attributes_file_does_not_run_inside_bwrap(tmp_path: Pat
     (tmp_path / "note.txt").write_text("beta\n", encoding="utf-8")
     _assert_not_run(tmp_path, ("git diff note.txt", "git diff --stat"), sentinel)
     _note_live_bwrap("config.worktree attributes file did not run")
+
+
+def test_submodule_metadata_asks(tmp_path: Path):
+    (tmp_path / "note.txt").write_text("alpha\n", encoding="utf-8")
+    _track_note(tmp_path)
+    assert _asks(tmp_path, "git status") is False
+    (tmp_path / ".gitmodules").write_text("[submodule \"sm\"]\n", encoding="utf-8")
+    assert _asks(tmp_path, "git status")
+    assert _asks(tmp_path, "git diff --stat")
+    assert _asks(tmp_path, "git diff note.txt")
+    (tmp_path / ".gitmodules").unlink()
+    assert _asks(tmp_path, "git status") is False
+    modules = tmp_path / ".git" / "modules"
+    modules.mkdir()
+    assert _asks(tmp_path, "git status")
+    modules.rmdir()
+    assert _asks(tmp_path, "git status") is False
+
+
+def test_head_gitattributes_driver_asks(tmp_path: Path, monkeypatch):
+    (tmp_path / "note.txt").write_text("alpha\n", encoding="utf-8")
+    (tmp_path / ".gitattributes").write_text("note.txt filter=x\n", encoding="utf-8")
+    nested = tmp_path / "sub"
+    nested.mkdir()
+    (nested / ".gitattributes").write_text("f.txt diff=leak\n", encoding="utf-8")
+    _git("init", "-q", cwd=tmp_path)
+    _git("add", "--", "note.txt", ".gitattributes", "sub/.gitattributes", cwd=tmp_path)
+    _git(
+        "-c",
+        "user.email=tester@example.com",
+        "-c",
+        "user.name=tester",
+        "commit",
+        "-q",
+        "-m",
+        "init",
+        cwd=tmp_path,
+    )
+    (tmp_path / ".gitattributes").unlink()
+    (nested / ".gitattributes").unlink()
+    monkeypatch.setattr(
+        "praxis_prime.tools.shellclass._git_supports_attr_source",
+        lambda: False,
+    )
+    assert _asks(tmp_path, "git status") is False
+    monkeypatch.setattr(
+        "praxis_prime.tools.shellclass._git_supports_attr_source",
+        lambda: True,
+    )
+    assert _asks(tmp_path, "git status")
+    assert _asks(tmp_path, "git diff note.txt")
+
+
+def test_submodule_filter_does_not_run_inside_bwrap(tmp_path: Path):
+    if not _live_bwrap():
+        return
+    sentinel = "SENTINEL-SECRET-VALUE"
+    origin = tmp_path / "smrepo"
+    super_repo = tmp_path / "super"
+    origin.mkdir()
+    (origin / "f.txt").write_text("aaaa\n", encoding="utf-8")
+    _git("init", "-q", cwd=origin)
+    _git("add", "--", "f.txt", cwd=origin)
+    _git(
+        "-c",
+        "user.email=tester@example.com",
+        "-c",
+        "user.name=tester",
+        "commit",
+        "-q",
+        "-m",
+        "sm",
+        cwd=origin,
+    )
+    super_repo.mkdir()
+    (super_repo / "note.txt").write_text("alpha\n", encoding="utf-8")
+    _git("init", "-q", cwd=super_repo)
+    _git("add", "--", "note.txt", cwd=super_repo)
+    _git(
+        "-c",
+        "user.email=tester@example.com",
+        "-c",
+        "user.name=tester",
+        "commit",
+        "-q",
+        "-m",
+        "init",
+        cwd=super_repo,
+    )
+    _git(
+        "-c",
+        "protocol.file.allow=always",
+        "submodule",
+        "add",
+        "-q",
+        str(origin),
+        "sm",
+        cwd=super_repo,
+    )
+    _git(
+        "-c",
+        "user.email=tester@example.com",
+        "-c",
+        "user.name=tester",
+        "commit",
+        "-q",
+        "-m",
+        "add-sm",
+        cwd=super_repo,
+    )
+    (super_repo / "secrets.env").write_text(sentinel + "\n", encoding="utf-8")
+    script = super_repo / "sm" / "pwn.sh"
+    script.write_text(
+        "#!/bin/sh\necho PWNED >&2\ncat ../secrets.env >&2\n",
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+    module = super_repo / ".git" / "modules" / "sm"
+    (module / "info").mkdir(exist_ok=True)
+    config = module / "config"
+    config.write_text(
+        config.read_text(encoding="utf-8") + '\n[filter "x"]\n\tclean = ./pwn.sh\n',
+        encoding="utf-8",
+    )
+    (module / "info" / "attributes").write_text("f.txt filter=x\n", encoding="utf-8")
+    target = super_repo / "sm" / "f.txt"
+    target.write_text("bbbb\n", encoding="utf-8")
+    os.utime(target, (946684800, 946684800))
+    assert _asks(super_repo, "git diff note.txt")
+    _assert_not_run(super_repo, ("git status", "git diff --stat"), sentinel)
+    _note_live_bwrap("submodule filter did not run")
 
 
 def test_name_only_backstop_asks_when_the_probe_fails(tmp_path: Path, monkeypatch):

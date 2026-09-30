@@ -16,8 +16,10 @@ starts with ``:`` is a pathspec, allowlisted only when it is an existing
 non-secret file. A repo whose git config (including a linked worktree's
 common dir and ``config.worktree``) sets a diff driver, a filter,
 ``core.fsmonitor``, ``extensions.worktreeConfig``, or ``core.attributesFile``
-asks, as does an unreadable or oversized config. ``info/attributes`` and
-``.gitattributes`` that assign ``diff=`` or ``filter=`` are not allowlisted.
+asks, as does an unreadable or oversized config, a ``.gitmodules`` file, or a
+``modules`` directory under the git dir. ``info/attributes`` and
+``.gitattributes`` (including ``HEAD:.gitattributes`` when ``--attr-source``
+is available) that assign ``diff=`` or ``filter=`` are not allowlisted.
 Secret filenames use
 :func:`praxis_prime.policy.boundary.is_secret_path`, including git pathspecs.
 Globs, ``rev:path``, case-folding magic, and exclude or stacked pathspec
@@ -180,6 +182,9 @@ _GIT_CONFIG_LOCKS = (
     "core.quotePath=true",
     "diff.noprefix=false",
     "diff.relative=false",
+    # Submodule git does not inherit -c or --attr-source. Skipping submodules
+    # keeps a nested clean filter from running during status or diff.
+    "diff.ignoreSubmodules=all",
 )
 _GIT_FALSE_VALUES = frozenset({"", "0", "false", "no", "off"})
 _CONFIG_MAX_BYTES = 1_000_000
@@ -636,6 +641,8 @@ def harden_git_tokens(tokens: list[str]) -> list[str]:
         return ["git", *locks, *tokens[1:]]
     sub = tokens[index]
     rebuilt = ["git", *locks, *tokens[1:index], sub]
+    if sub in {"status", "diff"}:
+        rebuilt.append("--ignore-submodules=all")
     if sub in {"diff", "log", "show"}:
         rebuilt.extend(["--no-ext-diff", "--no-textconv"])
     rebuilt.extend(tokens[index + 1 :])
@@ -677,7 +684,11 @@ def _repo_git_is_unsafe(workspace: Path, sub: str) -> bool:
     """
     if _git_config_is_hostile(workspace):
         return True
+    if _submodules_present(workspace):
+        return True
     if sub in {"diff", "log", "show"} and _attributes_assign_driver(workspace):
+        return True
+    if _head_attributes_assign_driver(workspace):
         return True
     return False
 
@@ -779,6 +790,23 @@ def _git_config_is_hostile(workspace: Path) -> bool:
         if _exists_or_unreadable(directory / "config.worktree"):
             return True
         if _config_file_is_hostile(directory / "config", seen, 0):
+            return True
+    return False
+
+
+def _submodules_present(workspace: Path) -> bool:
+    """True when this checkout has a submodule git can enter.
+
+    A submodule process does not inherit the parent's ``-c`` pins, so any
+    sign of one asks. ``.gitmodules`` may be absent while ``modules/`` remains.
+    """
+    if _exists_or_unreadable(workspace / ".gitmodules"):
+        return True
+    layout = _git_layout(workspace)
+    if layout.hostile:
+        return True
+    for directory in layout.dirs:
+        if _exists_or_unreadable(directory / "modules"):
             return True
     return False
 
@@ -917,6 +945,91 @@ def _attribute_line_assigns_driver(line: str) -> bool:
     return False
 
 
+def _head_attributes_assign_driver(workspace: Path) -> bool:
+    """True when ``HEAD:.gitattributes`` assigns a diff or filter driver.
+
+    ``--attr-source=HEAD`` reads those blobs instead of the worktree files.
+    Git older than 2.40 does not take that option, so this scan stays off.
+    """
+    if not _git_supports_attr_source():
+        return False
+    listed = _run_git(workspace, ["ls-tree", "-r", "-z", "--name-only", "HEAD"])
+    if listed is None:
+        return True
+    if listed.returncode != 0:
+        err = listed.stderr.decode("utf-8", "replace").lower()
+        missing = (
+            "invalid object name",
+            "not a git repository",
+            "not a git dir",
+            "ambiguous argument",
+        )
+        return not any(phrase in err for phrase in missing)
+    if len(listed.stdout) > 5_000_000:
+        return True
+    names = [part.decode("utf-8", "replace") for part in listed.stdout.split(b"\0") if part]
+    attrs = [name for name in names if name == ".gitattributes" or name.endswith("/.gitattributes")]
+    if len(attrs) > 500:
+        return True
+    if not attrs:
+        return False
+    spec = b"".join(f"HEAD:{name}\n".encode() for name in attrs)
+    blobs = _run_git(workspace, ["cat-file", "--batch"], stdin=spec)
+    if blobs is None or blobs.returncode != 0 or not blobs.stdout:
+        return True
+    return _batch_assigns_driver(blobs.stdout)
+
+
+def _run_git(
+    workspace: Path,
+    args: list[str],
+    stdin: bytes | None = None,
+) -> subprocess.CompletedProcess[bytes] | None:
+    try:
+        return subprocess.run(
+            ["git", *_git_config_args(), *args],
+            cwd=workspace,
+            check=False,
+            capture_output=True,
+            input=stdin,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
+def _batch_assigns_driver(payload: bytes) -> bool:
+    """Parse ``git cat-file --batch`` and scan each blob for a driver."""
+    pos = 0
+    while pos < len(payload):
+        newline = payload.find(b"\n", pos)
+        if newline < 0:
+            return True
+        header = payload[pos:newline]
+        pos = newline + 1
+        if header.endswith(b" missing"):
+            continue
+        parts = header.split()
+        if len(parts) < 3 or parts[1] != b"blob":
+            return True
+        try:
+            size = int(parts[2])
+        except ValueError:
+            return True
+        if size > _CONFIG_MAX_BYTES:
+            return True
+        body = payload[pos : pos + size]
+        if len(body) != size:
+            return True
+        pos += size
+        if payload[pos : pos + 1] == b"\n":
+            pos += 1
+        text = body.decode("utf-8", "replace")
+        if any(_attribute_line_assigns_driver(line) for line in text.splitlines()):
+            return True
+    return False
+
+
 def build_name_only_command(segment: str) -> str | None:
     """Return ``git <sub> --name-only`` for a content diff, log, or show.
 
@@ -973,11 +1086,17 @@ def build_name_only_command(segment: str) -> str | None:
         *_git_config_args(),
         "--no-optional-locks",
         sub,
-        "--no-ext-diff",
-        "--no-textconv",
-        "--name-only",
-        "-z",
     ]
+    if sub == "diff":
+        parts.append("--ignore-submodules=all")
+    parts.extend(
+        [
+            "--no-ext-diff",
+            "--no-textconv",
+            "--name-only",
+            "-z",
+        ]
+    )
     if cached:
         parts.append("--cached")
     parts.extend(positionals)

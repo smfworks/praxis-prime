@@ -59,6 +59,7 @@ jobs:
           grep -qx 'live bwrap: repo git config did not run' "$log"
           grep -qx 'live bwrap: worktree common config filter did not run' "$log"
           grep -qx 'live bwrap: config.worktree attributes file did not run' "$log"
+          grep -qx 'live bwrap: submodule filter did not run' "$log"
 
       - name: CLI smoke
         run: |
