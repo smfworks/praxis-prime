@@ -139,6 +139,7 @@ def serve(
         accounts=accounts,
         audit=runtime.audit,
         data_root=root,
+        bearer_enabled=bearer_auth_enabled(environ),
     )
 
     def on_pending(item: dict[str, object]) -> None:
@@ -331,6 +332,18 @@ def resolve_ttl(env: Mapping[str, str]) -> float:
     if number <= 0 or number > 86400:
         return 900.0
     return number
+
+
+def bearer_auth_enabled(env: Mapping[str, str]) -> bool:
+    """True unless ``gateway.bearer`` is explicitly off.
+
+    The flag is consulted only after an account exists. The default config
+    leaves it on, so the loopback token stays an owner credential.
+    """
+    raw = _config_value(env, "bearer").strip().lower()
+    if raw in {"false", "0", "no", "off"}:
+        return False
+    return True
 
 
 def _config_value(env: Mapping[str, str], key: str) -> str:

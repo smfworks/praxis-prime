@@ -14,10 +14,12 @@ import getpass
 import sys
 from pathlib import Path
 
-from praxis_prime.accounts.db import AccountError, AccountStore
+from praxis_prime.accounts.db import Account, AccountError, AccountStore
 from praxis_prime.accounts.roles import SERVER_ROLES
+from praxis_prime.audit.log import AuditLog
 from praxis_prime.paths import config_dir, data_dir
 from praxis_prime.profiles.migrate import migrate_single_user
+from praxis_prime.state import StateDB
 
 
 def add_account_parser(commands: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -40,6 +42,12 @@ def add_account_parser(commands: argparse._SubParsersAction[argparse.ArgumentPar
     passwd.add_argument("username")
     passwd.add_argument("--password-stdin", action="store_true")
     _add_dirs(passwd)
+    transfer = sub.add_parser(
+        "transfer-owner",
+        help="Hand the owner role to an existing admin. The previous owner becomes admin.",
+    )
+    transfer.add_argument("username")
+    _add_dirs(transfer)
 
 
 def account_command(args: argparse.Namespace) -> int:
@@ -50,7 +58,9 @@ def account_command(args: argparse.Namespace) -> int:
         return _list(args)
     if command == "passwd":
         return _passwd(args)
-    print("usage: praxis-prime account {create|list|passwd}", file=sys.stderr)
+    if command == "transfer-owner":
+        return _transfer_owner(args)
+    print("usage: praxis-prime account {create|list|passwd|transfer-owner}", file=sys.stderr)
     return 2
 
 
@@ -114,6 +124,49 @@ def _passwd(args: argparse.Namespace) -> int:
         return 2
     print(f"updated password for {account.username}")
     return 0
+
+
+def _transfer_owner(args: argparse.Namespace) -> int:
+    store = _store(args)
+    try:
+        former, current = store.transfer_owner(args.username)
+    except AccountError as exc:
+        print(f"praxis-prime account: {exc}", file=sys.stderr)
+        return 2
+    finally:
+        store.close()
+    _audit_transfer(_data(args), former, current)
+    print(f"owner is now {current.username} ({current.id})")
+    print(f"previous owner {former.username} is admin")
+    return 0
+
+
+def _audit_transfer(root: Path, former: Account, current: Account) -> None:
+    """Append one hash-chained event. No password or token is included."""
+    profile_db = root / "profiles" / "default" / "prime.db"
+    if profile_db.is_file():
+        path = profile_db
+        profile = "default"
+    else:
+        path = root / "prime.db"
+        profile = ""
+    db = StateDB(path)
+    try:
+        AuditLog(db).append(
+            session_id=None,
+            kind="auth.owner_transfer",
+            summary="owner transferred",
+            payload={
+                "from_account": former.id,
+                "from_username": former.username,
+                "to_account": current.id,
+                "to_username": current.username,
+            },
+            actor_account=former.id,
+            profile=profile,
+        )
+    finally:
+        db.close()
 
 
 def _read_password(args: argparse.Namespace, *, confirm: bool) -> str | None:

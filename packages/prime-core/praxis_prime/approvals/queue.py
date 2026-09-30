@@ -57,6 +57,22 @@ class _Item:
             "expiresAt": datetime.fromtimestamp(self.expires_at, UTC).isoformat(),
         }
 
+    def meta(self) -> dict[str, object]:
+        """Id, tool, risk, time, and decision. No arguments and no text."""
+        if self.decision is not None:
+            decision = self.decision.value
+        elif self.state == "pending":
+            decision = "pending"
+        else:
+            decision = self.state
+        return {
+            "id": self.id,
+            "tool": self.request.tool,
+            "risk": self.request.risk.value,
+            "createdAt": datetime.fromtimestamp(self.created_at, UTC).isoformat(),
+            "decision": decision,
+        }
+
 
 class ApprovalQueue:
     """In-memory queue. The daemon is the only process that decides."""
@@ -114,6 +130,13 @@ class ApprovalQueue:
             pending = [item.public() for item in self._items.values() if item.state == "pending"]
         pending.sort(key=lambda item: str(item["id"]))
         return pending
+
+    def list_meta(self) -> list[dict[str, object]]:
+        """Content-free rows for every item still in this process."""
+        with self._lock:
+            rows = [item.meta() for item in self._items.values()]
+        rows.sort(key=lambda item: str(item["id"]))
+        return rows
 
     def decide(
         self,

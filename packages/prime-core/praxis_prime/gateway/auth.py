@@ -1,7 +1,9 @@
 """Gateway bearer token.
 
-The token lives in the runtime directory, mode 0600. It is the operator
-credential for localhost clients. It is not written to config or the log.
+The token lives in the runtime directory, mode 0600. Once an account
+exists it is an owner-equivalent loopback credential. It is not written
+to config or the log. ``rotate_token`` replaces the file; the running
+daemon keeps the previous value until it is restarted.
 """
 
 from __future__ import annotations
@@ -31,6 +33,16 @@ def load_or_create_token(path: Path) -> str:
     token = secrets.token_urlsafe(32)
     _write_private(path, token)
     return token
+
+
+def rotate_token(path: Path) -> None:
+    """Replace the token file. The new value is not returned or logged."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(path.parent, 0o700)
+    except OSError:
+        pass
+    _write_private(path, secrets.token_urlsafe(32))
 
 
 def read_token(path: Path) -> str | None:

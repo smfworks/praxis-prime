@@ -6,14 +6,19 @@ import io
 import json
 import socket
 import stat
+import threading
 from pathlib import Path
 
 from tests.fakes import ScriptedProvider
 
-from praxis_prime.accounts.db import AccountStore, cookie_value
+from praxis_prime.accounts.db import AccountError, AccountStore, cookie_value
+from praxis_prime.approvals.gate import ApprovalDecision, ApprovalRequest
 from praxis_prime.approvals.queue import ApprovalQueue
 from praxis_prime.audit.log import AuditLog
 from praxis_prime.cli import main
+from praxis_prime.gateway.auth import load_or_create_token, read_token
+from praxis_prime.gateway.authz import Denial, authenticate_http
+from praxis_prime.gateway.client import Endpoint, GatewayClient, GatewayError
 from praxis_prime.gateway.server import GatewayServer
 from praxis_prime.gateway.ws import WebSocketConnection, client_handshake
 from praxis_prime.host import Host
@@ -22,6 +27,7 @@ from praxis_prime.profiles.home import create_profile
 from praxis_prime.router.types import AssistantFinal
 from praxis_prime.runtime import build_runtime
 from praxis_prime.state import StateDB
+from praxis_prime.tools.registry import Risk
 
 _PASSWORD = "correct-horse"
 _VIEWER_PASSWORD = "viewer-pass-1"
@@ -409,6 +415,242 @@ def test_viewer_cannot_approve_and_a_non_member_is_forbidden(tmp_path: Path):
         server.shutdown()
         queue_host.close()
         store.close()
+
+
+def test_owner_transfer_requires_an_admin_and_is_audited(tmp_path: Path, capsys):
+    data = tmp_path / "data"
+    data.mkdir()
+    store = AccountStore(data / "accounts.db")
+    store.create_account(username_text="ada", password=_PASSWORD, display_name="Ada")
+    store.create_account(
+        username_text="bea",
+        password=_PASSWORD,
+        display_name="Bea",
+        role="admin",
+    )
+    store.create_account(
+        username_text="cy",
+        password=_PASSWORD,
+        display_name="Cy",
+        role="operator",
+    )
+    try:
+        store.transfer_owner("cy")
+    except AccountError as exc:
+        assert "admin" in str(exc)
+    else:
+        raise AssertionError("an operator must not become owner")
+    store.close()
+    assert main(["account", "transfer-owner", "bea", "--data-dir", str(data)]) == 0
+    printed = capsys.readouterr().out
+    assert "owner is now bea" in printed
+    assert "previous owner ada is admin" in printed
+    assert "$argon2" not in printed
+    assert _PASSWORD not in printed
+    opened = AccountStore(data / "accounts.db")
+    try:
+        owner = opened.owner()
+        assert owner is not None and owner.username == "bea" and owner.role == "owner"
+        former = opened.get_username("ada")
+        assert former is not None and former.role == "admin"
+        try:
+            opened.create_account(
+                username_text="dee",
+                password=_PASSWORD,
+                display_name="Dee",
+                role="owner",
+            )
+        except AccountError as exc:
+            assert "owner" in str(exc)
+        else:
+            raise AssertionError("a second owner must be rejected")
+    finally:
+        opened.close()
+    audit_db = StateDB(data / "prime.db")
+    try:
+        log = AuditLog(audit_db)
+        assert log.verify()
+        row = audit_db.conn.execute(
+            "SELECT kind, payload_json FROM audit_events WHERE kind = 'auth.owner_transfer'"
+        ).fetchone()
+        assert row is not None
+        payload = json.loads(row["payload_json"])
+        assert payload["from_username"] == "ada"
+        assert payload["to_username"] == "bea"
+        assert _PASSWORD not in row["payload_json"]
+    finally:
+        audit_db.close()
+
+
+def test_auditor_reads_approval_metadata_and_not_the_card(tmp_path: Path):
+    data = tmp_path / "data"
+    data.mkdir()
+    store = AccountStore(data / "accounts.db")
+    store.create_account(username_text="ada", password=_PASSWORD, display_name="Ada")
+    store.create_account(
+        username_text="aud",
+        password=_VIEWER_PASSWORD,
+        display_name="Aud",
+        role="auditor",
+    )
+    runtime = build_runtime(
+        env={},
+        config_path=tmp_path / "missing.toml",
+        data_path=data / "prime.db",
+        cwd=tmp_path,
+        providers={"ollama": ScriptedProvider([AssistantFinal(content="ok")])},
+    )
+    queue = ApprovalQueue(ttl=30)
+    host = Host(runtime, queue)
+    server = GatewayServer(
+        host="127.0.0.1",
+        port=0,
+        token="test-token",
+        agent=host,
+        approvals=queue,
+        accounts=store,
+        audit=runtime.audit,
+        data_root=data,
+    )
+    server.start()
+    worker = threading.Thread(
+        target=queue.authorize,
+        args=(
+            ApprovalRequest(
+                tool="delete_file",
+                risk=Risk.DESTRUCTIVE,
+                reason="delete the secret note",
+                summary="path=secret-note",
+                arguments={"path": "secret-note", "text": "do-not-leak-this"},
+                grant_key="delete_file:secret-note",
+                sandboxed=False,
+                mount="HOST: runs unsandboxed with full write access",
+            ),
+        ),
+    )
+    worker.start()
+    try:
+        approval_id = ""
+        for _ in range(50):
+            pending = queue.list_pending()
+            if pending:
+                approval_id = str(pending[0]["id"])
+                break
+            threading.Event().wait(0.02)
+        assert approval_id
+        cookie, csrf, _body = _login(server.bound_port, "aud", _VIEWER_PASSWORD)
+        del csrf
+        status, _headers, body = _request(
+            server.bound_port,
+            "GET",
+            "/v1/approvals",
+            cookie=cookie,
+        )
+        assert status == 403
+        status, _headers, body = _request(
+            server.bound_port,
+            "GET",
+            "/v1/approvals/meta",
+            cookie=cookie,
+        )
+        assert status == 200
+        assert body["count"] == 1
+        blob = json.dumps(body)
+        assert "secret-note" not in blob
+        assert "do-not-leak-this" not in blob
+        assert "HOST" not in blob
+        assert "arguments" not in blob
+        row = body["approvals"][0]
+        assert set(row) == {"id", "tool", "risk", "createdAt", "decision"}
+        assert row["tool"] == "delete_file"
+        assert row["risk"] == "DESTRUCTIVE"
+        assert row["decision"] == "pending"
+        assert row["id"] == approval_id
+    finally:
+        if approval_id:
+            queue.decide(approval_id, ApprovalDecision.DENY, actor="test")
+        worker.join(timeout=2)
+        server.shutdown()
+        host.close()
+        store.close()
+
+
+def test_bearer_token_is_owner_equivalent_until_disabled(tmp_path: Path):
+    legacy = authenticate_http(
+        None,
+        {"authorization": "Bearer test-token"},
+        "GET",
+        bootstrap_token="test-token",
+        bearer_enabled=False,
+    )
+    assert not isinstance(legacy, Denial)
+    assert legacy.role == "operator"
+
+    data = tmp_path / "data"
+    data.mkdir()
+    store = AccountStore(data / "accounts.db")
+    store.create_account(username_text="ada", password=_PASSWORD, display_name="Ada")
+    runtime = build_runtime(
+        env={},
+        config_path=tmp_path / "missing.toml",
+        data_path=data / "prime.db",
+        cwd=tmp_path,
+        providers={"ollama": ScriptedProvider([AssistantFinal(content="ok")])},
+    )
+    host = Host(runtime, ApprovalQueue())
+    server = GatewayServer(
+        host="127.0.0.1",
+        port=0,
+        token="test-token",
+        agent=host,
+        approvals=host.queue,
+        accounts=store,
+        data_root=data,
+        bearer_enabled=False,
+    )
+    server.start()
+    try:
+        status, _headers, _body = _request(
+            server.bound_port,
+            "GET",
+            "/status",
+            token="test-token",
+        )
+        assert status == 401
+        try:
+            GatewayClient.connect(Endpoint("127.0.0.1", server.bound_port, "test-token"), timeout=2)
+        except GatewayError as exc:
+            assert "rejected" in str(exc).lower() or "token" in str(exc).lower()
+        else:
+            raise AssertionError("a disabled bearer token must not open a websocket")
+        cookie, _csrf, _login_body = _login(server.bound_port, "ada", _PASSWORD)
+        status, _headers, body = _request(
+            server.bound_port,
+            "GET",
+            "/status",
+            cookie=cookie,
+        )
+        assert status == 200
+        assert body["status"]["listen"].startswith("127.0.0.1:")
+    finally:
+        server.shutdown()
+        host.close()
+        store.close()
+
+
+def test_rotate_token_replaces_the_file_without_printing_it(tmp_path: Path, monkeypatch, capsys):
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "runtime"))
+    from praxis_prime.gateway.discover import gateway_paths
+
+    path = gateway_paths()[1]
+    first = load_or_create_token(path)
+    assert main(["daemon", "rotate-token"]) == 0
+    printed = capsys.readouterr().out
+    second = read_token(path)
+    assert second is not None and second != first
+    assert first not in printed
+    assert second not in printed
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
 
 def _login(port: int, username: str, password: str) -> tuple[str, str, dict[str, object]]:

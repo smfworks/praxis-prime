@@ -204,6 +204,65 @@ class AccountStore:
             return None
         return _account(row)
 
+    def transfer_owner(self, username_text: str) -> tuple[Account, Account]:
+        """Hand ownership to an existing admin. The previous owner becomes admin.
+
+        There is still one owner. The change is one transaction.
+        """
+        name = username(username_text)
+        if name is None:
+            raise AccountError("no such account")
+        now = _now()
+        with self._lock:
+            owner_row = self.conn.execute(
+                """
+                SELECT id FROM accounts
+                WHERE role = 'owner' ORDER BY created_at LIMIT 1
+                """
+            ).fetchone()
+            target = self._account_row(name)
+            if owner_row is None:
+                raise AccountError("no owner account")
+            if target is None or str(target["status"]) != "active":
+                raise AccountError("no such account")
+            if str(target["role"]) != "admin":
+                raise AccountError("the new owner must already be an admin")
+            if str(target["id"]) == str(owner_row["id"]):
+                raise AccountError("that account is already the owner")
+            self.conn.execute("BEGIN IMMEDIATE")
+            try:
+                self.conn.execute(
+                    """
+                    UPDATE accounts SET role = 'admin', updated_at = ?
+                    WHERE id = ? AND role = 'owner'
+                    """,
+                    (now, owner_row["id"]),
+                )
+                cursor = self.conn.execute(
+                    """
+                    UPDATE accounts SET role = 'owner', updated_at = ?
+                    WHERE id = ? AND role = 'admin'
+                    """,
+                    (now, target["id"]),
+                )
+                if cursor.rowcount != 1:
+                    raise AccountError("could not transfer ownership")
+                self.conn.commit()
+            except Exception:
+                self.conn.rollback()
+                raise
+            former = self.conn.execute(
+                """
+                SELECT id, username, display_name, email, role, status, created_at
+                FROM accounts WHERE id = ?
+                """,
+                (owner_row["id"],),
+            ).fetchone()
+            current = self._account_row(name)
+        if former is None or current is None:
+            raise AccountError("could not transfer ownership")
+        return _account(former), _account(current)
+
     def set_password(self, username_text: str, password: str) -> Account:
         name = username(username_text)
         if name is None:

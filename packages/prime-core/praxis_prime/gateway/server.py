@@ -76,6 +76,7 @@ class GatewayServer:
         accounts: AccountStore | None = None,
         audit: AuditLog | None = None,
         data_root: Path | None = None,
+        bearer_enabled: bool = True,
     ) -> None:
         self.host = host
         self._port = port
@@ -87,6 +88,7 @@ class GatewayServer:
         self.accounts = accounts
         self.audit = audit
         self.data_root = data_root
+        self.bearer_enabled = bearer_enabled
         self.logger = logger
         self.socket_path = socket_path
         self._stopped = threading.Event()
@@ -261,6 +263,7 @@ class GatewayServer:
             headers,
             method,
             bootstrap_token=self.token,
+            bearer_enabled=self.bearer_enabled,
         )
         if isinstance(principal, Denial):
             if principal.status == 401 and self.logger is not None:
@@ -323,6 +326,9 @@ class GatewayServer:
             return 200, {"ok": True, "profile": {"id": named.group(1), "role": role}}
         if method == "GET" and route == "/status":
             return 200, {"ok": True, "status": self._status()}
+        if method == "GET" and route == "/v1/approvals/meta":
+            rows = self.approvals.list_meta()
+            return 200, {"ok": True, "count": len(rows), "approvals": rows}
         if method == "GET" and route == "/v1/approvals":
             return 200, {"ok": True, "approvals": self._visible_approvals(principal)}
         match = _APPROVAL_PATH.fullmatch(route)
@@ -739,7 +745,7 @@ class GatewayServer:
             if not token_ok(presented, self.token):
                 return Denial(401, "unauthorized", "gateway token rejected")
             return Principal(kind="legacy", account_id="", username="", role="operator")
-        if token_ok(presented, self.token) and self.accounts is not None:
+        if self.bearer_enabled and token_ok(presented, self.token) and self.accounts is not None:
             owner = self.accounts.owner()
             if owner is None or owner.status != "active":
                 return Denial(401, "unauthorized", "gateway token rejected")

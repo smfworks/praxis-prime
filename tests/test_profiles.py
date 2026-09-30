@@ -326,6 +326,62 @@ def test_hostile_persona_cannot_skip_approval(tmp_path: Path):
         runtime.close()
 
 
+def test_migration_then_chat_keeps_the_same_tools(tmp_path: Path):
+    data = tmp_path / "data"
+    data.mkdir()
+    (tmp_path / "note.txt").write_text("hello from disk\n", encoding="utf-8")
+    StateDB(data / "prime.db").close()
+    before_provider = ScriptedProvider(
+        [_tool("read_file", {"path": "note.txt"}), AssistantFinal(content="saw it")]
+    )
+    before = build_runtime(
+        env={},
+        config_path=tmp_path / "missing.toml",
+        data_path=data / "prime.db",
+        cwd=tmp_path,
+        providers={"ollama": before_provider},
+    )
+    try:
+        before_names = _offered(before)
+        assert "read_file" in before_names
+        assert "shell" in before_names
+        _session, loop = before.open_loop(None)
+        list(loop.run_turn("read the note"))
+        assert "hello from disk" in before_provider.requests[1].messages[-1].content
+    finally:
+        before.close()
+
+    migrate_single_user(data, tmp_path / "config")
+    profile_toml = (data / "profiles" / "default" / "profile.toml").read_text(encoding="utf-8")
+    assert profile_toml.count('allow = ["*"]') == 2
+    created = create_profile(data, "work")
+    created_toml = created.config_path.read_text(encoding="utf-8")
+    assert created_toml.count('allow = ["*"]') == 2
+
+    after_provider = ScriptedProvider(
+        [_tool("read_file", {"path": "note.txt"}), AssistantFinal(content="saw it again")]
+    )
+    after = build_runtime(
+        env={},
+        config_path=tmp_path / "missing.toml",
+        data_path=data / "unused.db",
+        cwd=tmp_path,
+        profile="default",
+        providers={"ollama": after_provider},
+    )
+    try:
+        assert _offered(after) == before_names
+        assert after.tool_policy is not None
+        assert after.tool_policy.tools is None
+        assert after.tool_policy.permits_tool("read_file") is True
+        assert after.tool_policy.permits_tool("shell") is True
+        _session, loop = after.open_loop(None)
+        list(loop.run_turn("read the note again"))
+        assert "hello from disk" in after_provider.requests[1].messages[-1].content
+    finally:
+        after.close()
+
+
 def test_profile_dials_cannot_drop_below_the_org_floor(tmp_path: Path):
     data = tmp_path / "data"
     create_profile(data, "ada")
@@ -410,6 +466,11 @@ def _tool(name: str, arguments: dict[str, object]) -> AssistantFinal:
         content="",
         tool_calls=(ToolCall(id="c1", name=name, arguments=arguments),),
     )
+
+
+def _offered(runtime) -> set[str]:
+    _session, loop = runtime.open_loop(None)
+    return _schema_names(loop)
 
 
 def _schema_names(loop: AgentLoop) -> set[str]:

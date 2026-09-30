@@ -123,6 +123,10 @@ def build_parser() -> argparse.ArgumentParser:
     daemon_commands.add_parser("stop", help="Ask the daemon to shut down.")
     daemon_commands.add_parser("status", help="Show whether the daemon is healthy.")
     logs = daemon_commands.add_parser("logs", help="Print recent daemon log lines.")
+    daemon_commands.add_parser(
+        "rotate-token",
+        help="Replace the loopback bearer token. Restart praxis-primed to use it.",
+    )
     logs.add_argument("--lines", type=int, default=80, help="How many lines to print.")
 
     service = commands.add_parser(
@@ -352,7 +356,15 @@ def _daemon_command(args: argparse.Namespace) -> int:
     if args.daemon_command == "logs":
         count = args.lines if isinstance(args.lines, int) and args.lines > 0 else 80
         return show_logs(count)
-    print("usage: praxis-prime daemon {start|stop|status|logs}", file=sys.stderr)
+    if args.daemon_command == "rotate-token":
+        from praxis_prime.gateway.auth import rotate_token
+        from praxis_prime.gateway.discover import gateway_paths
+
+        rotate_token(gateway_paths()[1])
+        print("Replaced the loopback bearer token. Restart praxis-primed to use it.")
+        print("The token was not printed. It stays in the runtime directory, mode 0600.")
+        return 0
+    print("usage: praxis-prime daemon {start|stop|status|logs|rotate-token}", file=sys.stderr)
     return 2
 
 

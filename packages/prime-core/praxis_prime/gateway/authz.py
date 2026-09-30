@@ -67,8 +67,14 @@ def authenticate_http(
     method: str,
     *,
     bootstrap_token: str,
+    bearer_enabled: bool = True,
 ) -> Principal | Denial:
-    """Identify the caller. CSRF failures are 403. Missing auth is 401."""
+    """Identify the caller. CSRF failures are 403. Missing auth is 401.
+
+    ``bearer_enabled`` matters only after an account exists. Until then the
+    bearer token stays the operator credential, so a false flag cannot open
+    the gateway or lock out the first-run install.
+    """
     if not accounts_enforced(store):
         if not token_ok(bearer_token(headers), bootstrap_token):
             return Denial(401, "unauthorized", "Bearer token required")
@@ -88,7 +94,7 @@ def authenticate_http(
             role=session.role,
             session_token=cookie,
         )
-    if token_ok(bearer_token(headers), bootstrap_token):
+    if bearer_enabled and token_ok(bearer_token(headers), bootstrap_token):
         owner = store.owner()
         if owner is None or owner.status != "active":
             return Denial(401, "unauthorized", "authentication required")

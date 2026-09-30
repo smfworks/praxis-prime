@@ -24,6 +24,7 @@ def test_rendered_config_round_trips_and_dials_are_off():
     assert parsed["mcp"]["serve"] is False
     assert parsed["browser"]["profile"] == "disposable"
     assert str(parsed["gateway"]["listen"]).startswith("127.0.0.1:")
+    assert parsed["gateway"]["bearer"] is True
     assert str(parsed["models"]["primary"]).startswith("ollama:")
     assert parsed["tools"]["read_roots"] == []
     assert parsed["tools"]["read_allow"] == []
