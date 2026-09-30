@@ -23,7 +23,7 @@ from praxis_prime.profiles.policy import (
     load_layer,
     render_policy_toml,
 )
-from praxis_prime.state import StateDB
+from praxis_prime.state import DB_FILENAME, StateDB, data_root_for_database
 from praxis_prime.statfile import StatKind, lstat_kind
 
 _DEFAULT_SOUL = """\
@@ -169,10 +169,13 @@ def resolve_runtime_layout(
     data_file: Path | None,
     profile: str | None,
 ) -> RuntimeLayout:
-    """Pick the state file. An explicit database path stays put.
+    """Pick the state file.
 
-    After the single-user migration marker exists, a default open uses
-    ``profiles/default/prime.db`` instead of the old top-level file.
+    After the single-user migration marker exists, a default open and an
+    open of the old top-level ``prime.db`` both use
+    ``profiles/default/prime.db``. A path that is already
+    ``profiles/<id>/prime.db`` keeps that profile. Any other explicit
+    database path stays put.
     """
     if profile:
         checked = profile_id(profile)
@@ -184,13 +187,36 @@ def resolve_runtime_layout(
             raise ValueError(f"no profile {checked}")
         return _scoped(root, home.db_path, checked, home)
     if data_file is not None:
-        return RuntimeLayout(data_file, "", None, None, {}, {}, None)
+        return _layout_for_file(data_file)
     root = data_dir(env)
+    return _default_layout(root)
+
+
+def _layout_for_file(data_file: Path) -> RuntimeLayout:
+    """Follow a finished migration. Leave every other explicit file alone."""
+    path = Path(data_file)
+    root = data_root_for_database(path)
+    if path == root / DB_FILENAME:
+        return _default_layout(root)
+    profile = _profile_owning(path, root)
+    if profile is not None and _regular(path):
+        return _scoped(root, path, profile, ProfileHome(root, profile))
+    return RuntimeLayout(path, "", None, None, {}, {}, None)
+
+
+def _profile_owning(path: Path, root: Path) -> str | None:
+    """Profile id when ``path`` is ``<root>/profiles/<id>/prime.db``."""
+    if path.name != DB_FILENAME or path.parent.parent != root / "profiles":
+        return None
+    return profile_id(path.parent.name)
+
+
+def _default_layout(root: Path) -> RuntimeLayout:
     marker = migration_marker(root)
-    default_db = root / "profiles" / "default" / "prime.db"
+    default_db = root / "profiles" / "default" / DB_FILENAME
     if _regular(marker) and _regular(default_db):
         return _scoped(root, default_db, "default", ProfileHome(root, "default"))
-    return RuntimeLayout(root / "prime.db", "", None, None, {}, {}, None)
+    return RuntimeLayout(root / DB_FILENAME, "", None, None, {}, {}, None)
 
 
 def _regular(path: Path) -> bool:

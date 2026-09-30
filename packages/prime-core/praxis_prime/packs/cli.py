@@ -18,6 +18,7 @@ from praxis_prime.packs.install import install_pack, installed_index, list_insta
 from praxis_prime.packs.legacy import PackError
 from praxis_prime.packs.model import PERSONA_BOUNDARY, LegacyPack
 from praxis_prime.paths import data_dir
+from praxis_prime.profiles.home import resolve_runtime_layout
 from praxis_prime.state import StateDB
 
 
@@ -69,7 +70,8 @@ def dispatch_packs(args: argparse.Namespace) -> int | None:
 
 def _install(args: argparse.Namespace) -> int:
     data = _data(args)
-    db = StateDB(data / "prime.db")
+    path = resolve_runtime_layout(None, data_file=data / "prime.db", profile=None).db_path
+    db = StateDB(path)
     try:
         installed = install_pack(args.source, data, audit=AuditLog(db))
     finally:

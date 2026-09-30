@@ -15,10 +15,11 @@ from pathlib import Path
 
 from praxis_prime.approvals.gate import ApprovalDecision
 from praxis_prime.paths import config_dir
+from praxis_prime.profiles.home import resolve_runtime_layout
 from praxis_prime.scheduler.cron import ScheduleError, parse_every
 from praxis_prime.scheduler.store import RoutineStore
 from praxis_prime.scheduler.watch import file_token
-from praxis_prime.state import StateDB, default_db_path
+from praxis_prime.state import StateDB
 
 
 def add_user_commands(commands: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -404,9 +405,10 @@ def _db(args: argparse.Namespace) -> StateDB:
 
 
 def _data_path(args: argparse.Namespace) -> Path:
-    if args.data_dir:
-        return Path(args.data_dir) / "prime.db"
-    return default_db_path()
+    """Database for this command, including one that already moved."""
+    raw = getattr(args, "data_dir", None)
+    data_file = Path(raw) / "prime.db" if raw else None
+    return resolve_runtime_layout(None, data_file=data_file, profile=None).db_path
 
 
 def _config_path(args: argparse.Namespace) -> Path:

@@ -25,7 +25,8 @@ from praxis_prime.mcp.config import (
     validate_name,
 )
 from praxis_prime.mcp.risk import map_tool_risk
-from praxis_prime.state import StateDB, default_db_path
+from praxis_prime.profiles.home import resolve_runtime_layout
+from praxis_prime.state import StateDB
 
 
 def add_mcp_parser(commands: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -296,9 +297,8 @@ def _project_root(args: argparse.Namespace) -> Path:
 
 
 def _db_path(args: argparse.Namespace) -> Path:
-    if args.data_dir:
-        return Path(args.data_dir) / "prime.db"
-    return default_db_path()
+    data_file = Path(args.data_dir) / "prime.db" if args.data_dir else None
+    return resolve_runtime_layout(None, data_file=data_file, profile=None).db_path
 
 
 def _split_pair(item: str, flag: str) -> tuple[str, str]:

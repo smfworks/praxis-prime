@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import argparse
+import io
 import os
 import sys
 import threading
@@ -9,6 +11,9 @@ from pathlib import Path
 
 import pytest
 
+from praxis_prime.audit.log import AuditLog
+from praxis_prime.cli import main
+from praxis_prime.mcp.cli import _db_path
 from praxis_prime.profiles.migrate import (
     MigrationBusy,
     _process_starttime,
@@ -180,7 +185,11 @@ def test_opener_does_not_wait_or_recreate_during_migration(tmp_path: Path) -> No
     release_db_locks(held)
     migrated = migrate_under_lock(data, config, daemon_running=lambda: False)
     assert migrated.already is False
-    with pytest.raises(MigrationInProgress, match="migration in progress"):
+    moved_to = data / "profiles" / "default" / "prime.db"
+    with pytest.raises(
+        MigrationInProgress,
+        match=f"this database moved to {moved_to} after migration",
+    ):
         StateDB(legacy)
     assert not legacy.exists()
     moved = StateDB(data / "profiles" / "default" / "prime.db")
@@ -228,7 +237,8 @@ def test_slow_open_after_the_move_does_not_create_legacy(
     thread.join(5)
     assert not thread.is_alive()
     assert errors
-    assert "migration in progress" in errors[0]
+    moved_to = data / "profiles" / "default" / "prime.db"
+    assert f"this database moved to {moved_to} after migration" in errors[0]
     assert not (data / "prime.db").exists()
     moved = StateDB(data / "profiles" / "default" / "prime.db")
     try:
@@ -265,3 +275,136 @@ def test_cli_openers_refuse_while_the_migration_lock_exists(
         assert _count(reopened) == 1
     finally:
         reopened.close()
+
+
+def test_post_migration_commands_open_the_profile_database(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Memory, routines, compliance, breach, gdpr, mcp, and packs follow the move.
+
+    A finished migration used to look like ``migration in progress`` because
+    these commands opened the old top-level ``prime.db``. On a build without
+    that refusal they would instead create an empty file and read it.
+    """
+    home = tmp_path / "home"
+    data = home / ".local" / "share" / "praxis-prime"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_DATA_HOME", str(home / ".local" / "share"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(home / ".local" / "state"))
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "run"))
+    (tmp_path / "run").mkdir()
+    db = StateDB(data / "prime.db")
+    db.conn.execute(
+        """
+        INSERT INTO memory_entries (
+            id, tier, scope, content, content_hash, source, created_at, updated_at
+        ) VALUES (?, 'profile', 'global', ?, 'hash-kept', 'test', ?, ?)
+        """,
+        (
+            "mem-kept",
+            "kept-memory-token",
+            "2026-01-01T00:00:00+00:00",
+            "2026-01-01T00:00:00+00:00",
+        ),
+    )
+    db.conn.execute(
+        """
+        INSERT INTO routines (
+            id, name, prompt, trigger_kind, trigger_expr, timezone, missed_policy,
+            min_interval_seconds, max_iterations, created_at, updated_at
+        ) VALUES (
+            'rt-kept', 'kept-routine', 'say hi', 'cron', '0 0 * * *', 'UTC', 'skip',
+            0, 1, '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00'
+        )
+        """
+    )
+    db.conn.execute(
+        """
+        INSERT INTO breach_records (
+            id, created_at, pack, summary, affected_count, status, notice_draft, payload_json
+        ) VALUES (
+            'br-kept', '2026-01-01T00:00:00+00:00', 'gdpr', 'kept-breach-token',
+            1, 'recorded', 'draft', '{}'
+        )
+        """
+    )
+    db.conn.commit()
+    AuditLog(db).append(
+        session_id=None,
+        kind="retention",
+        summary="kept-audit-token",
+        payload={"ok": True},
+    )
+    db.close()
+    monkeypatch.setattr("sys.stdin", io.StringIO("correct-horse\n"))
+    assert main(["account", "create", "ada", "--password-stdin"]) == 0
+    capsys.readouterr()
+    moved = data / "profiles" / "default" / "prime.db"
+    assert moved.is_file()
+    assert not (data / "prime.db").exists()
+
+    def run(argv: list[str]) -> str:
+        code = main(argv)
+        captured = capsys.readouterr()
+        text = captured.out + captured.err
+        assert code == 0, text
+        assert "migration in progress" not in text
+        assert "this database moved" not in text
+        return text
+
+    bare = [
+        ["memory", "list"],
+        ["routines", "list"],
+        ["compliance", "report"],
+        ["breach", "list"],
+        ["gdpr", "export", "--subject", "kept-memory-token"],
+    ]
+    for argv in bare:
+        with_dir = [*argv, "--data-dir", str(data)]
+        bare_text = run(argv)
+        dir_text = run(with_dir)
+        if argv[0] == "memory":
+            assert "kept-memory-token" in bare_text
+            assert "kept-memory-token" in dir_text
+        elif argv[0] == "routines":
+            assert "kept-routine" in bare_text
+            assert "kept-routine" in dir_text
+        elif argv[0] == "compliance":
+            assert "kept-audit-token" in bare_text
+            assert "kept-audit-token" in dir_text
+        elif argv[0] == "breach":
+            assert "kept-breach-token" in bare_text
+            assert "kept-breach-token" in dir_text
+        else:
+            assert "kept-memory-token" in bare_text
+            assert "kept-memory-token" in dir_text
+    assert not (data / "prime.db").exists()
+    assert _db_path(argparse.Namespace(data_dir=None)) == moved
+    assert _db_path(argparse.Namespace(data_dir=str(data))) == moved
+
+    pack = tmp_path / "pack"
+    pack.mkdir()
+    (pack / "pack.json").write_text(
+        '{"name": "demo_pack", "version": "1.0.0", "description": "fixture"}\n',
+        encoding="utf-8",
+    )
+    (pack / "LICENSE").write_text(
+        "MIT License\nPermission is hereby granted, free of charge\n",
+        encoding="utf-8",
+    )
+    assert "installed demo_pack" in run(["packs", "install", str(pack), "--data-dir", str(data)])
+    assert not (data / "prime.db").exists()
+    opened = StateDB(moved)
+    try:
+        kinds = {row["kind"] for row in opened.conn.execute("SELECT kind FROM audit_events")}
+    finally:
+        opened.close()
+    assert "pack.install" in kinds
+
+    with pytest.raises(
+        MigrationInProgress,
+        match=f"this database moved to {moved} after migration",
+    ):
+        StateDB(data / "prime.db")
+    assert not (data / "prime.db").exists()

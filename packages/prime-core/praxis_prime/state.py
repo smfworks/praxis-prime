@@ -96,6 +96,11 @@ def release_db_locks(fds: list[int]) -> None:
 
 
 def default_db_path(env: Mapping[str, str] | None = None) -> Path:
+    """Pre-migration path ``<data>/prime.db``.
+
+    Openers use ``resolve_runtime_layout``. After the marker exists, that
+    opens ``profiles/default/prime.db`` instead of this file.
+    """
     return data_dir(env) / DB_FILENAME
 
 
@@ -119,7 +124,8 @@ def refuse_if_migrating(path: Path) -> None:
     if migration_in_progress(root):
         raise MigrationInProgress("migration in progress")
     if _legacy_path_closed(path, root):
-        raise MigrationInProgress("migration in progress")
+        moved = root / "profiles" / "default" / DB_FILENAME
+        raise MigrationInProgress(f"this database moved to {moved} after migration")
 
 
 def _legacy_path_closed(path: Path, root: Path) -> bool:
