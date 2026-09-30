@@ -657,6 +657,7 @@ def _inode_candidates() -> list[Path]:
         home / ".mozilla",
         config / "google-chrome",
         config / "google-chrome-beta",
+        config / "google-chrome-unstable",
         config / "chromium",
         config / "BraveSoftware",
         config / "microsoft-edge",

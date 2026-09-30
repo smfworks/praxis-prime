@@ -326,6 +326,7 @@ _PACKAGED_BROWSER_ROOTS = (
     ".config/vivaldi",
     ".config/opera",
     ".config/google-chrome-beta",
+    ".config/google-chrome-unstable",
 )
 
 
