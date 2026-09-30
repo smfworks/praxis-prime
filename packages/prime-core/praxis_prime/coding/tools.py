@@ -198,7 +198,7 @@ def execute_write_file(arguments: Mapping[str, object], context: ToolContext) ->
     if len(content) > _MAX_WRITE:
         raise ValueError("write_file content is too large")
     path = _resolve(raw, context.cwd)
-    _refuse_secret_write(path)
+    _refuse_secret_write(path, context.inode_cache)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
     return f"wrote {path} ({len(content)} characters)"
@@ -219,7 +219,7 @@ def execute_edit_file(arguments: Mapping[str, object], context: ToolContext) -> 
             "edit_file: old_string and new_string are the same. The file was not modified."
         )
     path = _resolve(raw, context.cwd)
-    if is_secret_path(path) or inode_is_secret(path):
+    if is_secret_path(path) or inode_is_secret(path, cache=context.inode_cache):
         raise ValueError(
             f"refusing to edit secret file {path.name}. The file was not modified."
         )
@@ -519,8 +519,8 @@ def is_protected(path: Path) -> bool:
     return False
 
 
-def _refuse_secret_write(path: Path) -> None:
-    if is_secret_path(path) or inode_is_secret(path):
+def _refuse_secret_write(path: Path, cache: InodeScanCache | None = None) -> None:
+    if is_secret_path(path) or inode_is_secret(path, cache=cache):
         raise ValueError(f"refusing to write secret file {path.name}")
 
 
