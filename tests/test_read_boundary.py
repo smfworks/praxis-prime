@@ -220,6 +220,46 @@ def test_inode_scan_cap_denies_the_read(tmp_path: Path, monkeypatch, caplog):
     assert execute_read_file({"path": "note.txt"}, _ctx(root)) == "hello\n"
 
 
+def test_profile_cache_does_not_trip_the_inode_cap(tmp_path: Path, monkeypatch):
+    profile = tmp_path / "google-chrome"
+    cache = profile / "Default" / "Cache"
+    cache.mkdir(parents=True)
+    for index in range(20):
+        (cache / f"data_{index}").write_text("cache", encoding="utf-8")
+    secret = profile / "Default" / "Cookies"
+    secret.write_text(SECRET, encoding="utf-8")
+    root = tmp_path / "ws"
+    root.mkdir()
+    (root / "hello.txt").write_text("hello\n", encoding="utf-8")
+    os.link(secret, root / "notes.txt")
+    monkeypatch.setattr("praxis_prime.policy.boundary._inode_candidates", lambda: [profile])
+    monkeypatch.setattr("praxis_prime.policy.boundary._MAX_INODE_FILES", 3)
+    ctx = _ctx(root)
+    assert execute_read_file({"path": "hello.txt"}, ctx) == "hello\n"
+    denial = _denied(execute_read_file, {"path": "notes.txt"}, ctx)
+    assert denial.code == "secret_path"
+    assert SECRET not in str(denial)
+
+
+def test_skipped_profile_secret_still_fails_closed(tmp_path: Path, monkeypatch, caplog):
+    profile = tmp_path / "chromium"
+    profile.mkdir()
+    for name in ("Login Data", "Cookies", "Web Data", "key4.db"):
+        (profile / name).write_text("x", encoding="utf-8")
+    for index in range(10):
+        (profile / f"cache-{index}").write_text("x", encoding="utf-8")
+    root = tmp_path / "ws"
+    root.mkdir()
+    (root / "note.txt").write_text("hello\n", encoding="utf-8")
+    monkeypatch.setattr("praxis_prime.policy.boundary._inode_candidates", lambda: [profile])
+    monkeypatch.setattr("praxis_prime.policy.boundary._MAX_INODE_FILES", 2)
+    with caplog.at_level(logging.WARNING, logger="praxis_prime.policy.boundary"):
+        denial = _denied(execute_read_file, {"path": "note.txt"}, _ctx(root))
+    assert denial.code == "inode_scan_capped"
+    assert "hello" not in str(denial)
+    assert "secret-file cap" in caplog.text
+
+
 def test_allowlist_is_explicit_and_does_not_unlock_secrets(tmp_path: Path):
     root, outside = _workspace(tmp_path)
     granted = ReadAccess(allow_paths=(str(outside),))

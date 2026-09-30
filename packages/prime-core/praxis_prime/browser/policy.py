@@ -14,7 +14,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
-from praxis_prime.browser.guard import browser_fetch_allow
+from praxis_prime.policy.boundary import browser_fetch_allow
 from praxis_prime.tools.builtin import validate_fetch_url
 from praxis_prime.tools.registry import PreparedCall, Risk
 

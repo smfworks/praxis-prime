@@ -26,10 +26,9 @@ from praxis_prime.browser.driver import (
     playwright_available,
     remove_profile,
 )
-from praxis_prime.browser.guard import browser_fetch_allow
 from praxis_prime.browser.policy import BrowserPolicy, classify_browser
 from praxis_prime.paths import data_dir
-from praxis_prime.policy.boundary import parse_fetch_allow
+from praxis_prime.policy.boundary import browser_fetch_allow, parse_fetch_allow
 from praxis_prime.tools.builtin import execute_web_fetch
 from praxis_prime.tools.registry import Risk, Tool, ToolContext, ToolRegistry
 

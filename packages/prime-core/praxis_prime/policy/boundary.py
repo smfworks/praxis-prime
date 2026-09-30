@@ -33,6 +33,7 @@ _log = logging.getLogger(__name__)
 MAX_REDIRECTS = 5
 _MAX_INODE_FILES = 500
 _FETCH_ALLOW = frozenset({"loopback", "private", "link_local", "metadata"})
+_BROWSER_FETCH_ALLOW = frozenset({"loopback", "private", "link_local"})
 _REDIRECT_STATUS = frozenset({300, 301, 302, 303, 307, 308})
 _METADATA_HOSTS = frozenset({"metadata.google.internal", "metadata.goog"})
 _METADATA_V4 = ipaddress.ip_address("169.254.169.254")
@@ -80,6 +81,37 @@ _BROWSER_CONFIG = frozenset(
         "opera",
     }
 )
+# Profile trees are large. Only these filenames, plus the denylist patterns,
+# contribute inodes. Cache and other files are listed and then skipped.
+_PROFILE_ROOT_NAMES = frozenset(
+    {
+        ".mozilla",
+        "mozilla",
+        "google-chrome",
+        "chromium",
+        "bravesoftware",
+        "microsoft-edge",
+    }
+)
+_PROFILE_SECRET_NAMES = frozenset(
+    {
+        "login data",
+        "cookies",
+        "web data",
+        "local state",
+        "key4.db",
+        "key3.db",
+        "logins.json",
+        "cookies.sqlite",
+        "cert9.db",
+        "signons.sqlite",
+        "extension cookies",
+        "account web data",
+        "login data for account",
+        "safe browsing cookies",
+    }
+)
+_PROFILE_SIDECAR_SUFFIXES = ("-journal", "-wal", "-shm")
 _SKIP_WALK = frozenset({".git", "node_modules", ".venv", "__pycache__"})
 
 Resolver = Callable[..., list[tuple[object, ...]]]
@@ -138,6 +170,15 @@ def parse_fetch_allow(value: object) -> frozenset[str]:
         item.strip().lower()
         for item in value
         if isinstance(item, str) and item.strip().lower() in _FETCH_ALLOW
+    )
+
+
+def browser_fetch_allow(fetch_allow: Collection[str]) -> frozenset[str]:
+    """Classes the browser may use. Metadata is omitted."""
+    return frozenset(
+        str(item).strip().lower()
+        for item in fetch_allow
+        if str(item).strip().lower() in _BROWSER_FETCH_ALLOW
     )
 
 
@@ -225,13 +266,13 @@ def inode_is_secret(path: Path, inodes: set[tuple[int, int]] | None = None) -> b
 def secret_inode_set() -> set[tuple[int, int]]:
     """Inodes of well-known secret files, so a hard link can be recognized.
 
-    A scan that stops at the file cap denies the read. A partial set would
-    let a hard link through.
+    Browser profile trees contribute only secret-named files. The file cap
+    denies the read when a secret-candidate file is left unscanned.
     """
     found: set[tuple[int, int]] = set()
     count = 0
     for path in _inode_candidates():
-        count, capped = _collect_inodes(path, found, count)
+        count, capped = _collect_inodes(path, found, count, named_only=_named_only(path))
         if capped:
             _refuse_capped_inode_scan()
     return found
@@ -423,7 +464,7 @@ def _assess_read(
         raw = arguments.get("url")
         if not isinstance(raw, str) or not raw.strip():
             return None
-        classify_url(raw, access.fetch_allow)
+        classify_url(raw, browser_fetch_allow(access.fetch_allow))
         return None
     if tool not in {"read_file", "list_dir", "grep", "glob"}:
         return None
@@ -526,21 +567,53 @@ def _inode_candidates() -> list[Path]:
     return paths
 
 
+def _named_only(path: Path) -> bool:
+    """Browser profiles are matched by secret filename. Other roots count every file."""
+    return path.name.lower() in _PROFILE_ROOT_NAMES
+
+
+def _profile_file_is_secret(name: str) -> bool:
+    """True for denylist names and known browser credential files."""
+    if _name_is_secret(name):
+        return True
+    lower = name.lower()
+    if lower in _PROFILE_SECRET_NAMES:
+        return True
+    for suffix in _PROFILE_SIDECAR_SUFFIXES:
+        if lower.endswith(suffix) and lower[: -len(suffix)] in _PROFILE_SECRET_NAMES:
+            return True
+    return False
+
+
+def _candidate_name(name: str, *, named_only: bool) -> bool:
+    if named_only:
+        return _profile_file_is_secret(name)
+    return True
+
+
 def _refuse_capped_inode_scan() -> None:
     message = (
-        f"secret inode scan hit the {_MAX_INODE_FILES} file cap; "
-        "denying the read because a hard link could have been missed"
+        f"secret inode scan hit the {_MAX_INODE_FILES} secret-file cap; "
+        "denying the read because a secret file could have been missed"
     )
     _log.warning(message)
     raise ReadDenied(message, "inode_scan_capped")
 
 
-def _collect_inodes(path: Path, found: set[tuple[int, int]], count: int) -> tuple[int, bool]:
-    """Return ``(count, capped)``. ``capped`` means a later file was not scanned."""
+def _collect_inodes(
+    path: Path,
+    found: set[tuple[int, int]],
+    count: int,
+    *,
+    named_only: bool,
+) -> tuple[int, bool]:
+    """Return ``(count, capped)``. ``capped`` means a secret candidate was skipped."""
     try:
         if path.is_symlink() and path.is_dir():
             return count, False
         if path.is_file():
+            if not _candidate_name(path.name, named_only=named_only):
+                return count, False
             if count >= _MAX_INODE_FILES:
                 return count, True
             return _add_inode(path, found, count), False
@@ -549,7 +622,7 @@ def _collect_inodes(path: Path, found: set[tuple[int, int]], count: int) -> tupl
     except OSError:
         return count, False
     if count >= _MAX_INODE_FILES:
-        return count, _has_pending_file(path)
+        return count, _has_pending_secret(path, named_only=named_only)
     try:
         walker = os.walk(path, followlinks=False)
     except OSError:
@@ -562,20 +635,22 @@ def _collect_inodes(path: Path, found: set[tuple[int, int]], count: int) -> tupl
                 kept.append(name)
         dirnames[:] = kept
         for name in filenames:
+            if not _candidate_name(name, named_only=named_only):
+                continue
             if count >= _MAX_INODE_FILES:
                 return count, True
             count = _add_inode(Path(dirpath) / name, found, count)
     return count, False
 
 
-def _has_pending_file(path: Path) -> bool:
-    """True when ``path`` still contains a regular file the scan did not visit."""
+def _has_pending_secret(path: Path, *, named_only: bool) -> bool:
+    """True when ``path`` still contains a secret-candidate file."""
     try:
         if path.is_symlink() and path.is_dir():
             return False
-        if path.is_file() or path.is_dir():
-            pass
-        else:
+        if path.is_file():
+            return _candidate_name(path.name, named_only=named_only)
+        if not path.is_dir():
             return False
     except OSError:
         return False
@@ -590,8 +665,9 @@ def _has_pending_file(path: Path) -> bool:
             if not child.is_symlink():
                 kept.append(name)
         dirnames[:] = kept
-        if filenames:
-            return True
+        for name in filenames:
+            if _candidate_name(name, named_only=named_only):
+                return True
     return False
 
 

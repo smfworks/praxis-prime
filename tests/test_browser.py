@@ -18,7 +18,7 @@ from praxis_prime.browser.driver import make_profile_dir, playwright_available, 
 from praxis_prime.browser.guard import BrowserFetchGuard
 from praxis_prime.browser.policy import BrowserPolicy, classify_browser
 from praxis_prime.browser.tool import BrowserSession
-from praxis_prime.policy.boundary import ReadDenied
+from praxis_prime.policy.boundary import ReadAccess, ReadDenied, assess_read
 from praxis_prime.tools.registry import Risk, ToolContext
 
 
@@ -104,6 +104,35 @@ def test_domain_lists_and_always_ask_actions():
     )
     assert plain.risk is Risk.DRAFT
     assert plain.force_approval is False
+
+
+def test_browser_precheck_strips_metadata_from_fetch_allow():
+    access = ReadAccess(fetch_allow=frozenset({"metadata", "loopback", "private", "link_local"}))
+    denial = assess_read(
+        "browser",
+        {"action": "navigate", "url": "http://169.254.169.254/latest"},
+        workspace_root=".",
+        access=access,
+    )
+    assert denial is not None
+    assert denial.code == "fetch_metadata"
+    named = assess_read(
+        "browser",
+        {"url": "http://metadata.google.internal/computeMetadata/v1/"},
+        workspace_root=".",
+        access=access,
+    )
+    assert named is not None
+    assert named.code == "fetch_metadata"
+    assert (
+        assess_read(
+            "browser",
+            {"url": "http://127.0.0.1/"},
+            workspace_root=".",
+            access=access,
+        )
+        is None
+    )
 
 
 def test_metadata_stays_blocked_when_fetch_allow_lists_it():

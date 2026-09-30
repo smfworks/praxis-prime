@@ -1,9 +1,15 @@
 """Request guard for browser navigation.
 
-GET and HEAD requests, including redirects and subresources, go through
-the same hop checks and DNS pin as ``web_fetch``. Other methods are
-classified, then continued. Loopback, link-local, and private addresses
-follow ``tools.fetch_allow``. Metadata addresses stay blocked.
+GET and HEAD requests, including redirects and subresources, are loaded
+by the same pinned client as ``web_fetch``. Each redirect hop is
+classified again before the next connection.
+
+POST and other methods are classified, then continued in Chromium.
+Redirect hops after that handoff stay on Chromium's connection. The
+pinned client handles GET and HEAD, so those later hops are a residual.
+
+Loopback, link-local, and private addresses follow ``tools.fetch_allow``.
+Metadata addresses stay blocked.
 
 ARCHITECTURE §13.2 and §16.
 """
@@ -18,22 +24,13 @@ from praxis_prime.policy.boundary import (
     Exchange,
     ReadDenied,
     Resolver,
+    browser_fetch_allow,
     fetch_public,
     pin_destination,
 )
 
 _log = logging.getLogger(__name__)
 _INTERNAL_SCHEMES = frozenset({"about", "blob", "data", "chrome", "chrome-error", "devtools"})
-_BROWSER_FETCH_ALLOW = frozenset({"loopback", "private", "link_local"})
-
-
-def browser_fetch_allow(fetch_allow: Collection[str]) -> frozenset[str]:
-    """Classes the browser may use. Metadata is omitted."""
-    return frozenset(
-        str(item).strip().lower()
-        for item in fetch_allow
-        if str(item).strip().lower() in _BROWSER_FETCH_ALLOW
-    )
 
 
 class BrowserFetchGuard:
