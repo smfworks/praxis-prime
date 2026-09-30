@@ -60,6 +60,9 @@ jobs:
           grep -qx 'live bwrap: worktree common config filter did not run' "$log"
           grep -qx 'live bwrap: config.worktree attributes file did not run' "$log"
           grep -qx 'live bwrap: submodule filter did not run' "$log"
+          grep -qx 'live bwrap: gpg showSignature did not run' "$log"
+          grep -qx 'live bwrap: partial-clone lazy fetch did not run' "$log"
+          grep -qx 'live bwrap: conftest did not run' "$log"
 
       - name: CLI smoke
         run: |

@@ -152,6 +152,7 @@ def test_bwrap_argv_drops_network_and_env_scrub_drops_keys(tmp_path):
     assert home != "/workspace"
     assert argv[argv.index("GIT_CONFIG_NOSYSTEM") + 1] == "1"
     assert argv[argv.index("GIT_CONFIG_GLOBAL") + 1] == "/dev/null"
+    assert argv[argv.index("GIT_NO_LAZY_FETCH") + 1] == "1"
     assert "--tmpfs" in argv
     assert "/sandbox-home" in argv
     cleaned = scrub_env(
