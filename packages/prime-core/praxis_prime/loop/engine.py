@@ -28,6 +28,7 @@ from praxis_prime.loop.events import LoopEvent, StatusEvent, TurnEnded
 from praxis_prime.loop.hooks import HookDecision, HookResult, LoopHooks
 from praxis_prime.loop.prompt import FENCE_END, SYSTEM_PROMPT, fence_untrusted
 from praxis_prime.memory.store import SessionStore
+from praxis_prime.policy.boundary import ReadAccess, ReadDenied
 from praxis_prime.policy.engine import HookPoint, PolicyContext, PolicyEngine
 from praxis_prime.router.router import ModelRouter
 from praxis_prime.router.types import (
@@ -69,6 +70,7 @@ class AgentLoop:
         screener: ActionScreener | None = None,
         recall_for: Callable[[str], str] | None = None,
         on_turn_end: Callable[[str, str], None] | None = None,
+        read_access: ReadAccess | None = None,
     ) -> None:
         self.router = router
         self.registry = registry
@@ -87,6 +89,7 @@ class AgentLoop:
         self.screener = screener
         self.recall_for = recall_for
         self.on_turn_end = on_turn_end
+        self.read_access = read_access or ReadAccess()
         self._turn_user = ""
 
     def run_turn(
@@ -304,6 +307,10 @@ class AgentLoop:
             mode=self.mode,
             summary=prepared.summary,
             text=prepared.summary,
+            workspace_root=str(self.cwd),
+            extra_roots=self.read_access.extra_roots,
+            allow_paths=self.read_access.allow_paths,
+            fetch_allow=tuple(sorted(self.read_access.fetch_allow)),
         )
         verdict = self.policy.evaluate(ctx)
         if self.screener is not None:
@@ -378,10 +385,25 @@ class AgentLoop:
             cancelled=lambda: control.cancelled,
             host_shell_approved=host_approved,
             session_id=self.session_id,
+            read_access=self.read_access,
         )
         try:
             raw = tool.execute(dict(call.arguments), tool_ctx)
             ok = True
+        except ReadDenied as exc:
+            raw = f"ReadDenied: {exc}"
+            ok = False
+            if self.policy.enforce_active():
+                self._audit(
+                    "read_denied",
+                    f"read denied ({exc.code})",
+                    {
+                        "tool": tool.name,
+                        "decision": "deny",
+                        "code": exc.code,
+                        "name": exc.display_name,
+                    },
+                )
         except Exception as exc:
             raw = f"{type(exc).__name__}: {exc}"
             ok = False

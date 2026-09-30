@@ -22,6 +22,7 @@ from praxis_prime.memory.store import SessionStore
 from praxis_prime.memory.tiers import MemoryStore, project_scope
 from praxis_prime.memory.tools import install_memory_tools
 from praxis_prime.paths import config_dir
+from praxis_prime.policy.boundary import ReadAccess
 from praxis_prime.policy.engine import PolicyEngine
 from praxis_prime.router.factory import build_router
 from praxis_prime.router.router import ChatProvider, ModelRouter
@@ -49,6 +50,7 @@ class Runtime:
     memory: MemoryStore
     skills: SkillCatalog
     cwd: Path
+    read_access: ReadAccess
     mcp: McpManager | None = None
     browser: BrowserSession | None = None
 
@@ -121,6 +123,7 @@ class Runtime:
             screener=self.screener,
             recall_for=recall_for,
             on_turn_end=on_turn_end,
+            read_access=self.read_access,
         )
         return session_id, loop
 
@@ -181,12 +184,19 @@ def build_runtime(
     install_memory_tools(tools, memory)
     install_skill_tool(tools, skills)
     sync_dial_positions(db, audit, settings.dials)
+    access = ReadAccess(
+        extra_roots=settings.read_roots,
+        allow_paths=settings.read_allow,
+        fetch_allow=frozenset(settings.fetch_allow),
+    )
     policy = PolicyEngine(
         settings.dials,
         audit=audit,
         provider_flags=settings.provider_flags,
         config_dir=resolved_config.parent,
         project_root=work,
+        read_access=access,
+        workspace_root=str(work),
     )
     mcp = install_mcp_tools(
         tools,
@@ -215,6 +225,7 @@ def build_runtime(
         memory=memory,
         skills=skills,
         cwd=work,
+        read_access=access,
         mcp=mcp,
         browser=browser,
     )

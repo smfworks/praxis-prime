@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
+from praxis_prime.policy.boundary import ReadAccess
+
 
 class Risk(StrEnum):
     """Side-effect class for one tool invocation."""
@@ -42,6 +44,7 @@ class ToolContext:
     cancelled: Callable[[], bool]
     host_shell_approved: bool = False
     session_id: str | None = None
+    read_access: ReadAccess | None = None
 
 
 @dataclass(frozen=True, slots=True)

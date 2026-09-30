@@ -152,7 +152,7 @@ def test_missing_playwright_falls_back_to_web_fetch(tmp_path: Path):
     thread = Thread(target=server.serve_forever, daemon=True)
     thread.start()
     session = BrowserSession(
-        BrowserPolicy(),
+        BrowserPolicy(fetch_allow=frozenset({"loopback"})),
         cwd=tmp_path,
         data_root=tmp_path,
         playwright_ok=lambda: False,
@@ -210,7 +210,7 @@ def test_playwright_navigate_when_chromium_is_installed(tmp_path: Path):
     thread = Thread(target=server.serve_forever, daemon=True)
     thread.start()
     session = BrowserSession(
-        BrowserPolicy(),
+        BrowserPolicy(fetch_allow=frozenset({"loopback"})),
         cwd=tmp_path,
         data_root=tmp_path,
         driver_factory=PlaywrightDriver,

@@ -3,17 +3,24 @@
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
 
+from praxis_prime.policy.boundary import ReadAccess
 from praxis_prime.sandbox.bwrap import build_bwrap_argv, scrub_env
 from praxis_prime.tools.builtin import execute_list_dir, execute_read_file, execute_web_fetch
 from praxis_prime.tools.registry import ToolContext
 from praxis_prime.tools.shell import classify_command, execute_shell
 
 
-def _ctx(tmp_path, *, host_approved: bool = False) -> ToolContext:
+def _ctx(
+    tmp_path,
+    *,
+    host_approved: bool = False,
+    fetch_allow: frozenset[str] = frozenset(),
+) -> ToolContext:
     return ToolContext(
         cwd=str(tmp_path),
         cancelled=lambda: False,
         host_shell_approved=host_approved,
+        read_access=ReadAccess(fetch_allow=fetch_allow),
     )
 
 
@@ -57,7 +64,17 @@ def test_web_fetch_reads_a_local_server_and_blocks_bad_urls():
     thread.start()
     try:
         port = server.server_address[1]
-        text = execute_web_fetch({"url": f"http://127.0.0.1:{port}/hello"}, _ctx("."))
+        url = f"http://127.0.0.1:{port}/hello"
+        try:
+            execute_web_fetch({"url": url}, _ctx("."))
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("loopback fetch was allowed without an explicit grant")
+        text = execute_web_fetch(
+            {"url": url},
+            _ctx(".", fetch_allow=frozenset({"loopback"})),
+        )
     finally:
         server.shutdown()
     assert "page body" in text

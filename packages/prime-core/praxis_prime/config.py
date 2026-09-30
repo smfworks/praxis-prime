@@ -37,6 +37,12 @@ _CONFIG_HEADER = """\
 # mcp.serve stays false. Nothing listens for other agents until you run
 # `praxis-prime mcp serve`. Browser profile defaults to a disposable
 # directory. Playwright is optional; without it the browser tool uses web_fetch.
+#
+# tools.read_roots and tools.read_allow are empty. The session workspace is
+# the only directory reads may touch until you add an absolute path here.
+# tools.fetch_allow is empty, so web_fetch refuses loopback, private,
+# link-local, and cloud-metadata addresses. A relative path in those lists
+# is ignored.
 """
 
 _PROFILE_HEADER = """\
@@ -137,6 +143,11 @@ def default_config_document() -> dict[str, object]:
             "profile": "disposable",
             "allow_domains": [],
             "deny_domains": [],
+        },
+        "tools": {
+            "read_roots": [],
+            "read_allow": [],
+            "fetch_allow": [],
         },
     }
 

@@ -5,7 +5,7 @@ writes to instruction files, require approval. ``git push``, force
 operations, and deletes of tracked files are consequential on the existing
 approval hook.
 
-``grep`` uses ripgrep when ``rg`` is on PATH and a Python scan otherwise.
+``grep`` and ``glob`` stay inside the workspace and skip secret files.
 ``run_command`` and ``run_tests`` use bubblewrap when it is installed.
 
 ARCHITECTURE §8 and §14.
@@ -13,27 +13,30 @@ ARCHITECTURE §8 and §14.
 
 from __future__ import annotations
 
+import os
 import re
-import shutil
 import subprocess
 from collections.abc import Mapping
 from pathlib import Path
 
+from praxis_prime.policy.boundary import (
+    ReadAccess,
+    ReadDenied,
+    assert_readable,
+    confine_path,
+    inode_is_secret,
+    is_secret_path,
+    read_confined_bytes,
+    readable_file,
+    secret_inode_set,
+)
 from praxis_prime.tools.builtin import builtin_registry
 from praxis_prime.tools.registry import PreparedCall, Risk, Tool, ToolContext, ToolRegistry
 from praxis_prime.tools.shell import classify_command, execute_shell
 
 _OBJECT = {"type": "object", "additionalProperties": False}
 _MAX_WRITE = 1_000_000
-_SECRET_NAMES = {
-    ".env",
-    "secrets.env",
-    "secrets.env.age",
-    "id_rsa",
-    "id_ed25519",
-    "id_ecdsa",
-    "id_dsa",
-}
+_MAX_GREP_FILE = 200_000
 _PROTECTED_NAMES = {
     "agents.md",
     "agents.override.md",
@@ -187,8 +190,7 @@ def execute_write_file(arguments: Mapping[str, object], context: ToolContext) ->
     if len(content) > _MAX_WRITE:
         raise ValueError("write_file content is too large")
     path = _resolve(raw, context.cwd)
-    if _is_secret(path):
-        raise ValueError(f"refusing to write secret file {path.name}")
+    _refuse_secret_write(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
     return f"wrote {path} ({len(content)} characters)"
@@ -209,8 +211,10 @@ def execute_edit_file(arguments: Mapping[str, object], context: ToolContext) -> 
             "edit_file: old_string and new_string are the same. The file was not modified."
         )
     path = _resolve(raw, context.cwd)
-    if _is_secret(path):
-        raise ValueError(f"refusing to edit secret file {path.name}. The file was not modified.")
+    if is_secret_path(path) or inode_is_secret(path):
+        raise ValueError(
+            f"refusing to edit secret file {path.name}. The file was not modified."
+        )
     if not path.is_file():
         raise ValueError(f"edit_file: not a file: {path}. The file was not modified.")
     text = path.read_text(encoding="utf-8")
@@ -236,10 +240,10 @@ def execute_grep(arguments: Mapping[str, object], context: ToolContext) -> str:
     raw_path = arguments.get("path", ".")
     if not isinstance(raw_path, str) or not raw_path.strip():
         raw_path = "."
-    base = _resolve(raw_path, context.cwd)
-    if shutil.which("rg"):
-        return _ripgrep(pattern, base)
-    return _python_grep(pattern, base)
+    access = _read_access(context)
+    base = confine_path(raw_path, cwd=context.cwd, access=access)
+    assert_readable(base, requested=Path(raw_path))
+    return _python_grep(pattern, base, cwd=context.cwd, access=access)
 
 
 def execute_glob(arguments: Mapping[str, object], context: ToolContext) -> str:
@@ -249,18 +253,33 @@ def execute_glob(arguments: Mapping[str, object], context: ToolContext) -> str:
     raw_path = arguments.get("path", ".")
     if not isinstance(raw_path, str) or not raw_path.strip():
         raw_path = "."
-    base = _resolve(raw_path, context.cwd)
+    access = _read_access(context)
+    base = confine_path(raw_path, cwd=context.cwd, access=access)
+    assert_readable(base, requested=Path(raw_path))
     if not base.is_dir():
         raise ValueError(f"not a directory: {base}")
+    inodes = secret_inode_set()
     matches: list[str] = []
     for path in sorted(base.glob(pattern)):
-        if _skipped(path):
+        if _skipped(path) or is_secret_path(path):
             continue
         try:
-            rel = path.relative_to(base).as_posix()
+            resolved = path.resolve(strict=False)
+        except (OSError, RuntimeError, ValueError):
+            continue
+        if not readable_file(resolved, cwd=context.cwd, access=access, inodes=inodes):
+            if not (resolved.is_dir() and not is_secret_path(resolved)):
+                continue
+            try:
+                confine_path(str(resolved), cwd=context.cwd, access=access)
+            except ReadDenied:
+                continue
+        try:
+            rel = path.resolve(strict=False).relative_to(base).as_posix()
         except ValueError:
-            rel = str(path)
-        matches.append(rel + ("/" if path.is_dir() else ""))
+            continue
+        directory = path.is_dir() and not path.is_symlink()
+        matches.append(rel + ("/" if directory else ""))
         if len(matches) >= 200:
             matches.append("…[truncated]")
             break
@@ -331,8 +350,8 @@ def _grep_tool(root: Path) -> Tool:
     return Tool(
         name="grep",
         description=(
-            "Search file contents for a regular expression. Uses ripgrep when "
-            "rg is installed, otherwise a Python scan."
+            "Search file contents for a regular expression inside the workspace. "
+            "Secret files are skipped."
         ),
         parameters={
             **_OBJECT,
@@ -354,7 +373,10 @@ def _glob_tool(root: Path) -> Tool:
     del root
     return Tool(
         name="glob",
-        description="List files matching a glob, relative to a directory in the worktree.",
+        description=(
+            "List files matching a glob inside the workspace. "
+            "Secret files and paths outside the workspace are omitted."
+        ),
         parameters={
             **_OBJECT,
             "properties": {
@@ -455,7 +477,7 @@ def _write_prepared(path: Path | None, root: Path, *, verb: str) -> PreparedCall
 def is_protected(path: Path) -> bool:
     """Instruction files, policy files, and secret names."""
     name = path.name.lower()
-    if name in _PROTECTED_NAMES or name in _SECRET_NAMES or name.startswith(".env"):
+    if name in _PROTECTED_NAMES or is_secret_path(path):
         return True
     parts = [part.lower() for part in path.parts]
     if ".cursor" in parts and "rules" in parts:
@@ -469,11 +491,16 @@ def is_protected(path: Path) -> bool:
     return False
 
 
-def _is_secret(path: Path) -> bool:
-    name = path.name
-    if name in _SECRET_NAMES or name.startswith(".env"):
-        return True
-    return bool(re.search(r"(?i)credentials", name) and name.endswith(".json"))
+def _refuse_secret_write(path: Path) -> None:
+    if is_secret_path(path) or inode_is_secret(path):
+        raise ValueError(f"refusing to write secret file {path.name}")
+
+
+def _read_access(context: ToolContext) -> ReadAccess:
+    access = context.read_access
+    if isinstance(access, ReadAccess):
+        return access
+    return ReadAccess()
 
 
 def _is_force(command: str) -> bool:
@@ -528,44 +555,21 @@ def _skipped(path: Path) -> bool:
     return any(part in {".git", "node_modules", ".venv", "__pycache__"} for part in path.parts)
 
 
-def _ripgrep(pattern: str, base: Path) -> str:
-    try:
-        completed = subprocess.run(
-            ["rg", "-n", "--heading", "-S", pattern, str(base)],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=20,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        if isinstance(exc, subprocess.TimeoutExpired):
-            return "grep timed out"
-        return _python_grep(pattern, base)
-    if completed.returncode not in {0, 1}:
-        detail = (completed.stderr or "").strip()
-        return detail or f"rg exited {completed.returncode}"
-    text = completed.stdout.strip()
-    if not text:
-        return "(no matches)"
-    if len(text) > 16_000:
-        return text[:16_000] + "\n…[truncated]"
-    return text
-
-
-def _python_grep(pattern: str, base: Path) -> str:
+def _python_grep(pattern: str, base: Path, *, cwd: str, access: ReadAccess) -> str:
     try:
         compiled = re.compile(pattern)
     except re.error as exc:
         raise ValueError(f"invalid grep pattern: {exc}") from exc
     lines: list[str] = []
-    files = [base] if base.is_file() else _files(base)
-    for path in files:
-        if _is_secret(path) or not _text_file(path):
-            continue
+    inodes = secret_inode_set()
+    for path in _search_files(base, cwd=cwd, access=access, inodes=inodes):
         try:
-            content = path.read_text(encoding="utf-8", errors="replace")
-        except OSError:
+            data = read_confined_bytes(path, cwd=cwd, access=access, limit=_MAX_GREP_FILE)
+        except (OSError, ReadDenied):
             continue
+        if b"\x00" in data[:1024]:
+            continue
+        content = data.decode("utf-8", errors="replace")
         for number, line in enumerate(content.splitlines(), start=1):
             if compiled.search(line):
                 lines.append(f"{path}:{number}:{line[:200]}")
@@ -575,23 +579,40 @@ def _python_grep(pattern: str, base: Path) -> str:
     return "\n".join(lines) if lines else "(no matches)"
 
 
-def _files(base: Path) -> list[Path]:
+def _search_files(
+    base: Path,
+    *,
+    cwd: str,
+    access: ReadAccess,
+    inodes: set[tuple[int, int]],
+) -> list[Path]:
+    if base.is_file() or base.is_symlink():
+        if readable_file(base, cwd=cwd, access=access, inodes=inodes):
+            return [base.resolve(strict=False)]
+        return []
     found: list[Path] = []
     if not base.is_dir():
         return found
-    for path in base.rglob("*"):
-        if _skipped(path) or not path.is_file():
-            continue
-        found.append(path)
-        if len(found) >= 2000:
-            break
+    for dirpath, dirnames, filenames in os.walk(base, followlinks=False):
+        kept: list[str] = []
+        for name in dirnames:
+            child = Path(dirpath) / name
+            if name in {".git", "node_modules", ".venv", "__pycache__"}:
+                continue
+            if child.is_symlink() or is_secret_path(child):
+                continue
+            kept.append(name)
+        dirnames[:] = kept
+        for name in filenames:
+            path = Path(dirpath) / name
+            if not readable_file(path, cwd=cwd, access=access, inodes=inodes):
+                continue
+            try:
+                found.append(path.resolve(strict=False))
+            except (OSError, RuntimeError, ValueError):
+                continue
+            if len(found) >= 2000:
+                return found
     return found
-
-
-def _text_file(path: Path) -> bool:
-    try:
-        return b"\x00" not in path.read_bytes()[:1024]
-    except OSError:
-        return False
 
 
