@@ -7,10 +7,12 @@ needs a human. ``shlex`` parses each simple command; a parse error needs
 approval too.
 
 The allowlist is small on purpose: ``ls``, ``cat`` / ``head`` / ``tail`` of
-paths inside the workspace, ``git status``, ``git diff``, ``git log``, and
-``pytest --collect-only`` (check mode, including ``python -m pytest``).
-Secret filenames use :func:`praxis_prime.policy.boundary.is_secret_path`,
-including git pathspecs.
+concrete paths inside the workspace, ``git status``, ``git diff`` of named
+non-secret files (or ``--stat`` / ``--name-only`` / ``--name-status``),
+``git log`` without ``-p``, and ``pytest --collect-only`` (check mode,
+including ``python -m pytest``). Secret filenames use
+:func:`praxis_prime.policy.boundary.is_secret_path`, including git pathspecs.
+Globs, ``rev:path``, and exclude or stacked pathspec magic are not allowlisted.
 """
 
 from __future__ import annotations
@@ -128,7 +130,6 @@ _GIT_DIFF = frozenset(
         "--quiet",
         "--raw",
         "--summary",
-        "-p",
         "-w",
         "-b",
         "--check",
@@ -152,10 +153,11 @@ _GIT_LOG = frozenset(
         "--name-status",
         "--no-color",
         "--color",
-        "-p",
         "--reverse",
     }
 )
+_SUMMARY_FLAGS = frozenset({"--stat", "--name-only", "--name-status"})
+_SAFE_PATHSPEC_MAGIC = frozenset({"literal", "top", "icase"})
 _PYTEST_FLAGS = frozenset(
     {"--collect-only", "--co", "-q", "--quiet", "--disable-warnings"}
 )
@@ -383,9 +385,7 @@ def _reader(tokens: list[str], workspace: Path | None, *, flags: bool) -> bool:
     if len(tokens) == 1:
         return True
     for arg in tokens[1:]:
-        if arg.startswith("-") or _operand_is_secret(arg, workspace):
-            return False
-        if not _in_workspace(arg, workspace):
+        if arg.startswith("-") or not _concrete_read_operand(arg, workspace):
             return False
     return True
 
@@ -402,9 +402,7 @@ def _head_tail(tokens: list[str], workspace: Path | None) -> bool:
         if re.fullmatch(r"-[nc]\d+", arg) or re.fullmatch(r"-\d+", arg):
             index += 1
             continue
-        if arg.startswith("-") or _operand_is_secret(arg, workspace):
-            return False
-        if not _in_workspace(arg, workspace):
+        if arg.startswith("-") or not _concrete_read_operand(arg, workspace):
             return False
         index += 1
     return True
@@ -425,16 +423,30 @@ def _git(tokens: list[str], workspace: Path | None) -> bool:
     if sub not in {"status", "diff", "log"}:
         return False
     allowed = {"status": _GIT_STATUS, "diff": _GIT_DIFF, "log": _GIT_LOG}[sub]
+    summary = False
+    saw_directory = False
+    pathspecs: list[str] = []
     while index < len(tokens):
         arg = tokens[index]
         if arg == "--":
             index += 1
             while index < len(tokens):
-                if not _safe_git_operand(tokens[index], workspace):
+                operand = tokens[index]
+                if not _safe_git_operand(operand, workspace):
                     return False
+                if sub == "diff":
+                    if _is_directory_operand(operand, workspace):
+                        saw_directory = True
+                    elif not _is_explicit_safe_file(operand, workspace):
+                        return False
+                    pathspecs.append(operand)
                 index += 1
-            return True
+            break
         if arg.startswith("-"):
+            if arg in {"-p", "--patch"}:
+                return False
+            if arg in _SUMMARY_FLAGS:
+                summary = True
             if arg in allowed:
                 index += 1
                 continue
@@ -481,8 +493,20 @@ def _git(tokens: list[str], workspace: Path | None) -> bool:
             return False
         if not _safe_git_operand(arg, workspace):
             return False
+        if sub == "diff":
+            if _is_directory_operand(arg, workspace):
+                saw_directory = True
+                pathspecs.append(arg)
+            elif _is_explicit_safe_file(arg, workspace):
+                pathspecs.append(arg)
         index += 1
-    return True
+    if sub != "diff":
+        return True
+    if pathspecs and saw_directory:
+        return summary
+    if pathspecs:
+        return all(_is_explicit_safe_file(item, workspace) for item in pathspecs)
+    return summary
 
 
 def _pytest(args: list[str], workspace: Path | None) -> bool:
@@ -504,18 +528,120 @@ def _safe_value(value: str) -> bool:
     return ".." not in Path(value).parts
 
 
+def _concrete_read_operand(arg: str, workspace: Path | None) -> bool:
+    """True for one workspace path. Globs are expanded by the shell later."""
+    if _has_glob(arg) or _operand_is_secret(arg, workspace):
+        return False
+    return _in_workspace(arg, workspace)
+
+
 def _safe_git_operand(arg: str, workspace: Path | None) -> bool:
     if not arg or any(char in arg for char in "$`!{}<>|&;\\"):
+        return False
+    if _has_glob(arg):
         return False
     if arg.startswith("~") or "/../" in arg or arg.startswith("../") or arg == "..":
         return False
     if arg.endswith("/.."):
+        return False
+    if _is_rev_path(arg) or _rejected_pathspec_magic(arg):
         return False
     if _operand_is_secret(arg, workspace):
         return False
     if arg.startswith("/"):
         return _in_workspace(arg, workspace)
     return True
+
+
+def _has_glob(token: str) -> bool:
+    return any(char in token for char in "*?[")
+
+
+def _is_rev_path(token: str) -> bool:
+    """True for ``HEAD:path`` style operands. The whole string is not one filename."""
+    return ":" in token and not token.startswith(":")
+
+
+def _rejected_pathspec_magic(token: str) -> bool:
+    """Exclude and stacked magic change which files git reads."""
+    if not token.startswith(":"):
+        return False
+    return not _single_safe_magic(token)
+
+
+def _single_safe_magic(token: str) -> bool:
+    if len(token) < 2:
+        return False
+    rest = token[1:]
+    if rest.startswith("("):
+        close = rest.find(")")
+        if close < 0:
+            return False
+        words = [word for word in rest[1:close].split(",") if word]
+        path = rest[close + 1 :]
+        if len(words) != 1 or words[0] not in _SAFE_PATHSPEC_MAGIC:
+            return False
+        return bool(path) and not _has_glob(path) and ":" not in path
+    if rest[0] in "!^":
+        return False
+    if rest.startswith("/"):
+        path = rest[1:]
+        return bool(path) and not _has_glob(path) and ":" not in path
+    return False
+
+
+def _is_explicit_safe_file(arg: str, workspace: Path | None) -> bool:
+    """True when ``arg`` is one non-secret file, not a revision or directory."""
+    if workspace is None or not _safe_git_operand(arg, workspace):
+        return False
+    body = _concrete_path(arg)
+    if body is None or body in {".", "..", "./"} or body.endswith("/"):
+        return False
+    path = Path(body)
+    if ".." in path.parts:
+        return False
+    candidate = path if path.is_absolute() else workspace / path
+    try:
+        if candidate.is_dir():
+            return False
+        if candidate.is_file():
+            return True
+    except OSError:
+        return False
+    name = path.name
+    return (not path.is_absolute()) and ("/" in body or "." in name)
+
+
+def _is_directory_operand(arg: str, workspace: Path | None) -> bool:
+    if workspace is None:
+        return False
+    body = _concrete_path(arg)
+    if body is None:
+        return False
+    if body in {".", "..", "./"} or body.endswith("/"):
+        return True
+    path = Path(body)
+    candidate = path if path.is_absolute() else workspace / path
+    try:
+        return candidate.is_dir()
+    except OSError:
+        return False
+
+
+def _concrete_path(token: str) -> str | None:
+    if not token.startswith(":"):
+        return token
+    if len(token) < 2:
+        return None
+    rest = token[1:]
+    if rest.startswith("("):
+        close = rest.find(")")
+        if close < 0:
+            return None
+        return rest[close + 1 :]
+    if rest.startswith("/"):
+        return rest[1:]
+    return None
 
 
 def _operand_is_secret(token: str, workspace: Path | None) -> bool:

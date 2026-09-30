@@ -158,9 +158,16 @@ def _interpreter_dirs(executable: Path) -> list[Path]:
 
 
 def _covered(path: Path, prefixes: list[Path]) -> bool:
+    """True when ``path`` itself, not its symlink target, is already mounted.
+
+    Resolving a venv ``bin/python`` lands on the system interpreter under
+    ``/usr``. That must not drop the symlink the child actually execs.
+    """
+    probe = path if path.is_symlink() else path.resolve()
     for prefix in prefixes:
+        base = prefix if prefix.is_symlink() else prefix.resolve()
         try:
-            path.resolve().relative_to(prefix.resolve())
+            probe.relative_to(base)
         except ValueError:
             continue
         return True
@@ -168,9 +175,19 @@ def _covered(path: Path, prefixes: list[Path]) -> bool:
 
 
 def _venv_root(executable: Path) -> Path | None:
+    """Return the venv root. ``pyvenv.cfg`` lives next to ``bin``, not inside it."""
     if not executable.exists():
         return None
+    checked: list[Path] = []
     for parent in (executable.parent, *executable.resolve().parents):
+        checked.append(parent)
+        if parent.name == "bin":
+            checked.append(parent.parent)
+    seen: set[Path] = set()
+    for parent in checked:
+        if parent in seen:
+            continue
+        seen.add(parent)
         if (parent / "pyvenv.cfg").is_file():
             return parent
     return None

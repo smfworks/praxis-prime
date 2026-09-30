@@ -204,6 +204,40 @@ def _mount_flag(argv: list[str], path: str) -> str:
     raise AssertionError(f"mount missing for {path}")
 
 
+def test_venv_mcp_interpreter_runs_under_bwrap(tmp_path: Path):
+    venv = tmp_path / "venv"
+    bindir = venv / "bin"
+    bindir.mkdir(parents=True)
+    (venv / "pyvenv.cfg").write_text("home = /usr\n", encoding="utf-8")
+    link = bindir / "python"
+    link.symlink_to(Path(sys.executable).resolve())
+    outside = tmp_path / "python"
+    outside.symlink_to(Path(sys.executable).resolve())
+    script = tmp_path / "echo.py"
+    script.write_text("print('venv-ok')\n", encoding="utf-8")
+    work = tmp_path / "work"
+    work.mkdir()
+    env = {"PATH": "/usr/bin:/bin", "PYTHONUNBUFFERED": "1"}
+    bare = build_mcp_bwrap_argv(str(outside), (), cwd=work, env=env, network="off")
+    assert _mount_flag(bare, str(outside)) == "--ro-bind"
+    argv = build_mcp_bwrap_argv(
+        str(link),
+        (str(script),),
+        cwd=work,
+        env=env,
+        network="off",
+    )
+    assert _mount_flag(argv, str(venv.resolve())) == "--ro-bind"
+    in_ci = os.environ.get("CI") == "true" or os.environ.get("GITHUB_ACTIONS") == "true"
+    if not bwrap_available():
+        if in_ci:
+            raise AssertionError("bubblewrap must be installed in CI")
+        return
+    proc = subprocess.run(argv, capture_output=True, text=True, timeout=30, check=False)
+    assert proc.returncode == 0, proc.stderr
+    assert "venv-ok" in proc.stdout
+
+
 def test_untrusted_write_asks_and_echo_is_fenced(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("MCP_LEAK_SENTINEL", SENTINEL)
     config = tmp_path / "config"

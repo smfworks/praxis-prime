@@ -18,6 +18,7 @@ from praxis_prime.sandbox.bwrap import (
     build_bwrap_argv,
     bwrap_available,
     run_bwrap,
+    run_bwrap_status,
 )
 from praxis_prime.state import StateDB
 from praxis_prime.tools.registry import Risk, ToolContext
@@ -126,8 +127,12 @@ def test_read_only_allowlist_skips_approval_inside_the_workspace(tmp_path: Path)
         "cat note.txt",
         "head -n 5 note.txt",
         "git status",
-        "git diff",
+        "git diff --stat",
+        "git diff --name-only",
+        "git diff --name-status",
+        "git diff note.txt",
         "git log --oneline",
+        "git log --stat",
         "pytest --collect-only",
         "python -m pytest --collect-only",
         "ls && git status",
@@ -167,10 +172,61 @@ def test_git_operands_use_the_shared_secret_denylist(tmp_path: Path):
         assert classify_shell(command, workspace=tmp_path).allowlisted is False, command
     allowed = (
         "git diff note.txt",
-        "git log -p README",
         "git diff -- note.txt",
-        "git log -p -- README",
         "git diff HEAD -- note.txt",
+        "git log --name-only -- README",
+        "git diff --stat",
+        "git diff --name-status note.txt",
+    )
+    for command in allowed:
+        prepared = classify_command(command, sandbox_ready=True, workspace=tmp_path)
+        assert prepared.force_approval is False, command
+        assert classify_shell(command, workspace=tmp_path).allowlisted is True, command
+
+
+def test_globs_rev_paths_and_patch_dumps_require_approval(tmp_path: Path):
+    (tmp_path / "note.txt").write_text("alpha\n", encoding="utf-8")
+    (tmp_path / "README").write_text("hi\n", encoding="utf-8")
+    (tmp_path / "subdir").mkdir()
+    blocked = (
+        "git diff -- '*.env'",
+        "git diff -- 'secrets.en?'",
+        "git diff -- '.en[v]'",
+        "git diff '*'",
+        "git diff -- ':(top,glob)*.env'",
+        "cat *.env",
+        "cat '*.env'",
+        "head *.env",
+        "tail '*.env'",
+        "git diff HEAD:secrets.env HEAD:note.txt",
+        "git diff HEAD:.env",
+        "git diff -- ':(exclude)note.txt'",
+        "git diff -- ':^note.txt'",
+        "git diff -- ':(top,literal)note.txt'",
+        "git diff",
+        "git diff .",
+        "git diff HEAD",
+        "git diff subdir",
+        "git log -p",
+        "git log -p --all",
+        "git log -p README",
+        "git log -p -- README",
+    )
+    for command in blocked:
+        prepared = classify_command(command, sandbox_ready=True, workspace=tmp_path)
+        assert prepared.force_approval is True, command
+        assert classify_shell(command, workspace=tmp_path).allowlisted is False, command
+    allowed = (
+        "git diff --stat",
+        "git diff --name-only",
+        "git diff --name-status",
+        "git diff note.txt",
+        "git diff -- note.txt",
+        "git log --stat",
+        "git log --name-only",
+        "git log --name-status",
+        "git log --oneline",
+        "cat note.txt",
     )
     for command in allowed:
         prepared = classify_command(command, sandbox_ready=True, workspace=tmp_path)
@@ -201,11 +257,13 @@ def test_unapproved_delete_does_not_run_and_ro_bind_blocks_the_write(tmp_path: P
 
     if not _live_bwrap():
         return
-    run_bwrap(
+    status = run_bwrap_status(
         "python3 -c 'import os; os.remove(\"note.txt\")'",
         tmp_path,
         lambda: False,
     )
+    assert status.code != 0
+    assert "Read-only file system" in status.output
     assert target.read_text(encoding="utf-8") == "safe\n"
     _note_live_bwrap("read-only bind blocked the delete")
 
