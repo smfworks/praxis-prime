@@ -77,6 +77,9 @@ def install_pack(
     root.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="praxis-pack-") as tmp:
         staged, repo, commit, wanted = _stage(text, Path(tmp), git_runner or _default_git)
+        # TMPDIR may be a symlink (/var -> /private/var). Containment checks
+        # resolve the root, so the staged path has to be resolved too.
+        staged = staged.resolve()
         loaded = load_legacy_pack(
             staged,
             wanted_name=wanted,
@@ -464,11 +467,11 @@ def _extract_zip(path: Path, dest: Path) -> None:
             target = _zip_member_path(root, info.filename)
             planned.append((info, target))
         for info, target in planned:
-            if info.is_dir():
-                target.mkdir(parents=True, exist_ok=True)
-                continue
-            target.parent.mkdir(parents=True, exist_ok=True)
             try:
+                if info.is_dir():
+                    target.mkdir(parents=True, exist_ok=True)
+                    continue
+                target.parent.mkdir(parents=True, exist_ok=True)
                 _write_zip_member(archive, info, target)
             except FileExistsError as exc:
                 raise PackError("pack archive has a duplicate member") from exc
