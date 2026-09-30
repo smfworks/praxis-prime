@@ -218,7 +218,13 @@ class AgentLoop:
         outcome.content = outcome.final.content
 
     def _check_and_act(self, call: ToolCall, control: TurnControl) -> Iterator[LoopEvent]:
-        tool = self.registry.get(call.name)
+        try:
+            tool = self.registry.get(call.name)
+        except Exception as exc:
+            content = f"Could not load {call.name}: {exc}"
+            self._add_tool(call.id, content)
+            yield StatusEvent("check", content)
+            return
         if tool is None:
             content = f"Unknown tool {call.name}. It was not run."
             self._add_tool(call.id, content)
@@ -315,6 +321,7 @@ class AgentLoop:
             cwd=str(self.cwd),
             cancelled=lambda: control.cancelled,
             host_shell_approved=host_approved,
+            session_id=self.session_id,
         )
         try:
             raw = tool.execute(dict(call.arguments), tool_ctx)

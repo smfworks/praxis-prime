@@ -164,8 +164,8 @@ def grant_key(ctx: PolicyContext) -> str:
     """
     sandbox = "bwrap" if ctx.sandboxed else "host"
     base = f"{ctx.tool}:{ctx.risk.value}:{sandbox}"
-    exact = {"shell", "run_command", "run_tests", "write_file", "edit_file"}
-    if ctx.tool in exact:
+    exact = {"shell", "run_command", "run_tests", "write_file", "edit_file", "browser"}
+    if ctx.tool in exact or ctx.tool.startswith("mcp__"):
         digest = hashlib.sha256(ctx.summary.encode()).hexdigest()[:12]
         return f"{base}:{digest}"
     return base

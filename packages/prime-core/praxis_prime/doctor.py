@@ -56,12 +56,16 @@ def collect_checks(
     path_exists: PathExists,
     ollama_reachable: bool,
     ollama_base: str = DEFAULT_OLLAMA_BASE,
+    bwrap_present: bool = False,
+    playwright_present: bool = False,
 ) -> list[Check]:
     return [
         check_python(version_info),
         check_os(os_release_text, env, which, path_exists),
         check_session(env),
         check_ollama(ollama_reachable, ollama_base),
+        check_sandbox(bwrap_present),
+        check_browser(playwright_present),
     ]
 
 
@@ -91,6 +95,36 @@ def check_session(env: Mapping[str, str]) -> Check:
     kind, detail = classify_session(env)
     status = "ok" if kind in {"wayland", "x11"} else "warn"
     return Check("Session", status, detail)
+
+
+def check_sandbox(bwrap_present: bool) -> Check:
+    if bwrap_present:
+        return Check(
+            "Sandbox",
+            "ok",
+            "bubblewrap is on PATH. Stdio MCP servers use it.",
+        )
+    return Check(
+        "Sandbox",
+        "warn",
+        "bubblewrap is not on PATH. Stdio MCP servers run with an env allowlist only.",
+    )
+
+
+def check_browser(playwright_present: bool) -> Check:
+    if playwright_present:
+        return Check(
+            "Browser",
+            "ok",
+            "Playwright is installed. Chromium is a separate download; "
+            "without it the browser tool uses web_fetch.",
+        )
+    return Check(
+        "Browser",
+        "warn",
+        "Playwright is not installed. The browser tool falls back to web_fetch. "
+        "Install with pip install 'praxis-prime[browser]'.",
+    )
 
 
 def check_ollama(reachable: bool, base_url: str) -> Check:
@@ -164,6 +198,8 @@ def probe_ollama(
 
 
 def run_system_doctor() -> list[Check]:
+    from praxis_prime.browser.driver import playwright_available
+
     return collect_checks(
         version_info=(sys.version_info.major, sys.version_info.minor, sys.version_info.micro),
         os_release_text=_read_text(Path("/etc/os-release")),
@@ -171,6 +207,8 @@ def run_system_doctor() -> list[Check]:
         which=shutil.which,
         path_exists=lambda candidate: Path(candidate).exists(),
         ollama_reachable=probe_ollama(),
+        bwrap_present=shutil.which("bwrap") is not None,
+        playwright_present=playwright_available(),
     )
 
 

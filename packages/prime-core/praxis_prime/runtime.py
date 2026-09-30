@@ -9,11 +9,13 @@ from pathlib import Path
 
 from praxis_prime.approvals.gate import ApprovalGate, Approver
 from praxis_prime.audit.log import AuditLog
+from praxis_prime.browser.tool import BrowserSession, install_browser_tool
 from praxis_prime.decide.engine import DecisionEngine, build_engine
 from praxis_prime.decide.screen import ActionScreener
 from praxis_prime.decide.tool import install_decide_tool
 from praxis_prime.loop.engine import AgentLoop
 from praxis_prime.loop.prompt import session_preamble
+from praxis_prime.mcp.tools import McpManager, install_mcp_tools
 from praxis_prime.memory.embed import embedder_for
 from praxis_prime.memory.store import SessionStore
 from praxis_prime.memory.tiers import MemoryStore, project_scope
@@ -46,8 +48,14 @@ class Runtime:
     memory: MemoryStore
     skills: SkillCatalog
     cwd: Path
+    mcp: McpManager | None = None
+    browser: BrowserSession | None = None
 
     def close(self) -> None:
+        if self.mcp is not None:
+            self.mcp.close()
+        if self.browser is not None:
+            self.browser.close()
         self.engine.labels.close()
         self.db.close()
 
@@ -171,6 +179,19 @@ def build_runtime(
     skills = _skills(environ, work, config_path)
     install_memory_tools(tools, memory)
     install_skill_tool(tools, skills)
+    mcp = install_mcp_tools(
+        tools,
+        config_path=resolved_config,
+        cwd=work,
+        audit=audit,
+        parent_env=environ,
+    )
+    browser = install_browser_tool(
+        tools,
+        config_path=resolved_config,
+        cwd=work,
+        env=environ,
+    )
     return Runtime(
         settings=settings,
         router=router,
@@ -185,11 +206,17 @@ def build_runtime(
         memory=memory,
         skills=skills,
         cwd=work,
+        mcp=mcp,
+        browser=browser,
     )
 
 
 def _preamble(runtime: Runtime, scopes: tuple[str, ...], skill: str) -> str:
     blocks = [session_preamble(str(runtime.cwd))]
+    if runtime.mcp is not None:
+        mcp_line = runtime.mcp.index_line()
+        if mcp_line:
+            blocks.append(mcp_line)
     index = runtime.skills.index_text()
     if index:
         blocks.append(index)

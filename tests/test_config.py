@@ -21,6 +21,8 @@ def test_rendered_config_round_trips_and_dials_are_off():
     assert parsed["jarvis"]["enabled"] is False
     assert parsed["sandbox"]["network"] == "off"
     assert parsed["sandbox"]["default_tier"] == "bwrap"
+    assert parsed["mcp"]["serve"] is False
+    assert parsed["browser"]["profile"] == "disposable"
     assert str(parsed["gateway"]["listen"]).startswith("127.0.0.1:")
     assert str(parsed["models"]["primary"]).startswith("ollama:")
 

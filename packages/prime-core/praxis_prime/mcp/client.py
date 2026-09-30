@@ -1,0 +1,306 @@
+"""MCP client session: initialize, discover, and call.
+
+Every JSON-RPC request is appended to the audit log when one is provided.
+Tool results are plain text here. The agent loop fences them as untrusted
+data before they reach the model.
+
+Full OAuth 2.1 (dynamic registration, PKCE, refresh) is not implemented.
+HTTP servers use a bearer token from ``token_env`` or a header written by
+the user. See docs/MCP.md.
+"""
+
+from __future__ import annotations
+
+import os
+from collections.abc import Mapping
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from praxis_prime import __version__
+from praxis_prime.audit.log import AuditLog
+from praxis_prime.mcp.auth import resolve_headers
+from praxis_prime.mcp.config import ServerSpec
+from praxis_prime.mcp.protocol import (
+    PROTOCOL_FALLBACK,
+    PROTOCOL_VERSION,
+    McpError,
+    prompt_text,
+    redact_mapping,
+    resource_text,
+    tool_result_text,
+)
+from praxis_prime.mcp.sandbox import popen_stdio
+from praxis_prime.mcp.transport import HttpTransport, StdioTransport
+
+_PAGE_LIMIT = 20
+
+
+@dataclass(frozen=True, slots=True)
+class McpToolInfo:
+    name: str
+    description: str
+    input_schema: dict[str, Any]
+    annotations: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class McpResourceInfo:
+    uri: str
+    name: str
+    description: str
+
+
+@dataclass(frozen=True, slots=True)
+class McpPromptInfo:
+    name: str
+    description: str
+
+
+class McpClient:
+    """A connected MCP server. Construct it and call ``connect``."""
+
+    def __init__(
+        self,
+        spec: ServerSpec,
+        *,
+        cwd: Path,
+        audit: AuditLog | None = None,
+        parent_env: Mapping[str, str] | None = None,
+        timeout: float = 30,
+    ) -> None:
+        self.spec = spec
+        self.cwd = cwd
+        self.audit = audit
+        self.parent_env = os.environ if parent_env is None else parent_env
+        self.timeout = timeout
+        self.protocol = ""
+        self.server_info: dict[str, Any] = {}
+        self.tools: list[McpToolInfo] = []
+        self.resources: list[McpResourceInfo] = []
+        self.prompts: list[McpPromptInfo] = []
+        self._transport: StdioTransport | HttpTransport | None = None
+
+    def connect(self) -> None:
+        self._transport = _open_transport(self)
+        try:
+            self._initialize()
+            self.tools = [_tool(item) for item in self._list("tools/list", "tools")]
+            self.resources = [_resource(item) for item in self._list("resources/list", "resources")]
+            self.prompts = [_prompt(item) for item in self._list("prompts/list", "prompts")]
+        except Exception:
+            self.close()
+            raise
+
+    def call_tool(
+        self,
+        name: str,
+        arguments: Mapping[str, object],
+        *,
+        session_id: str | None = None,
+    ) -> str:
+        result = self._rpc(
+            "tools/call",
+            {"name": name, "arguments": dict(arguments)},
+            session_id=session_id,
+            audit_extra={"tool": name, "arguments": redact_mapping(arguments)},
+        )
+        return tool_result_text(result)
+
+    def read_resource(self, uri: str, *, session_id: str | None = None) -> str:
+        result = self._rpc(
+            "resources/read",
+            {"uri": uri},
+            session_id=session_id,
+            audit_extra={"uri": uri[:180]},
+        )
+        return resource_text(result)
+
+    def get_prompt(
+        self,
+        name: str,
+        arguments: Mapping[str, object] | None = None,
+        *,
+        session_id: str | None = None,
+    ) -> str:
+        params: dict[str, object] = {"name": name}
+        if arguments:
+            params["arguments"] = {str(key): str(value) for key, value in arguments.items()}
+        result = self._rpc(
+            "prompts/get",
+            params,
+            session_id=session_id,
+            audit_extra={"prompt": name},
+        )
+        return prompt_text(result)
+
+    def close(self) -> None:
+        transport = self._transport
+        self._transport = None
+        if transport is not None:
+            transport.close()
+
+    def _initialize(self) -> None:
+        params = _initialize_params(PROTOCOL_VERSION)
+        try:
+            result = self._rpc("initialize", params, audit_extra={"phase": "initialize"})
+        except McpError:
+            params = _initialize_params(PROTOCOL_FALLBACK)
+            result = self._rpc("initialize", params, audit_extra={"phase": "initialize"})
+        self.protocol = str(result.get("protocolVersion", ""))
+        info = result.get("serverInfo")
+        self.server_info = info if isinstance(info, dict) else {}
+        transport = self._require()
+        transport.request("notifications/initialized", {}, notify=True)
+
+    def _list(self, method: str, key: str) -> list[dict[str, Any]]:
+        items: list[dict[str, Any]] = []
+        cursor = ""
+        for _ in range(_PAGE_LIMIT):
+            params: dict[str, object] = {}
+            if cursor:
+                params["cursor"] = cursor
+            try:
+                result = self._rpc(method, params, audit_extra={"count_key": key})
+            except McpError as exc:
+                if _missing_method(exc):
+                    return items
+                raise
+            batch = result.get(key)
+            if isinstance(batch, list):
+                items.extend(item for item in batch if isinstance(item, dict))
+            nxt = result.get("nextCursor")
+            if not isinstance(nxt, str) or not nxt:
+                break
+            cursor = nxt
+        return items
+
+    def _rpc(
+        self,
+        method: str,
+        params: Mapping[str, object],
+        *,
+        session_id: str | None = None,
+        audit_extra: Mapping[str, object] | None = None,
+    ) -> dict[str, Any]:
+        transport = self._require()
+        ok = True
+        try:
+            message = transport.request(method, params)
+        except McpError:
+            ok = False
+            self._audit(method, ok=False, session_id=session_id, extra=audit_extra)
+            raise
+        if message is None:
+            self._audit(method, ok=False, session_id=session_id, extra=audit_extra)
+            raise McpError(f"{method} returned no result")
+        if "error" in message:
+            self._audit(method, ok=False, session_id=session_id, extra=audit_extra)
+            raise McpError(_error_text(message.get("error")))
+        result = message.get("result")
+        self._audit(method, ok=ok, session_id=session_id, extra=audit_extra)
+        if isinstance(result, dict):
+            return result
+        return {}
+
+    def _audit(
+        self,
+        method: str,
+        *,
+        ok: bool,
+        session_id: str | None,
+        extra: Mapping[str, object] | None,
+    ) -> None:
+        if self.audit is None:
+            return
+        payload: dict[str, object] = {
+            "server": self.spec.name,
+            "method": method,
+            "transport": self.spec.transport,
+            "ok": ok,
+        }
+        if extra:
+            for key, value in extra.items():
+                if key == "arguments" and isinstance(value, dict):
+                    payload[key] = value
+                else:
+                    payload[key] = (
+                        value if isinstance(value, (str, int, bool)) else str(value)[:180]
+                    )
+        self.audit.append(
+            session_id=session_id,
+            kind="mcp",
+            summary=f"{self.spec.name} {method} {'ok' if ok else 'error'}",
+            payload=payload,
+        )
+
+    def _require(self) -> StdioTransport | HttpTransport:
+        if self._transport is None:
+            raise McpError(f"MCP server {self.spec.name} is not connected")
+        return self._transport
+
+
+def _open_transport(client: McpClient) -> StdioTransport | HttpTransport:
+    spec = client.spec
+    if spec.transport == "stdio":
+        proc = popen_stdio(
+            spec.command,
+            spec.args,
+            cwd=client.cwd,
+            allow=spec.allowlist(),
+            explicit=spec.env_map(),
+            parent=client.parent_env,
+            sandbox=spec.sandbox,
+            network=spec.network,
+        )
+        return StdioTransport(proc, timeout=client.timeout)
+    headers = resolve_headers(spec.headers, spec.token_env, client.parent_env)
+    mode = "sse" if spec.transport == "sse" else ("http" if spec.transport == "http" else "auto")
+    return HttpTransport(spec.url, headers, mode=mode, timeout=client.timeout)
+
+
+def _initialize_params(version: str) -> dict[str, object]:
+    return {
+        "protocolVersion": version,
+        "capabilities": {"roots": {"listChanged": False}},
+        "clientInfo": {"name": "praxis-prime", "version": __version__},
+    }
+
+
+def _tool(item: Mapping[str, Any]) -> McpToolInfo:
+    schema = item.get("inputSchema")
+    annotations = item.get("annotations")
+    return McpToolInfo(
+        name=str(item.get("name", "")),
+        description=str(item.get("description", "")),
+        input_schema=schema if isinstance(schema, dict) else {"type": "object", "properties": {}},
+        annotations=annotations if isinstance(annotations, dict) else {},
+    )
+
+
+def _resource(item: Mapping[str, Any]) -> McpResourceInfo:
+    return McpResourceInfo(
+        uri=str(item.get("uri", "")),
+        name=str(item.get("name", "")),
+        description=str(item.get("description", "")),
+    )
+
+
+def _prompt(item: Mapping[str, Any]) -> McpPromptInfo:
+    return McpPromptInfo(
+        name=str(item.get("name", "")),
+        description=str(item.get("description", "")),
+    )
+
+
+def _error_text(error: object) -> str:
+    if isinstance(error, dict):
+        message = str(error.get("message", "MCP error"))
+        code = error.get("code")
+        return f"{message} ({code})" if code is not None else message
+    return "MCP error"
+
+
+def _missing_method(exc: McpError) -> bool:
+    text = str(exc).lower()
+    return "-32601" in text or "not found" in text or "method" in text and "unsupported" in text
