@@ -32,6 +32,9 @@ _log = logging.getLogger(__name__)
 
 MAX_REDIRECTS = 5
 _MAX_INODE_FILES = 500
+_MAX_CREDENTIAL_FILES = 5_000
+_MAX_SCAN_ENTRIES = 20_000
+_SYSTEM_SCAN_ROOTS = ("/usr", "/etc", "/proc", "/sys", "/dev")
 _FETCH_ALLOW = frozenset({"loopback", "private", "link_local", "metadata"})
 _BROWSER_FETCH_ALLOW = frozenset({"loopback", "private", "link_local"})
 _REDIRECT_STATUS = frozenset({300, 301, 302, 303, 307, 308})
@@ -274,7 +277,7 @@ def inode_is_secret(
 
 
 class InodeScanCache:
-    """One turn's inode scan. The loop owns it and clears it after each tool."""
+    """One loop's inode scan. The loop owns it and passes it into policy."""
 
     def __init__(self) -> None:
         self.ready = False
@@ -290,10 +293,11 @@ class InodeScanCache:
 def secret_inode_set(cache: InodeScanCache | None = None) -> set[tuple[int, int]]:
     """Inodes of well-known secret files, so a hard link can be recognized.
 
-    Credential directories contribute every file except known kube cache
-    directories. Browser and gcloud trees contribute secret-named files.
-    The file cap denies the read when a candidate file is left unscanned.
-    ``cache`` reuses one scan until the loop clears it.
+    Credential directories contribute every file except ``.kube/cache`` and
+    ``.kube/http-cache`` directly under ``.kube``. Browser and gcloud trees
+    contribute secret-named files. A root that cannot be finished denies the
+    read. ``cache`` reuses one scan until the loop clears it. ``found`` is
+    published before ``ready``.
     """
     if cache is not None and cache.ready:
         if cache.error is not None:
@@ -305,22 +309,22 @@ def secret_inode_set(cache: InodeScanCache | None = None) -> set[tuple[int, int]
         found = _scan_secret_inodes()
     except ReadDenied as exc:
         if cache is not None:
-            cache.ready = True
             cache.error = exc
+            cache.ready = True
         raise
     if cache is not None:
-        cache.ready = True
         cache.found = found
+        cache.ready = True
     return found
 
 
 def _scan_secret_inodes() -> set[tuple[int, int]]:
     found: set[tuple[int, int]] = set()
-    count = 0
     for path in _inode_candidates():
-        count, capped = _collect_inodes(path, found, count)
-        if capped:
-            _refuse_capped_inode_scan()
+        hit = _collect_inodes(path, found)
+        if hit is not None:
+            limit, kind = hit
+            _refuse_capped_inode_scan(limit, kind)
     return found
 
 
@@ -675,27 +679,31 @@ def _scan_mode(path: Path) -> str:
     return "named"
 
 
-def _under_kube(directory: Path) -> bool:
-    if directory.name.lower() == ".kube":
-        return True
-    return ".kube" in {part.lower() for part in directory.parts}
-
-
-def _prune_scan_dirs(dirnames: list[str], directory: Path, mode: str) -> None:
+def _prune_scan_dirs(
+    dirnames: list[str],
+    directory: Path,
+    kube_root: Path | None,
+) -> None:
+    """Skip symlink children. Skip kube cache dirs only as direct children."""
+    direct_kube = kube_root is not None and _same_dir(directory, kube_root)
     kept: list[str] = []
     for name in dirnames:
         child = directory / name
         if child.is_symlink():
             continue
-        if mode == "all" and _under_kube(directory) and name.lower() in _KUBE_SKIP_DIRS:
+        if direct_kube and name.lower() in _KUBE_SKIP_DIRS:
             continue
         kept.append(name)
     dirnames[:] = kept
 
 
-def _refuse_capped_inode_scan() -> None:
+def _same_dir(left: Path, right: Path) -> bool:
+    return os.path.normcase(os.path.abspath(left)) == os.path.normcase(os.path.abspath(right))
+
+
+def _refuse_capped_inode_scan(limit: int, kind: str) -> None:
     message = (
-        f"secret inode scan hit the {_MAX_INODE_FILES} secret-file cap; "
+        f"secret inode scan hit the {limit} {kind} cap; "
         "denying the read because a secret file could have been missed"
     )
     _log.warning(message)
@@ -710,21 +718,34 @@ def _inside_home(path: Path, home: Path) -> bool:
     return True
 
 
-def _resolve_scan_root(path: Path) -> Path | None:
-    """Follow a top-level symlink that stays inside $HOME. Leave others alone.
+def _is_system_scan_root(path: Path) -> bool:
+    """True for ``/`` and the other system trees a symlink must not walk."""
+    try:
+        posix = path.resolve(strict=False).as_posix()
+    except (OSError, RuntimeError, ValueError):
+        return True
+    if posix == "/":
+        return True
+    return any(posix == root or posix.startswith(root + "/") for root in _SYSTEM_SCAN_ROOTS)
 
-    A symlink that resolves outside $HOME is skipped so a profile link to
-    ``/`` cannot walk the whole filesystem.
+
+def _resolve_scan_root(path: Path) -> tuple[Path, bool] | None:
+    """Return the path to scan, and whether the walk has an entry budget.
+
+    A top-level symlink is followed in the same mode as the link name.
+    ``/``, ``/usr``, ``/etc``, ``/proc``, ``/sys``, and ``/dev`` are skipped
+    so a profile link to ``/`` cannot trip the cap. Any other symlink that
+    resolves outside ``$HOME`` is walked with ``_MAX_SCAN_ENTRIES``.
     """
     try:
         if not path.is_symlink():
-            return path
+            return path, False
         resolved = path.resolve(strict=False)
-        if _inside_home(resolved, Path.home()):
-            return resolved
+        if _is_system_scan_root(resolved):
+            return None
+        return resolved, not _inside_home(resolved, Path.home())
     except (OSError, RuntimeError, ValueError):
         return None
-    return None
 
 
 def _file_counts(name: str, directory: Path, mode: str) -> bool:
@@ -733,60 +754,46 @@ def _file_counts(name: str, directory: Path, mode: str) -> bool:
     return _inode_file_is_secret(name, directory)
 
 
-def _collect_inodes(path: Path, found: set[tuple[int, int]], count: int) -> tuple[int, bool]:
-    """Return ``(count, capped)``. ``capped`` means a secret candidate was skipped."""
+def _collect_inodes(
+    path: Path, found: set[tuple[int, int]]
+) -> tuple[int, str] | None:
+    """Scan one candidate. Return ``(limit, kind)`` when a candidate was skipped."""
     mode = _scan_mode(path)
+    cap = _MAX_CREDENTIAL_FILES if mode == "all" else _MAX_INODE_FILES
     resolved = _resolve_scan_root(path)
     if resolved is None:
-        return count, False
-    path = resolved
+        return None
+    root, budget_entries = resolved
+    kube_root = root if path.name.lower() == ".kube" else None
     try:
-        if path.is_file():
-            if count >= _MAX_INODE_FILES:
-                return count, True
-            return _add_inode(path, found, count), False
-        if not path.is_dir():
-            return count, False
+        if root.is_file():
+            _add_inode(root, found, 0)
+            return None
+        if not root.is_dir():
+            return None
     except OSError:
-        return count, False
-    if count >= _MAX_INODE_FILES:
-        return count, _has_pending_secret(path, mode)
+        return None
     try:
-        walker = os.walk(path, followlinks=False)
+        walker = os.walk(root, followlinks=False)
     except OSError:
-        return count, False
+        return None
+    count = 0
+    entries = 0
+    budget = _MAX_SCAN_ENTRIES if budget_entries else None
     for dirpath, dirnames, filenames in walker:
         directory = Path(dirpath)
-        _prune_scan_dirs(dirnames, directory, mode)
+        _prune_scan_dirs(dirnames, directory, kube_root)
+        if budget is not None:
+            entries += len(dirnames) + len(filenames)
+            if entries > budget:
+                return budget, "directory-entry"
         for name in filenames:
             if not _file_counts(name, directory, mode):
                 continue
-            if count >= _MAX_INODE_FILES:
-                return count, True
+            if count >= cap:
+                return cap, "secret-file"
             count = _add_inode(directory / name, found, count)
-    return count, False
-
-
-def _has_pending_secret(path: Path, mode: str) -> bool:
-    """True when ``path`` still contains a secret-candidate file."""
-    try:
-        if path.is_file():
-            return True
-        if not path.is_dir():
-            return False
-    except OSError:
-        return False
-    try:
-        walker = os.walk(path, followlinks=False)
-    except OSError:
-        return False
-    for dirpath, dirnames, filenames in walker:
-        directory = Path(dirpath)
-        _prune_scan_dirs(dirnames, directory, mode)
-        for name in filenames:
-            if _file_counts(name, directory, mode):
-                return True
-    return False
+    return None
 
 
 def _add_inode(path: Path, found: set[tuple[int, int]], count: int) -> int:

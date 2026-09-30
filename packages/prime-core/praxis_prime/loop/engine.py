@@ -100,7 +100,6 @@ class AgentLoop:
         control: TurnControl | None = None,
     ) -> Iterator[LoopEvent]:
         """Run one user turn, yielding text and timeline events as they happen."""
-        self.policy.inode_cache = self.inode_cache
         self.inode_cache.clear()
         yield from self._run_turn(user_text, control)
 
@@ -322,6 +321,7 @@ class AgentLoop:
             extra_roots=self.read_access.extra_roots,
             allow_paths=self.read_access.allow_paths,
             fetch_allow=tuple(sorted(self.read_access.fetch_allow)),
+            inode_cache=self.inode_cache,
         )
         self.inode_cache.clear()
         verdict = self.policy.evaluate(ctx)

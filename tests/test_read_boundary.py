@@ -281,6 +281,7 @@ def test_kube_cache_does_not_trip_the_inode_cap(tmp_path: Path, monkeypatch):
     (root / "hello.txt").write_text("hello\n", encoding="utf-8")
     os.link(config, root / "notes.txt")
     monkeypatch.setattr("praxis_prime.policy.boundary._inode_candidates", lambda: [kube])
+    monkeypatch.setattr("praxis_prime.policy.boundary._MAX_CREDENTIAL_FILES", 500)
     ctx = _ctx(root)
     assert execute_read_file({"path": "hello.txt"}, ctx) == "hello\n"
     denial = _denied(execute_read_file, {"path": "notes.txt"}, ctx)
@@ -488,6 +489,244 @@ def test_profile_symlink_outside_home_is_not_walked(tmp_path: Path, monkeypatch)
     assert execute_read_file({"path": "hello.txt"}, _ctx(root)) == "hello\n"
 
 
+@pytest.mark.parametrize(
+    ("link", "filename"),
+    [
+        (".ssh", "id_rsa"),
+        (".config/chromium", "Cookies"),
+    ],
+)
+def test_symlink_outside_home_still_denies_secret_hardlink(
+    tmp_path: Path, monkeypatch, link: str, filename: str
+):
+    home = tmp_path / "home"
+    outside = tmp_path / "outside"
+    real = outside / "store"
+    real.mkdir(parents=True)
+    secret = real / filename
+    secret.write_text(SECRET, encoding="utf-8")
+    linked = home.joinpath(*link.split("/"))
+    linked.parent.mkdir(parents=True, exist_ok=True)
+    linked.symlink_to(real, target_is_directory=True)
+    root = tmp_path / "ws"
+    root.mkdir()
+    (root / "hello.txt").write_text("hello\n", encoding="utf-8")
+    os.link(secret, root / "notes.txt")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr("praxis_prime.policy.boundary._inode_candidates", lambda: [linked])
+    ctx = _ctx(root)
+    assert execute_read_file({"path": "hello.txt"}, ctx) == "hello\n"
+    denial = _denied(execute_read_file, {"path": "notes.txt"}, ctx)
+    assert denial.code == "secret_path"
+    assert SECRET not in str(denial)
+
+
+def test_outside_home_entry_budget_fails_closed(tmp_path: Path, monkeypatch, caplog):
+    home = tmp_path / "home"
+    real = tmp_path / "outside" / "ssh"
+    real.mkdir(parents=True)
+    (real / "id_rsa").write_text(SECRET, encoding="utf-8")
+    for index in range(5):
+        (real / f"extra-{index}").write_text("x", encoding="utf-8")
+    linked = home / ".ssh"
+    linked.parent.mkdir(parents=True)
+    linked.symlink_to(real, target_is_directory=True)
+    root = tmp_path / "ws"
+    root.mkdir()
+    (root / "hello.txt").write_text("hello\n", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr("praxis_prime.policy.boundary._inode_candidates", lambda: [linked])
+    monkeypatch.setattr("praxis_prime.policy.boundary._MAX_SCAN_ENTRIES", 1)
+    with caplog.at_level(logging.WARNING, logger="praxis_prime.policy.boundary"):
+        denial = _denied(execute_read_file, {"path": "hello.txt"}, _ctx(root))
+    assert denial.code == "inode_scan_capped"
+    assert "hello" not in str(denial)
+    assert "directory-entry cap" in caplog.text
+
+
+def test_credential_root_allows_more_than_500_files(tmp_path: Path, monkeypatch):
+    aws = tmp_path / ".aws"
+    cache = aws / "cli" / "cache"
+    cache.mkdir(parents=True)
+    for index in range(600):
+        (cache / f"session-{index}.json").write_text("{}", encoding="utf-8")
+    known = aws / "known_hosts.d"
+    known.mkdir()
+    (known / "work").write_text("host", encoding="utf-8")
+    creds = aws / "credentials"
+    creds.write_text(SECRET, encoding="utf-8")
+    root = tmp_path / "ws"
+    root.mkdir()
+    (root / "hello.txt").write_text("hello\n", encoding="utf-8")
+    os.link(creds, root / "notes.txt")
+    os.link(cache / "session-0.json", root / "alias.txt")
+    monkeypatch.setattr("praxis_prime.policy.boundary._inode_candidates", lambda: [aws])
+    ctx = _ctx(root)
+    assert execute_read_file({"path": "hello.txt"}, ctx) == "hello\n"
+    assert _denied(execute_read_file, {"path": "notes.txt"}, ctx).code == "secret_path"
+    assert _denied(execute_read_file, {"path": "alias.txt"}, ctx).code == "secret_path"
+
+
+def test_credential_file_cap_still_fails_closed(tmp_path: Path, monkeypatch, caplog):
+    aws = tmp_path / ".aws"
+    aws.mkdir()
+    for index in range(20):
+        (aws / f"file-{index}").write_text("x", encoding="utf-8")
+    root = tmp_path / "ws"
+    root.mkdir()
+    (root / "hello.txt").write_text("hello\n", encoding="utf-8")
+    monkeypatch.setattr("praxis_prime.policy.boundary._inode_candidates", lambda: [aws])
+    monkeypatch.setattr("praxis_prime.policy.boundary._MAX_CREDENTIAL_FILES", 10)
+    with caplog.at_level(logging.WARNING, logger="praxis_prime.policy.boundary"):
+        denial = _denied(execute_read_file, {"path": "hello.txt"}, _ctx(root))
+    assert denial.code == "inode_scan_capped"
+    assert "hello" not in str(denial)
+    assert "secret-file cap" in caplog.text
+
+
+def test_kube_nested_cache_file_is_still_a_secret_inode(tmp_path: Path, monkeypatch):
+    kube = tmp_path / ".kube"
+    nested = kube / "configs" / "cache"
+    nested.mkdir(parents=True)
+    secret = nested / "prod.yaml"
+    secret.write_text(SECRET, encoding="utf-8")
+    root = tmp_path / "ws"
+    root.mkdir()
+    (root / "hello.txt").write_text("hello\n", encoding="utf-8")
+    os.link(secret, root / "notes.txt")
+    monkeypatch.setattr("praxis_prime.policy.boundary._inode_candidates", lambda: [kube])
+    ctx = _ctx(root)
+    assert execute_read_file({"path": "hello.txt"}, ctx) == "hello\n"
+    denial = _denied(execute_read_file, {"path": "notes.txt"}, ctx)
+    assert denial.code == "secret_path"
+    assert SECRET not in str(denial)
+
+
+def test_inode_cache_publishes_found_before_ready():
+    class Tracing(InodeScanCache):
+        def __init__(self) -> None:
+            self.events: list[str] = []
+            super().__init__()
+
+        def __setattr__(self, name: str, value: object) -> None:
+            if name == "events":
+                object.__setattr__(self, name, value)
+                return
+            events = getattr(self, "events", None)
+            if events is not None and name in {"found", "ready", "error"}:
+                events.append(name)
+            super().__setattr__(name, value)
+
+    cache = Tracing()
+    secret_inode_set(cache)
+    assert cache.events[-2:] == ["found", "ready"]
+
+
+def test_two_loops_keep_separate_inode_caches(tmp_path: Path, monkeypatch):
+    home = tmp_path / "home"
+    ssh = home / ".ssh"
+    ssh.mkdir(parents=True)
+    root_a = tmp_path / "a"
+    root_b = tmp_path / "b"
+    root_a.mkdir()
+    root_b.mkdir()
+    (root_a / "hello.txt").write_text("hello-a\n", encoding="utf-8")
+    (root_b / "hello.txt").write_text("hello-b\n", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    monkeypatch.setattr("praxis_prime.policy.boundary._inode_candidates", lambda: [ssh])
+
+    positions = default_positions()
+    positions["hipaa"] = "enforce"
+    engine = PolicyEngine(positions)
+
+    def make_loop(root: Path, provider: ScriptedProvider) -> AgentLoop:
+        return AgentLoop(
+            router=ModelRouter([ModelRef("ollama", "fake")], {"ollama": provider}),
+            registry=builtin_registry(),
+            policy=engine,
+            gate=ApprovalGate(None),
+            cwd=root,
+            max_iterations=4,
+        )
+
+    provider_a = ScriptedProvider(
+        [
+            AssistantFinal(
+                content="",
+                tool_calls=(
+                    ToolCall(id="a1", name="read_file", arguments={"path": "hello.txt"}),
+                ),
+            ),
+            AssistantFinal(content="done-a"),
+        ]
+    )
+    loop_a = make_loop(root_a, provider_a)
+    list(loop_a.run_turn("read hello"))
+    scanned = set(loop_a.inode_cache.found or ())
+
+    secret = ssh / "id_rsa"
+    secret.write_text(SECRET, encoding="utf-8")
+    os.link(secret, root_b / "notes.txt")
+    provider_b = ScriptedProvider(
+        [
+            AssistantFinal(
+                content="",
+                tool_calls=(
+                    ToolCall(id="b1", name="read_file", arguments={"path": "notes.txt"}),
+                ),
+            ),
+            AssistantFinal(content="done-b"),
+        ]
+    )
+    loop_b = make_loop(root_b, provider_b)
+    assert loop_a.inode_cache is not loop_b.inode_cache
+    list(loop_b.run_turn("read the alias"))
+    assert loop_a.inode_cache.found == scanned
+    assert not hasattr(engine, "inode_cache")
+
+    text_a = [
+        message.content
+        for message in provider_a.requests[-1].messages
+        if message.role == "tool"
+    ]
+    text_b = [
+        message.content
+        for message in provider_b.requests[-1].messages
+        if message.role == "tool"
+    ]
+    assert any("hello-a" in text for text in text_a)
+    assert any("secret" in text.lower() for text in text_b)
+    assert all(SECRET not in text for text in text_a + text_b)
+
+    stale = InodeScanCache()
+    stale.found = set()
+    stale.ready = True
+    allowed = engine.evaluate(
+        PolicyContext(
+            hook=HookPoint.H3_PRE_TOOL,
+            tool="read_file",
+            risk=Risk.READ,
+            arguments={"path": "notes.txt"},
+            workspace_root=str(root_b),
+            inode_cache=stale,
+        )
+    )
+    denied = engine.evaluate(
+        PolicyContext(
+            hook=HookPoint.H3_PRE_TOOL,
+            tool="read_file",
+            risk=Risk.READ,
+            arguments={"path": "notes.txt"},
+            workspace_root=str(root_b),
+            inode_cache=loop_b.inode_cache,
+        )
+    )
+    assert allowed.decision == "allow"
+    assert denied.decision == "deny"
+    assert SECRET not in denied.reason
+
+
 def test_secret_created_mid_turn_then_hardlinked_is_denied(tmp_path: Path, monkeypatch):
     home = tmp_path / "home"
     ssh = home / ".ssh"
@@ -546,7 +785,8 @@ def test_secret_created_mid_turn_then_hardlinked_is_denied(tmp_path: Path, monke
         max_iterations=6,
     )
     list(loop.run_turn("read, plant a secret, read the alias"))
-    assert loop.policy.inode_cache is loop.inode_cache
+    assert isinstance(loop.inode_cache, InodeScanCache)
+    assert not hasattr(loop.policy, "inode_cache")
     tool_text = [
         message.content
         for message in provider.requests[-1].messages

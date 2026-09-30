@@ -56,6 +56,7 @@ class PolicyContext:
     extra_roots: tuple[str, ...] = ()
     allow_paths: tuple[str, ...] = ()
     fetch_allow: tuple[str, ...] = ()
+    inode_cache: InodeScanCache | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,7 +143,6 @@ class PolicyEngine:
         self.session_id: str | None = None
         self.read_access = read_access or ReadAccess()
         self.workspace_root = workspace_root
-        self.inode_cache: InodeScanCache | None = None
 
     def dials_active(self) -> bool:
         return any(position != "off" for position in self.positions.values())
@@ -266,7 +266,7 @@ class PolicyEngine:
                 ctx.arguments,
                 workspace_root=root,
                 access=access,
-                cache=self.inode_cache,
+                cache=ctx.inode_cache,
             )
         except Exception:
             return ReadDenied("read boundary check failed closed", "check_failed")
