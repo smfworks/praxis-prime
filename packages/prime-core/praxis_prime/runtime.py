@@ -14,13 +14,18 @@ from praxis_prime.decide.screen import ActionScreener
 from praxis_prime.decide.tool import install_decide_tool
 from praxis_prime.loop.engine import AgentLoop
 from praxis_prime.loop.prompt import session_preamble
+from praxis_prime.memory.embed import embedder_for
 from praxis_prime.memory.store import SessionStore
+from praxis_prime.memory.tiers import MemoryStore, project_scope
+from praxis_prime.memory.tools import install_memory_tools
 from praxis_prime.paths import config_dir
 from praxis_prime.policy.engine import PolicyEngine
 from praxis_prime.router.factory import build_router
 from praxis_prime.router.router import ChatProvider, ModelRouter
 from praxis_prime.router.settings import Settings, load_settings
 from praxis_prime.router.types import parse_model_spec
+from praxis_prime.skills.catalog import SkillCatalog, bundled_skills_dir
+from praxis_prime.skills.tools import install_skill_tool
 from praxis_prime.state import StateDB, default_db_path
 from praxis_prime.tools.builtin import builtin_registry
 from praxis_prime.tools.registry import ToolRegistry
@@ -38,6 +43,8 @@ class Runtime:
     audit: AuditLog
     engine: DecisionEngine
     screener: ActionScreener
+    memory: MemoryStore
+    skills: SkillCatalog
     cwd: Path
 
     def close(self) -> None:
@@ -52,8 +59,16 @@ class Runtime:
         self.router.use_primary(ref)
         return ref.spec()
 
-    def open_loop(self, session_id: str | None = None) -> tuple[str, AgentLoop]:
-        preamble = session_preamble(str(self.cwd))
+    def open_loop(
+        self,
+        session_id: str | None = None,
+        *,
+        skill: str = "",
+        channel: str = "",
+        scope: str = "",
+    ) -> tuple[str, AgentLoop]:
+        scopes = self.memory.scopes(channel, scope)
+        preamble = _preamble(self, scopes, skill)
         if session_id:
             if not self.store.exists(session_id):
                 raise LookupError(f"no session {session_id}")
@@ -66,6 +81,21 @@ class Runtime:
                 model=self.router.primary.spec(),
                 preamble=preamble,
             )
+        episode_scope = scope or project_scope(self.cwd)
+        bound_session = session_id
+
+        def recall_for(text: str) -> str:
+            return self.memory.recall_block(text, scopes)
+
+        def on_turn_end(user: str, assistant: str) -> None:
+            self.memory.record_episode(
+                bound_session,
+                user,
+                assistant,
+                scope=episode_scope,
+                channel=channel,
+            )
+
         loop = AgentLoop(
             router=self.router,
             registry=self.registry,
@@ -80,6 +110,8 @@ class Runtime:
             audit=self.audit,
             session_id=session_id,
             screener=self.screener,
+            recall_for=recall_for,
+            on_turn_end=on_turn_end,
         )
         return session_id, loop
 
@@ -124,6 +156,21 @@ def build_runtime(
         dials=settings.dials,
     )
     install_decide_tool(tools, engine)
+    work = cwd or Path.cwd()
+    memory = MemoryStore(
+        db,
+        dials=settings.dials,
+        redact=settings.memory_redact,
+        embedder=embedder_for(settings.embed_spec, settings.ollama_host),
+        profile_cap=settings.memory_profile_cap,
+        profile_chars=settings.memory_profile_chars,
+        half_life_days=settings.memory_half_life_days,
+        episodic_ttl_days=settings.memory_episodic_ttl_days,
+        cwd=work,
+    )
+    skills = _skills(environ, work, config_path)
+    install_memory_tools(tools, memory)
+    install_skill_tool(tools, skills)
     return Runtime(
         settings=settings,
         router=router,
@@ -135,5 +182,46 @@ def build_runtime(
         audit=audit,
         engine=engine,
         screener=ActionScreener(engine, enabled=engine.config.prescreen),
-        cwd=cwd or Path.cwd(),
+        memory=memory,
+        skills=skills,
+        cwd=work,
+    )
+
+
+def _preamble(runtime: Runtime, scopes: tuple[str, ...], skill: str) -> str:
+    blocks = [session_preamble(str(runtime.cwd))]
+    index = runtime.skills.index_text()
+    if index:
+        blocks.append(index)
+    if skill:
+        blocks.append(
+            f"This run is bound to the skill {skill}. "
+            "Call use_skill with that name before answering."
+        )
+    profile = runtime.memory.profile_block(scopes)
+    if profile:
+        blocks.append(profile)
+    return "\n\n".join(blocks)
+
+
+def _skills(
+    env: Mapping[str, str],
+    cwd: Path,
+    config_path: Path | None,
+) -> SkillCatalog:
+    if config_path is not None:
+        user = config_path.parent / "skills"
+    else:
+        user = config_dir(env) / "skills"
+    shared: Path | None = None
+    home = env.get("HOME")
+    if home:
+        shared = Path(home) / ".agents" / "skills"
+    elif env is os.environ:
+        shared = Path.home() / ".agents" / "skills"
+    return SkillCatalog(
+        project=cwd / ".prime" / "skills",
+        user=user,
+        shared=shared,
+        bundled=bundled_skills_dir(),
     )

@@ -67,6 +67,7 @@ class Tool:
     risk: Risk
     execute: Callable[[Mapping[str, Any], ToolContext], str]
     classify: Callable[[Mapping[str, Any]], PreparedCall] | None = None
+    trusted_output: bool = False
 
     def prepare(self, arguments: Mapping[str, Any]) -> PreparedCall:
         if self.classify is not None:

@@ -16,6 +16,7 @@ from praxis_prime import __version__
 from praxis_prime.approvals.queue import ApprovalQueue
 from praxis_prime.channels.trust import untrusted_channel_message
 from praxis_prime.loop.events import StatusEvent, TurnEnded
+from praxis_prime.memory.tiers import memory_channel
 from praxis_prime.router.types import TextDelta
 from praxis_prime.runtime import Runtime
 
@@ -48,26 +49,31 @@ class Host:
         session_id: str | None = None,
         untrusted: bool = False,
         source: str = "channel",
+        channel: str = "",
         on_event: EventCallback | None = None,
     ) -> TurnResult:
         with self._lock:
             if self._closed:
                 raise RuntimeError("daemon is shut down")
             body = untrusted_channel_message(text, source=source) if untrusted else text
-            active_id, loop = self.runtime.open_loop(session_id)
+            active_id, loop = self.runtime.open_loop(session_id, channel=channel)
             final = ""
             error: str | None = None
             cancelled = False
-            for event in loop.run_turn(body):
-                payload = event_payload(event)
-                if on_event is not None:
-                    on_event(payload)
-                if isinstance(event, TextDelta):
-                    final += event.text
-                elif isinstance(event, TurnEnded):
-                    final = event.text or final
-                    error = event.error
-                    cancelled = event.cancelled
+            token = memory_channel.set(channel)
+            try:
+                for event in loop.run_turn(body):
+                    payload = event_payload(event)
+                    if on_event is not None:
+                        on_event(payload)
+                    if isinstance(event, TextDelta):
+                        final += event.text
+                    elif isinstance(event, TurnEnded):
+                        final = event.text or final
+                        error = event.error
+                        cancelled = event.cancelled
+            finally:
+                memory_channel.reset(token)
             return TurnResult(
                 session_id=active_id,
                 text=final,

@@ -180,6 +180,13 @@ class TelegramAdapter:
             reply_markup=inline_keyboard(approval_id),
         )
 
+    def send_owner(self, text: str) -> None:
+        """Deliver a routine result. No-op until a chat is paired."""
+        owner = self.pairing.owner_chat_id()
+        if owner is None or not text.strip():
+            return
+        self._send(owner, text)
+
     def notify_resolved(self, item: dict[str, object]) -> None:
         if item.get("actor") not in {"timeout", "shutdown"}:
             return
@@ -278,6 +285,7 @@ class TelegramAdapter:
                 session_id=session_id,
                 untrusted=True,
                 source="telegram",
+                channel="telegram",
             )
         except Exception as exc:
             if self.logger is not None:

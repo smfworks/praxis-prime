@@ -70,6 +70,63 @@ class StateDB:
                 prev_hash TEXT NOT NULL,
                 hash TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS memory_entries (
+                id TEXT PRIMARY KEY,
+                tier TEXT NOT NULL,
+                scope TEXT NOT NULL,
+                content TEXT NOT NULL,
+                content_hash TEXT NOT NULL,
+                source TEXT NOT NULL,
+                session_id TEXT NOT NULL DEFAULT '',
+                channel TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL DEFAULT '',
+                embedding_json TEXT NOT NULL DEFAULT ''
+            );
+
+            CREATE UNIQUE INDEX IF NOT EXISTS memory_dedupe
+                ON memory_entries(tier, scope, content_hash);
+
+            CREATE INDEX IF NOT EXISTS memory_session_idx
+                ON memory_entries(tier, session_id);
+
+            CREATE TABLE IF NOT EXISTS routines (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                prompt TEXT NOT NULL,
+                trigger_kind TEXT NOT NULL,
+                trigger_expr TEXT NOT NULL,
+                timezone TEXT NOT NULL,
+                missed_policy TEXT NOT NULL,
+                min_interval_seconds INTEGER NOT NULL,
+                max_iterations INTEGER NOT NULL,
+                max_usd REAL,
+                skill TEXT NOT NULL DEFAULT '',
+                deliver TEXT NOT NULL DEFAULT 'none',
+                paused INTEGER NOT NULL DEFAULT 0,
+                scope TEXT NOT NULL DEFAULT 'global',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                next_fire_at TEXT NOT NULL DEFAULT '',
+                last_fire_at TEXT NOT NULL DEFAULT '',
+                watch_token TEXT NOT NULL DEFAULT ''
+            );
+
+            CREATE TABLE IF NOT EXISTS routine_runs (
+                id TEXT PRIMARY KEY,
+                routine_id TEXT NOT NULL,
+                session_id TEXT NOT NULL DEFAULT '',
+                started_at TEXT NOT NULL,
+                finished_at TEXT NOT NULL,
+                outcome TEXT NOT NULL,
+                summary TEXT NOT NULL DEFAULT '',
+                trigger TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS routine_runs_idx
+                ON routine_runs(routine_id, started_at);
             """
         )
         self.conn.commit()

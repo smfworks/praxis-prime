@@ -1,6 +1,12 @@
-"""SKILL.md loader stub.
+"""SKILL.md skills.
 
-agentskills.io-compatible skills are planned. No skills are executed.
+Project, user, shared, and bundled folders. The prompt gets names and
+descriptions. ``use_skill`` loads a body. Git installs need approval and
+do not run scripts.
 
-TODO: ARCHITECTURE §9.
+ARCHITECTURE §9.
 """
+
+from praxis_prime.skills.catalog import SkillCatalog
+
+__all__ = ["SkillCatalog"]

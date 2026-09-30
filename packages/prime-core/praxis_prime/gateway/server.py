@@ -13,6 +13,7 @@ import queue
 import re
 import socket
 import threading
+from collections.abc import Callable
 
 from praxis_prime.approvals.queue import ApprovalQueue, parse_decision
 from praxis_prime.decide.engine import DecisionEngine
@@ -35,6 +36,8 @@ from praxis_prime.host import Host, TurnResult
 from praxis_prime.observe import JsonLogger
 
 _APPROVAL_PATH = re.compile(r"^/v1/approvals/(ap_[0-9a-f]{8})$")
+_ROUTINE_FIRE = re.compile(r"^/v1/routines/(rt_[0-9a-f]{8})/fire$")
+RoutineFire = Callable[[str], tuple[int, dict[str, object]]]
 
 
 class GatewayServer:
@@ -51,6 +54,7 @@ class GatewayServer:
         logger: JsonLogger | None = None,
         socket_path: str | None = None,
         decider: DecisionEngine | None = None,
+        routine_fire: RoutineFire | None = None,
     ) -> None:
         self.host = host
         self._port = port
@@ -58,6 +62,7 @@ class GatewayServer:
         self.agent = agent
         self.approvals = approvals
         self.decider = decider
+        self.routine_fire = routine_fire
         self.logger = logger
         self.socket_path = socket_path
         self._stopped = threading.Event()
@@ -236,7 +241,21 @@ class GatewayServer:
             return 200, {"ok": True, "approval": item}
         if method == "POST" and route in {"/v1/decide", "/v1/systemone"}:
             return self._http_decide(body)
+        fired = _ROUTINE_FIRE.fullmatch(route)
+        if method == "POST" and fired is not None:
+            return self._http_routine(fired.group(1))
         return 404, _error("not_found", "no such route")
+
+    def _http_routine(self, routine_id: str) -> tuple[int, dict[str, object]]:
+        if self.routine_fire is None:
+            return 404, _error("not_found", "routines are not running")
+        try:
+            status, payload = self.routine_fire(routine_id)
+        except Exception:
+            if self.logger is not None:
+                self.logger.warning("routine_fire_failed")
+            return 500, _error("error", "routine failed")
+        return status, payload
 
     def _http_decide(self, body: bytes) -> tuple[int, dict[str, object]]:
         if self.decider is None:
@@ -569,6 +588,8 @@ def _write_http(conn: socket.socket, status: int, payload: dict[str, object]) ->
         400: "Bad Request",
         401: "Unauthorized",
         404: "Not Found",
+        409: "Conflict",
+        429: "Too Many Requests",
         500: "Error",
         503: "Unavailable",
     }
