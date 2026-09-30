@@ -452,13 +452,148 @@ def test_browser_cache_directories_do_not_consume_the_entry_budget(
     os.link(cached_cookie, root / "cookies.txt")
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
-    monkeypatch.setattr("praxis_prime.policy.boundary._MAX_SCAN_ENTRIES", 20)
+    monkeypatch.setattr("praxis_prime.policy.boundary._MAX_BROWSER_SCAN_ENTRIES", 20)
     ctx = _ctx(root)
     assert execute_read_file({"path": "hello.txt"}, ctx) == "hello\n"
     for name in ("notes.txt", "logins.txt", "cookies.txt"):
         denial = _denied(execute_read_file, {"path": name}, ctx)
         assert denial.code == "secret_path"
         assert SECRET not in str(denial)
+
+
+def test_nested_cache_secret_hardlink_is_denied(tmp_path: Path, monkeypatch):
+    """Secret names nested under a skipped cache directory are still inodes."""
+    home = tmp_path / "home"
+    chrome = home / ".config" / "google-chrome" / "Default"
+    nested = chrome / "Cache" / "x" / "Login Data"
+    nested.parent.mkdir(parents=True)
+    nested.write_text(SECRET, encoding="utf-8")
+    for index in range(30):
+        (chrome / "Cache" / "x" / f"blob-{index}").write_text("x", encoding="utf-8")
+    upper = chrome / "CACHE" / "x" / "Cookies"
+    upper.parent.mkdir(parents=True)
+    upper.write_text(SECRET, encoding="utf-8")
+    gcloud = home / ".config" / "gcloud" / "cache" / "x" / "credentials.db"
+    gcloud.parent.mkdir(parents=True)
+    gcloud.write_text(SECRET, encoding="utf-8")
+    root = tmp_path / "ws"
+    root.mkdir()
+    (root / "hello.txt").write_text("hello\n", encoding="utf-8")
+    os.link(nested, root / "notes.txt")
+    os.link(upper, root / "cookies.txt")
+    os.link(gcloud, root / "creds.txt")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    # Non-secret cache entries must not count. Counting them would close the scan.
+    monkeypatch.setattr("praxis_prime.policy.boundary._MAX_BROWSER_SCAN_ENTRIES", 15)
+    monkeypatch.setattr("praxis_prime.policy.boundary._MAX_SCAN_ENTRIES", 15)
+    ctx = _ctx(root)
+    assert execute_read_file({"path": "hello.txt"}, ctx) == "hello\n"
+    for name in ("notes.txt", "cookies.txt", "creds.txt"):
+        denial = _denied(execute_read_file, {"path": name}, ctx)
+        assert denial.code == "secret_path", name
+        assert SECRET not in str(denial)
+
+
+def test_cache_name_cap_fails_closed(tmp_path: Path, monkeypatch, caplog):
+    home = tmp_path / "home"
+    cache = home / ".config" / "google-chrome" / "Default" / "Cache" / "x"
+    cache.mkdir(parents=True)
+    for index in range(8):
+        (cache / f"blob-{index}").write_text("x", encoding="utf-8")
+    (cache / "Login Data").write_text(SECRET, encoding="utf-8")
+    root = tmp_path / "ws"
+    root.mkdir()
+    (root / "hello.txt").write_text("hello\n", encoding="utf-8")
+    os.link(cache / "Login Data", root / "notes.txt")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    monkeypatch.setattr("praxis_prime.policy.boundary._MAX_CACHE_NAME_ENTRIES", 3)
+    ctx = _ctx(root)
+    with caplog.at_level(logging.WARNING, logger="praxis_prime.policy.boundary"):
+        denial = _denied(execute_read_file, {"path": "hello.txt"}, ctx)
+    assert denial.code == "inode_scan_capped"
+    assert "cache-name cap" in caplog.text
+    assert "hello" not in str(denial)
+    assert SECRET not in str(denial)
+    denied = _denied(execute_read_file, {"path": "notes.txt"}, ctx)
+    assert denied.code == "inode_scan_capped"
+    assert SECRET not in str(denied)
+
+
+def test_ssh_symlink_to_browser_profile_does_not_skip_caches(tmp_path: Path, monkeypatch):
+    home = tmp_path / "home"
+    chrome = home / ".config" / "google-chrome"
+    plain = chrome / "Default" / "Cache" / "x" / "plain.bin"
+    plain.parent.mkdir(parents=True)
+    plain.write_text("cache-bytes\n", encoding="utf-8")
+    login = chrome / "Default" / "Login Data"
+    login.write_text(SECRET, encoding="utf-8")
+    (home / ".ssh").symlink_to(chrome, target_is_directory=True)
+    root = tmp_path / "ws"
+    root.mkdir()
+    (root / "hello.txt").write_text("hello\n", encoding="utf-8")
+    os.link(plain, root / "notes.txt")
+    os.link(login, root / "login.txt")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    monkeypatch.setattr(
+        "praxis_prime.policy.boundary._inode_candidates", lambda: [home / ".ssh"]
+    )
+    ctx = _ctx(root)
+    assert execute_read_file({"path": "hello.txt"}, ctx) == "hello\n"
+    for name in ("notes.txt", "login.txt"):
+        denial = _denied(execute_read_file, {"path": name}, ctx)
+        assert denial.code == "secret_path", name
+        assert SECRET not in str(denial)
+        assert "cache-bytes" not in str(denial)
+
+
+def test_gcloud_cache_is_not_skipped(tmp_path: Path, monkeypatch, caplog):
+    home = tmp_path / "home"
+    cache = home / ".config" / "gcloud" / "cache" / "x"
+    cache.mkdir(parents=True)
+    for index in range(12):
+        (cache / f"note-{index}.txt").write_text("x", encoding="utf-8")
+    root = tmp_path / "ws"
+    root.mkdir()
+    (root / "hello.txt").write_text("hello\n", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    monkeypatch.setattr("praxis_prime.policy.boundary._MAX_SCAN_ENTRIES", 5)
+    with caplog.at_level(logging.WARNING, logger="praxis_prime.policy.boundary"):
+        denial = _denied(execute_read_file, {"path": "hello.txt"}, _ctx(root))
+    assert denial.code == "inode_scan_capped"
+    assert "directory-entry cap" in caplog.text
+    assert "hello" not in str(denial)
+
+
+def test_large_indexeddb_tree_stays_readable(tmp_path: Path, monkeypatch, request):
+    """IndexedDB outside the cache skip uses the larger browser budget."""
+    home = tmp_path / "home"
+    request.addfinalizer(lambda: _drop_tree(home))
+    indexed = (
+        home
+        / ".config"
+        / "google-chrome"
+        / "Default"
+        / "IndexedDB"
+        / "https_example.com_0.indexeddb.leveldb"
+    )
+    _touch_count(indexed, boundary_mod._MAX_SCAN_ENTRIES + 1)
+    login = home / ".config" / "google-chrome" / "Default" / "Login Data"
+    login.write_text(SECRET, encoding="utf-8")
+    root = tmp_path / "ws"
+    root.mkdir()
+    (root / "hello.txt").write_text("hello\n", encoding="utf-8")
+    os.link(login, root / "notes.txt")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    ctx = _ctx(root)
+    assert execute_read_file({"path": "hello.txt"}, ctx) == "hello\n"
+    denial = _denied(execute_read_file, {"path": "notes.txt"}, ctx)
+    assert denial.code == "secret_path"
+    assert SECRET not in str(denial)
 
 
 def test_skipped_cache_names_are_not_credential_paths():
@@ -571,7 +706,7 @@ def test_snap_directory_is_entry_budgeted(tmp_path: Path, monkeypatch, caplog):
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
     monkeypatch.setattr("praxis_prime.policy.boundary._inode_candidates", lambda: [snap])
-    monkeypatch.setattr("praxis_prime.policy.boundary._MAX_SCAN_ENTRIES", 1)
+    monkeypatch.setattr("praxis_prime.policy.boundary._MAX_BROWSER_SCAN_ENTRIES", 1)
     with caplog.at_level(logging.WARNING, logger="praxis_prime.policy.boundary"):
         denial = _denied(execute_read_file, {"path": "hello.txt"}, _ctx(root))
     assert denial.code == "inode_scan_capped"

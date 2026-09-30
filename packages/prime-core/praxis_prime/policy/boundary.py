@@ -33,6 +33,19 @@ _log = logging.getLogger(__name__)
 MAX_REDIRECTS = 5
 _MAX_CREDENTIAL_FILES = 5_000
 _MAX_SCAN_ENTRIES = 20_000
+# IndexedDB and Extensions sit outside the disk-cache skip, and a used Chrome
+# or Firefox profile often holds more than ``_MAX_SCAN_ENTRIES`` files there
+# (leveldb tables, extension scripts, locales). Browser roots use this larger
+# budget so those profiles stay readable. Overflow still fails every read
+# closed. Symlinks, including ``~/.ssh`` -> a profile, ``/usr``, or ``$HOME``,
+# stay on ``_MAX_SCAN_ENTRIES``.
+_MAX_BROWSER_SCAN_ENTRIES = 200_000
+# Names examined under skipped cache directories, per scan root. A stock
+# Firefox cache2 is about 20_000 files, and Chrome adds Cache, Code Cache,
+# and GPUCache. This pass records secret names at any depth and does not
+# charge non-secret names to the directory-entry budget. Crossing the cap
+# fails every read closed.
+_MAX_CACHE_NAME_ENTRIES = 500_000
 # Exact paths a symlink must not walk. ``/etc``, ``/usr``, and ``/dev`` are
 # walked with the entry budget. A path that resolves to one of these, or to
 # the same inode as ``/``, would scan the whole filesystem or a virtual tree.
@@ -194,12 +207,12 @@ _GCLOUD_SECRET_NAMES = frozenset(
 )
 _PROFILE_SIDECAR_SUFFIXES = ("-journal", "-wal", "-shm")
 _SKIP_WALK = frozenset({".git", "node_modules", ".venv", "__pycache__"})
-# Disk-cache directory names skipped inside a browser scan root. Chrome stores
-# these beside Login Data / Cookies (Cache, Code Cache, GPUCache, Service
-# Worker/CacheStorage). Firefox stores them beside logins.json / key4.db
-# (cache2, and snap ``common/.cache``). None of those credential names live in
-# the skipped directories. A secret-named file placed directly in one is still
-# recorded; the walk does not descend, so cache entries do not use the budget.
+# Disk-cache directory names skipped inside a real browser scan root. The match
+# is case-insensitive (``Cache`` and ``CACHE``). Chrome stores these beside
+# Login Data / Cookies. Firefox stores them beside logins.json / key4.db.
+# gcloud is not skipped: its ``cache/`` tree stays on the named walk. A
+# name-only pass still records secret-named files at any depth under a skipped
+# directory. Non-secret cache entries do not use the directory-entry budget.
 _BROWSER_CACHE_DIRS = frozenset(
     {
         ".cache",
@@ -889,16 +902,17 @@ def _prune_scan_dirs(
     kube_root: Path | None,
     root: Path,
     found: set[tuple[int, int]],
+    tally: _NameTally,
     *,
     skip_browser_caches: bool,
-) -> None:
+) -> _CapHit | None:
     """Skip kube caches, browser disk caches, and symlinks that leave the root.
 
     A symlink that stays inside the root (snap ``current`` -> a revision) is
     kept. The walk records directory inodes and skips one it has already
     seen, so ``current`` is not walked twice. Browser disk-cache directories
-    are not descended into. A secret-named file directly inside one is still
-    recorded.
+    are not descended into by the budgeted walk. Secret-named files at any
+    depth under one are recorded by a separate name-only pass.
     """
     direct_kube = kube_root is not None and _same_dir(directory, kube_root)
     kept: list[str] = []
@@ -909,25 +923,69 @@ def _prune_scan_dirs(
         if child.is_symlink() and not _contains(root, child):
             continue
         if skip_browser_caches and name.lower() in _BROWSER_CACHE_DIRS:
-            _record_direct_secret_inodes(child, found)
+            hit = _record_cache_secret_inodes(child, found, tally)
+            if hit is not None:
+                return hit
             continue
         kept.append(name)
     dirnames[:] = kept
+    return None
 
 
-def _record_direct_secret_inodes(directory: Path, found: set[tuple[int, int]]) -> None:
-    """Record secret-named files sitting directly in a skipped cache directory."""
-    try:
-        names = os.listdir(directory)
-    except OSError:
-        return
-    for name in names:
-        if _inode_file_is_secret(name, directory):
-            _add_inode(directory / name, found, 0)
+def _record_cache_secret_inodes(
+    cache_root: Path,
+    found: set[tuple[int, int]],
+    tally: _NameTally,
+) -> _CapHit | None:
+    """Record secret-named files nested under a skipped cache directory.
+
+    Directory entries are counted only toward ``tally``, not the scan root's
+    entry budget. Symlinks that leave the cache directory are not followed.
+    """
+    seen_dirs: set[tuple[int, int]] = set()
+    pending = [cache_root]
+    while pending:
+        current = pending.pop()
+        inode = _dir_inode(current)
+        if inode is None or inode in seen_dirs:
+            continue
+        if not _contains(cache_root, current):
+            continue
+        seen_dirs.add(inode)
+        try:
+            children = list(os.scandir(current))
+        except OSError:
+            continue
+        tally.examined += len(children)
+        if tally.examined > _MAX_CACHE_NAME_ENTRIES:
+            return _CapHit(_MAX_CACHE_NAME_ENTRIES, "cache-name")
+        for child in children:
+            path = Path(child.path)
+            try:
+                if child.is_symlink():
+                    if child.is_dir(follow_symlinks=True):
+                        if _contains(cache_root, path):
+                            pending.append(path)
+                        continue
+                elif child.is_dir(follow_symlinks=False):
+                    pending.append(path)
+                    continue
+            except OSError:
+                continue
+            if _inode_file_is_secret(child.name, current):
+                _add_inode(path, found, 0)
+    return None
 
 
 def _same_dir(left: Path, right: Path) -> bool:
     return os.path.normcase(os.path.abspath(left)) == os.path.normcase(os.path.abspath(right))
+
+
+@dataclass
+class _NameTally:
+    """Directory entries examined by the cache name-only pass of one scan root."""
+
+    examined: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -991,13 +1049,41 @@ def _is_unbounded_scan_root(path: Path) -> bool:
     return (here.st_dev, here.st_ino) == (root_stat.st_dev, root_stat.st_ino)
 
 
-def _is_browser_scan_root(path: Path) -> bool:
-    """True for a native, snap, flatpak, or ``$XDG_CONFIG_HOME`` browser root."""
-    home = Path.home()
+def _browser_scan_candidates(home: Path) -> list[Path]:
     candidates = [home.joinpath(*profile.scan) for profile in _BROWSER_PROFILES]
     candidates.extend(_xdg_browser_roots(home))
     candidates.append(home / ".mozilla")
-    return any(_same_resolved(path, candidate) for candidate in candidates)
+    return candidates
+
+
+def _is_browser_scan_root(path: Path) -> bool:
+    """True for a native, snap, flatpak, or ``$XDG_CONFIG_HOME`` browser root.
+
+    A symlink is included when it resolves to one of those roots. Callers that
+    must not treat ``~/.ssh`` -> a profile as the profile use
+    ``_is_lexical_browser_root``.
+    """
+    home = Path.home()
+    return any(
+        _same_resolved(path, candidate) for candidate in _browser_scan_candidates(home)
+    )
+
+
+def _is_lexical_browser_root(path: Path, *, include_gcloud: bool) -> bool:
+    """True when ``path`` itself is a browser scan root, not a symlink to one.
+
+    ``include_gcloud`` is false for the disk-cache skip. The gcloud row stays
+    on the named walk, so ``cache/x/credentials.db`` is recorded there.
+    """
+    if path.is_symlink():
+        return False
+    home = Path.home()
+    for candidate in _browser_scan_candidates(home):
+        if not include_gcloud and candidate.name.lower() == "gcloud":
+            continue
+        if _same_dir(path, candidate):
+            return True
+    return False
 
 
 def _resolve_scan_root(path: Path) -> tuple[Path, bool] | None:
@@ -1008,12 +1094,13 @@ def _resolve_scan_root(path: Path) -> tuple[Path, bool] | None:
     ``/dev`` are walked with ``_MAX_SCAN_ENTRIES``, as is any other symlink
     outside ``$HOME``. A symlink that resolves to ``$HOME`` itself uses that
     budget too, so ``~/.ssh -> $HOME`` does not walk the home directory
-    without a cap. Browser scan roots use the same entry budget even when
-    they are real directories, so ``~/snap/<app>`` cannot walk without a cap.
-    Browser roots record every secret-named inode and have no secret-file
-    count cap. Hitting the entry budget or the credential-file cap fails
-    every read closed, including a credential root that fell back to named
-    matching because it resolved to ``$HOME``.
+    without a cap. Browser scan roots are budgeted even when they are real
+    directories, so ``~/snap/<app>`` cannot walk without a cap. A real
+    browser directory uses ``_MAX_BROWSER_SCAN_ENTRIES`` because IndexedDB
+    and Extensions sit outside the cache skip. Other budgeted walks,
+    including gcloud and a credential symlink into a profile, keep
+    ``_MAX_SCAN_ENTRIES``. Hitting either budget, the cache-name cap, or the
+    credential-file cap fails every read closed.
     """
     try:
         browser = _is_browser_scan_root(path)
@@ -1043,6 +1130,20 @@ def _same_resolved(left: Path, right: Path) -> bool:
         return False
 
 
+def _directory_entry_budget(path: Path, budget_entries: bool) -> int | None:
+    """Entry budget for one scan root, or None when the walk is unbounded.
+
+    Real browser directories use the larger budget so IndexedDB and
+    Extensions do not fail every read closed. gcloud and symlinks stay on
+    ``_MAX_SCAN_ENTRIES``.
+    """
+    if not budget_entries:
+        return None
+    if _is_lexical_browser_root(path, include_gcloud=False):
+        return _MAX_BROWSER_SCAN_ENTRIES
+    return _MAX_SCAN_ENTRIES
+
+
 def _file_counts(name: str, directory: Path, mode: str) -> bool:
     if mode == "all":
         return True
@@ -1054,7 +1155,8 @@ def _collect_inodes(path: Path, found: set[tuple[int, int]]) -> _CapHit | None:
 
     Return a hit when the walk stops early. The caller fails every read
     closed. Named browser and gcloud walks record every secret-named inode.
-    Only an entry-budget or credential-file cap stops the scan.
+    An entry budget, the cache-name cap, or a credential-file cap stops the
+    scan.
     """
     resolved = _resolve_scan_root(path)
     if resolved is None:
@@ -1069,7 +1171,10 @@ def _collect_inodes(path: Path, found: set[tuple[int, int]]) -> _CapHit | None:
         mode = "named"
     file_cap = _MAX_CREDENTIAL_FILES if mode == "all" else None
     kube_root = root if path.name.lower() == ".kube" else None
-    skip_browser_caches = _is_browser_scan_root(path)
+    # The cache skip follows the path that was asked for, not a symlink
+    # target. ``~/.ssh`` -> a browser profile keeps the credential walk.
+    skip_browser_caches = _is_lexical_browser_root(path, include_gcloud=False)
+    tally = _NameTally()
     try:
         if root.is_file():
             _add_inode(root, found, 0)
@@ -1087,7 +1192,7 @@ def _collect_inodes(path: Path, found: set[tuple[int, int]]) -> _CapHit | None:
     count = 0
     entries = 0
     seen_dirs: set[tuple[int, int]] = set()
-    budget = _MAX_SCAN_ENTRIES if budget_entries else None
+    budget = _directory_entry_budget(path, budget_entries)
     for dirpath, dirnames, filenames in walker:
         directory = Path(dirpath)
         inode = _dir_inode(directory)
@@ -1095,14 +1200,17 @@ def _collect_inodes(path: Path, found: set[tuple[int, int]]) -> _CapHit | None:
             dirnames[:] = []
             continue
         seen_dirs.add(inode)
-        _prune_scan_dirs(
+        hit = _prune_scan_dirs(
             dirnames,
             directory,
             kube_root,
             root,
             found,
+            tally,
             skip_browser_caches=skip_browser_caches,
         )
+        if hit is not None:
+            return hit
         if budget is not None:
             entries += len(dirnames) + len(filenames)
             if entries > budget:
