@@ -5,6 +5,9 @@ The same summary is shown on the CLI and on Telegram (ARCHITECTURE §21.2).
 
 from __future__ import annotations
 
+# Unsandboxed approval. This replaces a mount line: the command is not read-only.
+HOST_FULL_WRITE = "HOST: runs unsandboxed with full write access"
+
 
 def mount_phrase(writable: bool) -> str:
     """Plain text for whether approval mounts the workspace read-write."""

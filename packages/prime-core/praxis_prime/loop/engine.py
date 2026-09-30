@@ -15,7 +15,7 @@ from collections.abc import AsyncIterator, Callable, Iterator, Mapping
 from pathlib import Path
 from urllib.parse import urlparse, urlunparse
 
-from praxis_prime.approvals.card import mount_phrase
+from praxis_prime.approvals.card import HOST_FULL_WRITE, mount_phrase
 from praxis_prime.approvals.gate import (
     ApprovalDecision,
     ApprovalGate,
@@ -557,9 +557,16 @@ class AgentLoop:
         )
 
     def _mount_phrase(self, tool_name: str, prepared: PreparedCall) -> str:
-        """Say whether approving this command mounts the workspace read-write."""
+        """Say how this command runs if it is approved.
+
+        A sandboxed command is a read-only mount or a read-write mount.
+        Without bubblewrap it runs on the host, so the card says that and
+        does not describe the run as read-only.
+        """
         if tool_name not in {"shell", "run_command", "run_tests"}:
             return ""
+        if not prepared.sandboxed:
+            return HOST_FULL_WRITE
         from praxis_prime.tools.shell import bind_is_writable
 
         writable = bind_is_writable(

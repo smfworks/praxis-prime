@@ -25,7 +25,7 @@ from praxis_prime.sandbox.bwrap import (
 from praxis_prime.state import StateDB
 from praxis_prime.tools import shellclass
 from praxis_prime.tools.registry import Risk, ToolContext
-from praxis_prime.tools.shell import classify_command, execute_shell
+from praxis_prime.tools.shell import bind_is_writable, classify_command, execute_shell
 from praxis_prime.tools.shellclass import (
     GitProbe,
     ShellClass,
@@ -1834,3 +1834,190 @@ def test_failed_git_version_check_is_not_cached(tmp_path: Path, monkeypatch):
     assert shellclass._git_supports_attr_source() is False
     assert calls["n"] == 1
     assert _asks(tmp_path, "git diff --stat") is False
+
+
+def test_unsandboxed_card_says_host_not_read_only(tmp_path: Path, monkeypatch):
+    """No bubblewrap: the card must not call a host run read-only."""
+    from tests.fakes import ScriptedProvider
+
+    from praxis_prime.approvals.card import HOST_FULL_WRITE, format_approval_card
+    from praxis_prime.approvals.gate import ApprovalDecision, ApprovalGate, ApprovalRequest
+    from praxis_prime.loop.engine import AgentLoop
+    from praxis_prime.policy.engine import PolicyEngine
+    from praxis_prime.repl import format_approval
+    from praxis_prime.router.router import ModelRouter
+    from praxis_prime.router.types import AssistantFinal, ModelRef, ToolCall
+    from praxis_prime.tools.builtin import builtin_registry
+
+    monkeypatch.setattr("praxis_prime.tools.shell.bwrap_available", lambda: False)
+    (tmp_path / "f.txt").write_text("hi\n", encoding="utf-8")
+    cards: list[tuple[str, str, str]] = []
+
+    def approver(request: ApprovalRequest) -> ApprovalDecision:
+        item = {
+            "id": "ap_host",
+            "risk": request.risk.value,
+            "tool": request.tool,
+            "summary": request.summary,
+            "reason": request.reason,
+            "sandboxed": request.sandboxed,
+            "mount": request.mount,
+        }
+        cards.append(
+            (request.mount, format_approval_card(item), format_approval(request, color=False))
+        )
+        return ApprovalDecision.DENY
+
+    def turn(command: str) -> None:
+        provider = ScriptedProvider(
+            [
+                AssistantFinal(
+                    content="",
+                    tool_calls=(ToolCall(id="c1", name="shell", arguments={"command": command}),),
+                ),
+                AssistantFinal(content="done"),
+            ]
+        )
+        loop = AgentLoop(
+            router=ModelRouter([ModelRef("ollama", "fake")], {"ollama": provider}),
+            registry=builtin_registry(),
+            policy=PolicyEngine(),
+            gate=ApprovalGate(approver),
+            cwd=tmp_path,
+            max_iterations=4,
+        )
+        list(loop.run_turn(command))
+
+    for command in ("/bin/rm f.txt", "nice rm f.txt", "echo hello"):
+        turn(command)
+
+    assert len(cards) == 3
+    for mount, telegram, cli in cards:
+        assert mount == HOST_FULL_WRITE
+        assert telegram.count(HOST_FULL_WRITE) == 1
+        assert HOST_FULL_WRITE in cli
+        assert "read-only" not in mount
+        assert "RW mount" not in telegram
+        assert "RW mount" not in cli
+        assert "mount:   read-only" not in cli
+        assert "\nread-only\n" not in telegram
+        for line in (*telegram.splitlines(), *cli.splitlines()):
+            assert line.strip() != "read-only"
+            assert not line.strip().endswith("read-only")
+    # The host deletes from the review are not described as read-only at all.
+    for mount, telegram, cli in cards[:2]:
+        assert "read-only" not in telegram
+        assert "read-only" not in cli
+        assert mount == HOST_FULL_WRITE
+
+
+def test_session_grant_keeps_auto_approved_reads_read_only(tmp_path: Path, monkeypatch):
+    (tmp_path / "note.txt").write_text("alpha\n", encoding="utf-8")
+    _track_note(tmp_path)
+    seen: dict[str, object] = {}
+
+    def capture(command, cwd, cancelled, **kwargs):
+        del command, cwd, cancelled
+        seen["writable"] = kwargs.get("writable")
+        return "ok"
+
+    monkeypatch.setattr("praxis_prime.tools.shell.run_bwrap", capture)
+    monkeypatch.setattr("praxis_prime.tools.shell.bwrap_available", lambda: True)
+    scope = str(tmp_path)
+    for command in ("cat note.txt", "git log --oneline"):
+        prepared = classify_command(command, sandbox_ready=True, workspace=tmp_path)
+        assert prepared.force_approval is False, command
+        assert prepared.write_capable is False, command
+        execute_shell(
+            {"command": command},
+            ToolContext(
+                cwd=scope,
+                cancelled=lambda: False,
+                session_write_approved=True,
+                write_scope=scope,
+            ),
+        )
+        assert seen["writable"] is False, command
+    assert (
+        bind_is_writable(
+            write_capable=False,
+            approved=False,
+            session_write_approved=True,
+            write_scope=scope,
+            cwd=scope,
+            main_checkout="",
+        )
+        is False
+    )
+    assert (
+        bind_is_writable(
+            write_capable=False,
+            approved=True,
+            session_write_approved=True,
+            write_scope=scope,
+            cwd=scope,
+            main_checkout="",
+        )
+        is True
+    )
+    assert (
+        bind_is_writable(
+            write_capable=True,
+            approved=False,
+            session_write_approved=True,
+            write_scope=scope,
+            cwd=scope,
+            main_checkout="",
+        )
+        is True
+    )
+
+
+def test_reader_without_a_workspace_asks(tmp_path: Path):
+    (tmp_path / "note.txt").write_text("alpha\n", encoding="utf-8")
+    allowed = classify_command("cat note.txt", sandbox_ready=True, workspace=tmp_path)
+    assert allowed.force_approval is False
+    for command in ("cat note.txt", "head -n 1 note.txt", "tail note.txt"):
+        prepared = classify_command(command, sandbox_ready=True)
+        assert prepared.force_approval is True, command
+        assert classify_shell(command).allowlisted is False, command
+        assert shellclass._concrete_read_operand("note.txt", None) is False
+
+
+def test_write_shaped_covers_paths_wrappers_and_indirect_forms():
+    shaped = (
+        "/bin/rm f.txt",
+        "\\rm f.txt",
+        "nice rm f.txt",
+        "nice -n 10 rm f.txt",
+        "timeout 1 rm f.txt",
+        "timeout --signal=KILL 1 rm f.txt",
+        "env -i rm f.txt",
+        "stdbuf -oL rm f.txt",
+        "busybox ls",
+        "awk 'BEGIN { system(\"rm f.txt\") }'",
+        "$(echo rm)",
+        "`echo rm`",
+        "{ rm; }",
+        "{rm;}",
+        "git -c alias.x='!rm f.txt' x",
+        "git --git-dir stash",
+        "git --git-dir=/tmp/repo stash",
+        "/usr/bin/git --git-dir=/tmp/repo stash",
+    )
+    for command in shaped:
+        prepared = classify_command(command, sandbox_ready=True)
+        assert prepared.write_capable is True, command
+        assert prepared.force_approval is True, command
+    quiet = (
+        "$CMD note.txt",
+        "echo hello",
+        "pytest",
+        "cat < note.txt",
+        "echo {a,b}",
+        "git status",
+        "git --git-dir=/tmp/repo status",
+    )
+    for command in quiet:
+        prepared = classify_command(command, sandbox_ready=True)
+        assert prepared.write_capable is False, command

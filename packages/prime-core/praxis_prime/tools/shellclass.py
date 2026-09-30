@@ -32,8 +32,13 @@ not allowlisted.
 
 ``write_capable`` is true only for a write-shaped command: destructive or
 write patterns, output redirects, mutating git subcommands, installers, and
-interpreters running scripts. Anything else still asks, and approving it
-keeps the read-only bind.
+interpreters running scripts. Absolute paths and backslash-escaped names
+count as their basename. ``nice``, ``timeout``, ``env``, and ``stdbuf`` are
+unwrapped first. Command substitution, brace groups, ``busybox``, and
+``awk`` ``system()`` are write-shaped, as are a git alias value that runs
+a shell (``!``) and ``git --git-dir`` with a mutating subcommand. Anything
+else still asks, and approving it keeps the read-only bind. A reader with
+no workspace asks, because the inode check cannot run.
 
 The scan root is the workspace. A git toplevel above that workspace is not
 scanned; the command asks. A git dir outside the workspace is not mounted
@@ -117,15 +122,34 @@ _INTERPRETER = re.compile(
     r"(?i)(?:^|[;&|(`\n])\s*(?:sudo\s+)?(?:python|python3|perl|ruby|node|php|sh|bash|zsh|dash)\b"
 )
 # Write-shaped misses. A command that matches none of these still asks, and
-# approving it keeps ``--ro-bind``.
-_GIT_MUTATION = re.compile(
-    r"(?i)(?:^|[;&|(`\n])\s*(?:sudo\s+)?git\s+"
-    r"(?:(?:-c|-C|--git-dir|--work-tree)\s+\S+\s+|--no-pager\s+)*"
-    r"(?:add|commit|rm|mv|checkout|switch|restore|reset|clean|rebase|merge|"
-    r"cherry-pick|revert|stash|tag|branch|config|init|clone|fetch|pull|push|"
-    r"apply|am|submodule|update-index|update-ref|gc|write-tree|read-tree|"
-    r"sparse-checkout|worktree|commit-tree|symbolic-ref)\b"
+# approving it keeps ``--ro-bind``. Paths and wrappers are normalized first.
+_GIT_MUTATION_NAMES = (
+    "add|commit|rm|mv|checkout|switch|restore|reset|clean|rebase|merge|"
+    "cherry-pick|revert|stash|tag|branch|config|init|clone|fetch|pull|push|"
+    "apply|am|submodule|update-index|update-ref|gc|write-tree|read-tree|"
+    "sparse-checkout|worktree|commit-tree|symbolic-ref"
 )
+_GIT_GLOBAL_OPTION = r"(?:-c|-C|--git-dir|--work-tree)(?:=\S+|\s+\S+)\s+|--no-pager\s+"
+_GIT_MUTATION = re.compile(
+    rf"(?i)(?:^|[;&|(`\n])\s*(?:sudo\s+)?(?:\S+/)?git\s+(?:{_GIT_GLOBAL_OPTION})*"
+    rf"(?:{_GIT_MUTATION_NAMES})\b"
+)
+# ``git --git-dir stash`` puts the mutating name in the option argument.
+_GIT_DIR_ARGUMENT = re.compile(
+    rf"(?i)(?:^|[;&|(`\n])\s*(?:sudo\s+)?(?:\S+/)?git\b[^\n]*"
+    rf"(?:--git-dir|--work-tree)(?:=|\s+)(?:{_GIT_MUTATION_NAMES})(?!\S)"
+)
+_GIT_SHELL_ALIAS = re.compile(
+    r"(?i)(?:^|[;&|(`\n])\s*(?:sudo\s+)?(?:\S+/)?git\b[^\n]*\balias\.[^\s=]+=[^\n]*!"
+)
+_BUSYBOX = re.compile(
+    r"(?i)(?:^|[;&|(`\n])\s*(?:sudo\s+|command\s+|exec\s+)*(?:\S+/)?busybox\b"
+)
+_AWK_SYSTEM = re.compile(
+    r"(?i)(?:^|[;&|(`\n])\s*(?:sudo\s+|command\s+|exec\s+)*(?:\S+/)?"
+    r"(?:awk|gawk|nawk|mawk)\b[^\n]*\bsystem\s*\("
+)
+_WRITE_WRAPPERS = frozenset({"nice", "timeout", "env", "stdbuf"})
 _INSTALL_OR_MUTATE = re.compile(
     r"(?i)(?:^|[;&|(`\n])\s*(?:sudo\s+)?"
     r"(?:apt-get|apt|dnf|yum|pacman|zypper|pip3?|npm|yarn|pnpm|cargo|gem|"
@@ -317,12 +341,18 @@ def classify_shell(
             probes = tuple(probe for _allowed, probe in decisions if probe is not None)
             return ShellClass(True, Risk.READ, "", False, probes)
     risk, reason = _label(text)
+    normalized = _normalize_write_command(text)
+    if normalized != text:
+        alt_risk, alt_reason = _label(normalized)
+        risk, reason = _prefer(risk, reason, alt_risk, alt_reason)
     if problem:
         meta = Risk.DESTRUCTIVE if problem in _METACHAR_RISK else Risk.READ
         risk, reason = _prefer(risk, reason, meta, problem)
     if not reason:
         reason = "command is not on the read-only allowlist"
-    if risk == Risk.READ and _INTERPRETER.search(text):
+    if risk == Risk.READ and (
+        _INTERPRETER.search(text) or _INTERPRETER.search(normalized)
+    ):
         risk = Risk.DESTRUCTIVE
         if reason == "command is not on the read-only allowlist":
             reason = "interpreter invocation requires approval"
@@ -333,16 +363,31 @@ def _write_shaped(command: str) -> bool:
     """True when the command is shaped like a workspace write.
 
     Unknown commands still ask. Approving them keeps the read-only bind.
+    Absolute paths and backslash-escaped names use their basename, and
+    ``nice``, ``timeout``, ``env``, and ``stdbuf`` are unwrapped. Command
+    substitution, brace groups, ``busybox``, and ``awk`` ``system()`` are
+    write-shaped even when the inner text is not a known write.
     """
     if _output_redirect(command):
         return True
+    if _substitution_or_brace_group(command):
+        return True
+    if _BUSYBOX.search(command) or _AWK_SYSTEM.search(command):
+        return True
+    if _GIT_SHELL_ALIAS.search(command) or _GIT_DIR_ARGUMENT.search(command):
+        return True
+    if _shaped_patterns(command):
+        return True
+    normalized = _normalize_write_command(command)
+    return normalized != command and _shaped_patterns(normalized)
+
+
+def _shaped_patterns(command: str) -> bool:
     if _matches(_DESTRUCTIVE, command) or _matches(_SHARE, command):
         return True
     if _GIT_MUTATION.search(command) or _INSTALL_OR_MUTATE.search(command):
         return True
-    if _INTERPRETER.search(command) or _BACKTICK_WRITE.search(command):
-        return True
-    return False
+    return bool(_INTERPRETER.search(command) or _BACKTICK_WRITE.search(command))
 
 
 def _output_redirect(command: str) -> bool:
@@ -373,6 +418,288 @@ def _output_redirect(command: str) -> bool:
             return True
         index += 1
     return False
+
+
+def _substitution_or_brace_group(command: str) -> bool:
+    """True for unquoted command substitution or a ``{ commands; }`` group.
+
+    Parameter expansion (``$CMD``) is not command substitution. Brace
+    expansion (``{a,b}``) is not a group. Both still ask; they stay
+    read-only after approval.
+    """
+    index = 0
+    length = len(command)
+    while index < length:
+        char = command[index]
+        if char == "'":
+            index += 1
+            while index < length and command[index] != "'":
+                index += 1
+            index += 1
+            continue
+        if char == '"':
+            index += 1
+            while index < length and command[index] != '"':
+                if command[index] == "\\" and index + 1 < length:
+                    index += 2
+                    continue
+                if command.startswith("$(", index) or command[index] == "`":
+                    return True
+                index += 1
+            index += 1
+            continue
+        if char == "\\" and index + 1 < length:
+            index += 2
+            continue
+        if command.startswith("$(", index) or char == "`":
+            return True
+        if char == "{" and _brace_group_at(command, index):
+            return True
+        index += 1
+    return False
+
+
+def _brace_group_at(command: str, index: int) -> bool:
+    """True when ``{`` starts a command group, not ``{a,b}`` expansion."""
+    if index > 0 and not (command[index - 1].isspace() or command[index - 1] in ";&|("):
+        return False
+    rest = command[index + 1 :]
+    if rest[:1].isspace():
+        return True
+    close = rest.find("}")
+    if close < 0:
+        return False
+    body = rest[:close]
+    return ";" in body or "\n" in body
+
+
+def _normalize_write_command(command: str) -> str:
+    """Rewrite each simple command so write patterns see the real program."""
+    rewritten = [_rewrite_simple(part) for part in _split_simple(command)]
+    return "; ".join(rewritten)
+
+
+def _split_simple(command: str) -> list[str]:
+    """Split on unquoted separators. Quotes are kept for ``shlex``."""
+    parts: list[str] = []
+    buf: list[str] = []
+    index = 0
+    length = len(command)
+    quote = ""
+    while index < length:
+        char = command[index]
+        if quote:
+            buf.append(char)
+            if char == "\\" and quote == '"' and index + 1 < length:
+                buf.append(command[index + 1])
+                index += 2
+                continue
+            if char == quote:
+                quote = ""
+            index += 1
+            continue
+        if char in "'\"":
+            quote = char
+            buf.append(char)
+            index += 1
+            continue
+        if char == "\\" and index + 1 < length:
+            buf.append(char)
+            buf.append(command[index + 1])
+            index += 2
+            continue
+        if char in "\n;":
+            parts.append("".join(buf))
+            buf = []
+            index += 1
+            continue
+        if char == "&" and index + 1 < length and command[index + 1] == "&":
+            parts.append("".join(buf))
+            buf = []
+            index += 2
+            continue
+        if char == "|":
+            step = 2 if index + 1 < length and command[index + 1] == "|" else 1
+            parts.append("".join(buf))
+            buf = []
+            index += step
+            continue
+        buf.append(char)
+        index += 1
+    parts.append("".join(buf))
+    return [part.strip() for part in parts if part.strip()]
+
+
+def _rewrite_simple(segment: str) -> str:
+    try:
+        tokens = shlex.split(segment, posix=True)
+    except ValueError:
+        return segment
+    if not tokens:
+        return segment
+    tokens = _unwrap_wrappers(tokens)
+    if not tokens:
+        return segment
+    tokens[0] = _program_basename(tokens[0])
+    return shlex.join(tokens)
+
+
+def _unwrap_wrappers(tokens: list[str]) -> list[str]:
+    for _ in range(6):
+        if not tokens:
+            return tokens
+        name = _program_basename(tokens[0])
+        if name not in _WRITE_WRAPPERS:
+            return tokens
+        rest = _skip_wrapper(name, tokens[1:])
+        if rest is None:
+            return tokens
+        tokens = rest
+    return tokens
+
+
+def _skip_wrapper(name: str, args: list[str]) -> list[str] | None:
+    if name == "nice":
+        return _skip_nice(args)
+    if name == "timeout":
+        return _skip_timeout(args)
+    if name == "env":
+        return _skip_env(args)
+    if name == "stdbuf":
+        return _skip_stdbuf(args)
+    return None
+
+
+def _skip_nice(args: list[str]) -> list[str] | None:
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if arg == "--":
+            return args[index + 1 :]
+        if arg in {"-n", "--adjustment"}:
+            if index + 1 >= len(args):
+                return None
+            index += 2
+            continue
+        if arg.startswith("--adjustment=") or re.fullmatch(r"-n\d+", arg):
+            index += 1
+            continue
+        if re.fullmatch(r"-\d+", arg):
+            index += 1
+            continue
+        if arg.startswith("-"):
+            return None
+        return args[index:]
+    return None
+
+
+def _skip_timeout(args: list[str]) -> list[str] | None:
+    flags = {"--foreground", "--verbose", "-v", "--preserve-status"}
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if arg == "--":
+            index += 1
+            break
+        if arg in flags:
+            index += 1
+            continue
+        if arg in {"-s", "--signal", "-k", "--kill-after"}:
+            if index + 1 >= len(args):
+                return None
+            index += 2
+            continue
+        if arg.startswith(("--signal=", "--kill-after=")) or (
+            arg.startswith("-s") and arg != "-s"
+        ):
+            index += 1
+            continue
+        if arg.startswith("-"):
+            return None
+        index += 1
+        break
+    else:
+        return None
+    if index >= len(args):
+        return None
+    return args[index:]
+
+
+def _skip_env(args: list[str]) -> list[str] | None:
+    index = 0
+    flags = {"-i", "--ignore-environment", "-0", "--null", "-v", "--debug"}
+    valued = {"-u", "--unset", "-C", "--chdir", "-S", "--split-string"}
+    while index < len(args):
+        arg = args[index]
+        if arg in {"--", "-"}:
+            index += 1
+            break
+        if arg in flags:
+            index += 1
+            continue
+        if arg in valued:
+            if index + 1 >= len(args):
+                return None
+            index += 2
+            continue
+        if arg.startswith(("--unset=", "--chdir=", "--split-string=")) or (
+            arg.startswith("-u") and arg != "-u"
+        ):
+            index += 1
+            continue
+        if arg.startswith("-"):
+            return None
+        break
+    while index < len(args) and _env_assignment(args[index]):
+        index += 1
+    if index >= len(args):
+        return None
+    return args[index:]
+
+
+def _env_assignment(token: str) -> bool:
+    if "=" not in token or token.startswith("="):
+        return False
+    name = token.split("=", 1)[0]
+    return re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name) is not None
+
+
+def _skip_stdbuf(args: list[str]) -> list[str] | None:
+    index = 0
+    saw = False
+    short = {"-i", "-o", "-e"}
+    long = {"--input", "--output", "--error"}
+    while index < len(args):
+        arg = args[index]
+        if arg == "--":
+            index += 1
+            break
+        if arg in short or arg in long:
+            if index + 1 >= len(args):
+                return None
+            saw = True
+            index += 2
+            continue
+        if arg.startswith(("--input=", "--output=", "--error=")) or re.fullmatch(
+            r"-[ioe]\S+", arg
+        ):
+            saw = True
+            index += 1
+            continue
+        if arg.startswith("-"):
+            return None
+        break
+    if not saw or index >= len(args):
+        return None
+    return args[index:]
+
+
+def _program_basename(token: str) -> str:
+    name = token.replace("\\", "")
+    slash = name.rfind("/")
+    if slash >= 0:
+        name = name[slash + 1 :]
+    return name
 
 
 def _label(command: str) -> tuple[Risk, str]:
@@ -1407,7 +1734,13 @@ def _concrete_read_operand(
     workspace: Path | None,
     cache: InodeScanCache | None = None,
 ) -> bool:
-    """True for one workspace path. Globs are expanded by the shell later."""
+    """True for one workspace path. Globs are expanded by the shell later.
+
+    Without a workspace the inode check cannot run, so this is not a
+    concrete read and the command asks instead of auto-approving.
+    """
+    if workspace is None:
+        return False
     if _has_glob(arg) or _operand_is_secret(arg, workspace):
         return False
     if not _in_workspace(arg, workspace):
@@ -1529,10 +1862,11 @@ def _inode_blocks_read(
     """True when a reader operand is a secret inode or the scan cannot finish.
 
     Uses the same :class:`InodeScanCache` as ``read_file``. A hit asks; it
-    does not auto-approve.
+    does not auto-approve. With no workspace the scan did not run, so the
+    operand is blocked.
     """
     if workspace is None:
-        return False
+        return True
     body = _concrete_path(token) if token.startswith(":") else token
     if not body:
         return True

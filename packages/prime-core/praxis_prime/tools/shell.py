@@ -7,10 +7,11 @@ that the classifier would auto-approve is checked again: the same revisions
 and pathspecs run as ``git --name-only`` inside the read-only sandbox. If
 that probe fails, or git lists a secret or a path the classifier did not
 approve, the command asks. The workspace bind stays read-only after
-approval unless the command is write-shaped, or a coding session holds an
-explicit write grant for its worktree. When bubblewrap is missing, every
-command needs approval. A sandbox failure never reruns the command on the
-host.
+approval unless the command is write-shaped. An explicit coding-session
+write grant applies only to an approved or write-shaped command. An
+auto-approved read stays read-only. When bubblewrap is missing, every
+command needs approval and runs on the host with full write access. A
+sandbox failure never reruns the command on the host.
 """
 
 from __future__ import annotations
@@ -194,15 +195,16 @@ def bind_is_writable(
 ) -> bool:
     """True when this command may mount the workspace read-write.
 
-    Approval keeps ``--ro-bind`` unless the command is write-shaped or an
-    explicit coding-session write grant is present. The grant is the
-    ``session_write_approved`` flag. It is not inferred from approval.
+    Approval keeps ``--ro-bind`` unless the command is write-shaped.
+    ``session_write_approved`` is an explicit coding-session write grant.
+    It applies only when this command was approved or is write-shaped.
+    An auto-approved read stays read-only. The grant is not inferred.
     """
     session = session_write_approved and bool(write_scope)
     if write_capable:
         if not approved and not session:
             return False
-    elif not session:
+    elif not (approved and session):
         return False
     if not main_checkout:
         return True
@@ -218,7 +220,7 @@ def bind_is_writable(
 
 
 def _writable(context: ToolContext, prepared: PreparedCall) -> bool:
-    """Read-write only for a write-shaped command or a coding-session grant."""
+    """Read-write for a write-shaped command, or a grant on an approved one."""
     return bind_is_writable(
         write_capable=prepared.write_capable,
         approved=context.shell_approved or context.host_shell_approved,
