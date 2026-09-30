@@ -1850,6 +1850,12 @@ def test_unsandboxed_card_says_host_not_read_only(tmp_path: Path, monkeypatch):
     from praxis_prime.tools.builtin import builtin_registry
 
     monkeypatch.setattr("praxis_prime.tools.shell.bwrap_available", lambda: False)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
+    (tmp_path / "home").mkdir()
+    from praxis_prime.policy.boundary import bind_data_root
+
+    bind_data_root(None)
     (tmp_path / "f.txt").write_text("hi\n", encoding="utf-8")
     cards: list[tuple[str, str, str]] = []
 

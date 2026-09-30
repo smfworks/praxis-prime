@@ -211,7 +211,13 @@ def test_denied_tool_never_reaches_prepare_or_the_approval_card(tmp_path: Path):
     assert "shell" not in names
 
 
-def test_allowed_shell_still_shows_the_mount_line_before_execute(tmp_path: Path):
+def test_allowed_shell_still_shows_the_mount_line_before_execute(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
+    (tmp_path / "home").mkdir()
+    from praxis_prime.policy.boundary import bind_data_root
+
+    bind_data_root(None)
     prepared: list[str] = []
     asked: list[ApprovalRequest] = []
     ran: list[str] = []

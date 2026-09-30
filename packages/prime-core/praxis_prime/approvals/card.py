@@ -7,6 +7,12 @@ from __future__ import annotations
 
 # Unsandboxed approval. This replaces a mount line: the command is not read-only.
 HOST_FULL_WRITE = "HOST: runs unsandboxed with full write access"
+# The whole mount line when account data exists and bubblewrap is missing.
+HOST_NEEDS_BWRAP = "install bubblewrap to run shell commands"
+# Defence in depth on a fresh install, appended to HOST_FULL_WRITE.
+HOST_DATA_DIR = (
+    "HOST: refusing this command because it can read the account data directory"
+)
 
 
 def mount_phrase(writable: bool) -> str:

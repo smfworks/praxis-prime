@@ -14,6 +14,7 @@ ARCHITECTURE §8, §16, and §25.
 from __future__ import annotations
 
 import errno
+import glob
 import http.client
 import ipaddress
 import logging
@@ -722,9 +723,18 @@ def _assess_read(
 def private_data_command(command: str, workspace: Path) -> bool:
     """True when a shell command names account or profile data.
 
-    Quotes are parsed with ``shlex``. A recursive reader (``grep -r``,
-    ``rg``, ``find -exec``, ``tar``, ``cp -r``, ``rsync``) is refused when
-    a path it walks contains the data directory.
+    Quotes are parsed with ``shlex`` and ``punctuation_chars``, so ``;`` and
+    ``&&`` split even when they are not surrounded by spaces. ``cd`` changes
+    the directory later tokens are judged against, and globs are expanded on
+    the filesystem. A ``cd`` whose target stays inside ``workspace`` is
+    allowed, including a coding worktree that lives under the data directory.
+    A ``cd`` that leaves that workspace and enters the data directory is
+    refused. ``cd -`` fails closed. A recursive reader (``grep -r``,
+    ``rg``, ``git grep``, ``ag``, ``ack``, ``find -exec``, ``tar``, ``cp -r``,
+    ``rsync``, ``zip -r``) is refused when a path it walks contains the data
+    directory. Bubblewrap also hides that directory. Without bubblewrap,
+    host shell is refused outright once account data exists; this check is
+    defence in depth.
     """
     root = _data_root()
     if root is None:
@@ -732,17 +742,61 @@ def private_data_command(command: str, workspace: Path) -> bool:
     if str(root) in command:
         return True
     try:
-        tokens = shlex.split(command, posix=True)
+        tokens = _shell_tokens(command)
     except ValueError:
         return True
-    if _recursive_private_read(tokens, workspace, root):
+    return _command_reaches_data(tokens, workspace, root)
+
+
+def account_data_present() -> bool:
+    """True when the data directory holds accounts, profiles, or their files.
+
+    A missing or empty data directory is a fresh install. Host shell is
+    allowed only in that case, and only when bubblewrap is unavailable.
+    ``--data-dir`` does not hide account data in the default XDG directory:
+    both are checked.
+    """
+    root = _data_root()
+    if root is None:
         return True
-    for token in tokens:
-        if token.startswith("-") or token in _SHELL_SEPARATORS:
-            continue
-        if _token_is_private(token, workspace):
+    if _directory_has_account_data(root):
+        return True
+    default = _xdg_data_root()
+    if default is None:
+        return True
+    if default == root:
+        return False
+    return _directory_has_account_data(default)
+
+
+def _xdg_data_root() -> Path | None:
+    try:
+        return Path(data_dir()).resolve(strict=False)
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
+def _directory_has_account_data(root: Path) -> bool:
+    kind = lstat_kind(root)
+    if kind is StatKind.MISSING:
+        return False
+    if kind is not StatKind.DIR:
+        return True
+    for name in ("accounts.db", "profiles", "backups", "prime.db", "SOUL.md"):
+        if lstat_kind(root / name) is not StatKind.MISSING:
             return True
-    return False
+    try:
+        children = list(root.iterdir())
+    except OSError:
+        return True
+    return any(child.name.startswith("accounts.db") for child in children)
+
+
+def _shell_tokens(command: str) -> list[str]:
+    """Split a shell command. Punctuation such as ``;`` and ``&&`` is its own token."""
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+    lexer.commenters = ""
+    return list(lexer)
 
 
 _data_root_lock = threading.Lock()
@@ -1012,20 +1066,127 @@ _RECURSIVE_WRAPPERS = frozenset({"sudo", "command", "env", "nice", "nohup", "std
 _CWD_SEARCHERS = frozenset({"grep", "egrep", "fgrep", "rg", "ripgrep", "find"})
 
 
-def _recursive_private_read(tokens: list[str], workspace: Path, root: Path) -> bool:
+def _command_reaches_data(tokens: list[str], workspace: Path, root: Path) -> bool:
+    """Track ``cd`` and expand globs, then apply the path denylist."""
+    cwd = workspace
     for segment in _command_segments(tokens):
-        argv = _unwrap_command(segment)
-        if not argv or not _is_recursive_reader(argv):
-            continue
-        operands = _operands(argv[1:])
-        if not operands and Path(argv[0]).name in _CWD_SEARCHERS:
-            if _contains_data(workspace, root):
-                return True
-            continue
-        for token in operands:
-            if _token_is_private(token, workspace) or _token_contains_data(token, workspace, root):
+        expanded = _expand_globs(segment, cwd)
+        if _recursive_segment(expanded, cwd, root):
+            return True
+        if _plain_tokens_private(expanded, cwd):
+            return True
+        destination, failed = _cd_destination(expanded, cwd)
+        if failed:
+            return True
+        if destination is not None:
+            cwd = destination
+            if _inside_data(cwd, root) and not _inside_workspace(cwd, workspace):
                 return True
     return False
+
+
+def _expand_globs(segment: list[str], cwd: Path) -> list[str]:
+    expanded: list[str] = []
+    for token in segment:
+        expanded.extend(_glob_token(token, cwd))
+    return expanded
+
+
+def _glob_token(token: str, cwd: Path) -> list[str]:
+    if token in _SHELL_SEPARATORS or token in {"[", "]", "[["}:
+        return [token]
+    if not any(ch in token for ch in "*?["):
+        return [token]
+    pattern = token if Path(token).is_absolute() else str(Path(cwd) / token)
+    try:
+        matches = glob.glob(pattern)
+    except OSError:
+        return [token]
+    return matches or [token]
+
+
+def _plain_tokens_private(argv: list[str], cwd: Path) -> bool:
+    for token in argv:
+        if token.startswith("-") or token in _SHELL_SEPARATORS:
+            continue
+        if _token_is_private(token, cwd):
+            return True
+    return False
+
+
+def _recursive_segment(argv: list[str], cwd: Path, root: Path) -> bool:
+    unwrapped = _unwrap_command(argv)
+    if not unwrapped or not _is_recursive_reader(unwrapped):
+        return False
+    operands = _operands(unwrapped[1:])
+    if Path(unwrapped[0]).name == "git":
+        paths = operands[1:]
+        if not paths:
+            return _contains_data(cwd, root)
+        return any(
+            _token_is_private(token, cwd) or _token_contains_data(token, cwd, root)
+            for token in paths
+        )
+    if not operands and Path(unwrapped[0]).name in _CWD_SEARCHERS:
+        return _contains_data(cwd, root)
+    for token in operands:
+        if _token_is_private(token, cwd) or _token_contains_data(token, cwd, root):
+            return True
+    return False
+
+
+def _cd_destination(argv: list[str], cwd: Path) -> tuple[Path | None, bool]:
+    """Return ``(new cwd, fail closed)``. Not a ``cd`` is ``(None, False)``."""
+    unwrapped = _unwrap_command(argv)
+    if not unwrapped or Path(unwrapped[0]).name != "cd":
+        return None, False
+    if any(arg == "-" for arg in unwrapped[1:]):
+        return None, True
+    args = [arg for arg in unwrapped[1:] if arg != "--" and not arg.startswith("-")]
+    if not args:
+        try:
+            return Path.home().resolve(), False
+        except OSError:
+            return None, True
+    path = Path(args[0])
+    if not path.is_absolute():
+        path = Path(cwd) / path
+    try:
+        return Path(os.path.realpath(path, strict=False)), False
+    except OSError:
+        return None, True
+
+
+def _inside_workspace(cwd: Path, workspace: Path) -> bool:
+    """True when ``cwd`` is ``workspace`` or a directory inside it."""
+    try:
+        here = Path(os.path.realpath(cwd, strict=False))
+        root = Path(os.path.realpath(workspace, strict=False))
+    except OSError:
+        return False
+    if here == root:
+        return True
+    try:
+        here.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
+def _inside_data(cwd: Path, root: Path) -> bool:
+    """True when ``cwd`` is the data directory or a path inside it."""
+    try:
+        resolved = Path(os.path.realpath(cwd, strict=False))
+        data = Path(os.path.realpath(root, strict=False))
+    except OSError:
+        return True
+    if resolved == data:
+        return True
+    try:
+        resolved.relative_to(data)
+    except ValueError:
+        return False
+    return True
 
 
 def _command_segments(tokens: list[str]) -> list[list[str]]:
@@ -1055,14 +1216,18 @@ def _unwrap_command(argv: list[str]) -> list[str]:
 def _is_recursive_reader(argv: list[str]) -> bool:
     name = Path(argv[0]).name
     rest = argv[1:]
-    if name in {"rg", "ripgrep", "rsync", "tar"}:
+    if name in {"rg", "ripgrep", "rsync", "tar", "ag", "ack"}:
         return True
+    if name == "git":
+        return "grep" in rest
     if name == "find":
         return any(arg in {"-exec", "-execdir", "-ok", "-okdir"} for arg in rest)
     if name in {"grep", "egrep", "fgrep"}:
         return _short_flag(rest, "rR") or "--recursive" in rest or _directories_recurse(rest)
     if name == "cp":
         return _short_flag(rest, "rRa") or "--recursive" in rest or "--archive" in rest
+    if name == "zip":
+        return _short_flag(rest, "r") or "--recurse-paths" in rest
     return False
 
 

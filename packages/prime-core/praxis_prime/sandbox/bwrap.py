@@ -90,7 +90,7 @@ def build_bwrap_argv(
     ``scope`` is exactly ``cwd``, and that directory is not ``$HOME`` or
     ``main_checkout``.
     """
-    work = cwd.resolve()
+    work = _bind_source(cwd)
     mount = "--ro-bind"
     if writable:
         if not writable_scope_ok(work, scope, main_checkout):
@@ -140,14 +140,164 @@ def build_bwrap_argv(
         "--chdir",
         "/workspace",
     ]
+    mounts: list[tuple[Path, str]] = [(work, "/workspace")]
     for optional in ("/usr", "/bin", "/lib", "/lib64", "/etc"):
         if Path(optional).exists():
             argv.extend(["--ro-bind", optional, optional])
+            mounts.append((Path(optional), optional))
     for src, dest in ro_binds or []:
-        if Path(src).exists():
-            argv.extend(["--ro-bind", src, dest])
+        source = Path(src)
+        if not source.exists():
+            continue
+        resolved = _bind_source(source)
+        argv.extend(["--ro-bind", str(resolved), dest])
+        mounts.append((resolved, dest))
+    argv.extend(_data_dir_mask(mounts))
     argv.extend(["--", "bash", "--noprofile", "--norc", "-c", command])
     return argv
+
+
+def _data_dir_mask(mounts: list[tuple[Path, str]]) -> list[str]:
+    """Hide the account data directory when a bind mount contains it.
+
+    A later ``--tmpfs`` covers that path inside the sandbox, so no command
+    string can read profiles, backups, or ``accounts.db``. Containment is
+    by real path and by ``(st_dev, st_ino)``, so a bind-mount alias of a
+    parent is masked too. A bind that sits inside the data directory is
+    refused. The directory is left alone when it is not on any mount.
+    """
+    from praxis_prime.policy.boundary import _data_root
+    from praxis_prime.statfile import StatKind, lstat_kind
+
+    root = _data_root()
+    if root is None:
+        return []
+    try:
+        data = Path(os.path.realpath(root, strict=False))
+    except OSError:
+        return []
+    if lstat_kind(data) is not StatKind.DIR:
+        return []
+    masked: list[str] = []
+    seen: set[str] = set()
+    for src, dest in mounts:
+        _refuse_bind_inside_data(src, data)
+        relative = _data_relative_to_mount(src, data)
+        if relative is None:
+            continue
+        sandbox = str(Path(dest) / relative)
+        if sandbox in seen:
+            continue
+        seen.add(sandbox)
+        masked.extend(["--tmpfs", sandbox])
+    return masked
+
+
+def _file_id(path: Path) -> tuple[int, int] | None:
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return (st.st_dev, st.st_ino)
+
+
+def _data_relative_to_mount(mount: Path, data: Path) -> Path | None:
+    """Path of ``data`` inside ``mount``, or None when ``mount`` does not contain it.
+
+    Walks ``data`` and its ancestors and matches ``(st_dev, st_ino)``, so a
+    bind-mount alias of a parent counts. A realpath prefix is the same check
+    when the two paths are not aliases.
+    """
+    mount_id = _file_id(mount)
+    current = data
+    parts: list[str] = []
+    while mount_id is not None:
+        ident = _file_id(current)
+        if ident is not None and ident == mount_id:
+            if not parts:
+                return None
+            return Path(*reversed(parts))
+        parent = current.parent
+        if parent == current:
+            break
+        parts.append(current.name)
+        current = parent
+    try:
+        mount_real = Path(os.path.realpath(mount, strict=False))
+        data_real = Path(os.path.realpath(data, strict=False))
+        relative = data_real.relative_to(mount_real)
+    except (OSError, ValueError):
+        return None
+    if relative == Path("."):
+        return None
+    return relative
+
+
+def _bind_source(path: Path) -> Path:
+    """Real path of a bind. A symlink is the target, not the link path."""
+    try:
+        return Path(os.path.realpath(path, strict=False))
+    except OSError as exc:
+        raise SandboxError(
+            "refusing to bind a directory inside the account data directory"
+        ) from exc
+
+
+def _refuse_bind_inside_data(mount: Path, data: Path) -> None:
+    """Refuse a bind of the data directory or a path inside it.
+
+    The source is already resolved, so ``worktrees/lnk -> ../profiles`` is
+    the profile tree and is refused. A coding task may be bound only when
+    it is one worktree: ``worktrees/<repo>/<task>`` or
+    ``worktrees/<profile>/<repo>/<task>``. ``worktrees/`` itself, a repo
+    directory that holds several tasks, and every other path inside the
+    data directory are refused. A tmpfs cannot hide a directory from a
+    mount that is already inside it.
+    """
+    relative = _path_inside(mount, data)
+    if relative is None:
+        return
+    if _is_task_worktree(mount, relative):
+        return
+    raise SandboxError("refusing to bind a directory inside the account data directory")
+
+
+def _is_task_worktree(mount: Path, relative: Path) -> bool:
+    """True for one git worktree, not ``worktrees/`` or a parent of several."""
+    parts = relative.parts
+    if not parts or parts[0] != "worktrees" or len(parts) not in {3, 4}:
+        return False
+    from praxis_prime.statfile import StatKind, lstat_kind
+
+    return lstat_kind(mount / ".git") in {StatKind.FILE, StatKind.DIR}
+
+
+def _path_inside(child: Path, parent: Path) -> Path | None:
+    """Relative path of ``child`` under ``parent``, or ``.`` when they are the same file.
+
+    None when ``child`` is not inside ``parent``. Device and inode are checked
+    first so a bind-mount alias matches, then the real path.
+    """
+    parent_id = _file_id(parent)
+    current = child
+    parts: list[str] = []
+    while parent_id is not None:
+        ident = _file_id(current)
+        if ident is not None and ident == parent_id:
+            if not parts:
+                return Path(".")
+            return Path(*reversed(parts))
+        nxt = current.parent
+        if nxt == current:
+            break
+        parts.append(current.name)
+        current = nxt
+    try:
+        child_real = Path(os.path.realpath(child, strict=False))
+        parent_real = Path(os.path.realpath(parent, strict=False))
+        return child_real.relative_to(parent_real)
+    except (OSError, ValueError):
+        return None
 
 
 def run_bwrap(

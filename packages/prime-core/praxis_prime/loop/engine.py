@@ -15,7 +15,12 @@ from collections.abc import AsyncIterator, Callable, Iterator, Mapping
 from pathlib import Path
 from urllib.parse import urlparse, urlunparse
 
-from praxis_prime.approvals.card import HOST_FULL_WRITE, mount_phrase
+from praxis_prime.approvals.card import (
+    HOST_DATA_DIR,
+    HOST_FULL_WRITE,
+    HOST_NEEDS_BWRAP,
+    mount_phrase,
+)
 from praxis_prime.approvals.gate import (
     ApprovalDecision,
     ApprovalGate,
@@ -421,7 +426,7 @@ class AgentLoop:
                 arguments=dict(call.arguments),
                 grant_key=verdict.grant_key,
                 sandboxed=prepared.sandboxed,
-                mount=self._mount_phrase(tool.name, prepared),
+                mount=self._mount_phrase(tool.name, prepared, call.arguments),
             )
             decision, actor = self._authorize(request)
             self._audit(
@@ -596,17 +601,28 @@ class AgentLoop:
             payload=payload,
         )
 
-    def _mount_phrase(self, tool_name: str, prepared: PreparedCall) -> str:
+    def _mount_phrase(
+        self,
+        tool_name: str,
+        prepared: PreparedCall,
+        arguments: Mapping[str, object] | None = None,
+    ) -> str:
         """Say how this command runs if it is approved.
 
         A sandboxed command is a read-only mount or a read-write mount.
-        Without bubblewrap it runs on the host, so the card says that and
-        does not describe the run as read-only.
+        Without bubblewrap, and with account or profile data on disk, the
+        card says to install bubblewrap and the command is not run. A fresh
+        install with no account data can still run on the host. That card
+        says so, and does not describe the run as read-only.
         """
         if tool_name not in {"shell", "run_command", "run_tests"}:
             return ""
         if not prepared.sandboxed:
-            return HOST_FULL_WRITE
+            from praxis_prime.policy.boundary import account_data_present
+
+            if account_data_present():
+                return HOST_NEEDS_BWRAP
+            return HOST_FULL_WRITE + self._host_data_line(arguments)
         from praxis_prime.tools.shell import bind_is_writable
 
         writable = bind_is_writable(
@@ -618,6 +634,18 @@ class AgentLoop:
             main_checkout="" if self.main_checkout is None else str(self.main_checkout),
         )
         return mount_phrase(writable)
+
+    def _host_data_line(self, arguments: Mapping[str, object] | None) -> str:
+        if not isinstance(arguments, Mapping):
+            return ""
+        command = arguments.get("command")
+        if not isinstance(command, str) or not command.strip():
+            return ""
+        from praxis_prime.policy.boundary import private_data_command
+
+        if not private_data_command(command, self.cwd):
+            return ""
+        return "\n" + HOST_DATA_DIR
 
     def _authorize(self, request: ApprovalRequest) -> tuple[ApprovalDecision, str]:
         session_token = approval_session_id.set(self.session_id)
@@ -657,7 +685,7 @@ class AgentLoop:
                 arguments=dict(arguments),
                 grant_key=f"hook:{name}:{reason[:80]}",
                 sandboxed=prepared.sandboxed,
-                mount=self._mount_phrase(name, prepared),
+                mount=self._mount_phrase(name, prepared, arguments),
             )
             decision, actor = self._authorize(request)
             self._audit(
