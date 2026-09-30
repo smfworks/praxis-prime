@@ -45,6 +45,8 @@ def main(argv: list[str] | None = None) -> int:
         return _approvals_command(args)
     if args.command == "telegram":
         return _telegram_command(args)
+    if args.command == "code":
+        return _code_command(args)
     parser.print_help()
     return 2
 
@@ -120,6 +122,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     deny = approval_commands.add_parser("deny", help="Deny a pending approval.")
     deny.add_argument("approval_id")
+
+    code = commands.add_parser(
+        "code",
+        help="Run a coding task in a git worktree. Your checkout is unchanged until you accept.",
+    )
+    code.add_argument("task", nargs="+", help="What the coding agent should do.")
+    code.add_argument("--repo", help="Git repository. Defaults to the current directory.")
+    code.add_argument("--accept", action="store_true", help="Merge the task branch locally.")
+    code.add_argument("--discard", action="store_true", help="Delete the task branch.")
+    code.add_argument("--keep", action="store_true", help="Leave the task branch. Do not merge it.")
+    _add_runtime_args(code)
 
     telegram = commands.add_parser("telegram", help="Pair the Telegram bot with your chat.")
     telegram_commands = telegram.add_subparsers(dest="telegram_command")
@@ -378,6 +391,55 @@ def _telegram_command(args: argparse.Namespace) -> int:
     print("Only the chat that sends the code becomes the owner.")
     print("The code was not written to config.toml.")
     return 0
+
+
+def _code_command(args: argparse.Namespace) -> int:
+    from praxis_prime.coding.worktree import CodingError
+    from praxis_prime.repl import noninteractive_approver, stdout_writer, terminal_approver
+    from praxis_prime.runtime import build_runtime
+
+    chosen = [name for name in ("accept", "discard", "keep") if getattr(args, name)]
+    if len(chosen) > 1:
+        print("praxis-prime code: choose only one of --accept, --discard, --keep", file=sys.stderr)
+        return 2
+    disposition = chosen[0] if chosen else None
+    interactive = disposition is None and sys.stdin.isatty()
+    err = stdout_writer(sys.stderr)
+    out = stdout_writer()
+    color = _use_color(sys.stdout)
+    if sys.stdin.isatty():
+        approver = terminal_approver(input, err, color=color)
+    else:
+        approver = noninteractive_approver(err)
+    try:
+        runtime = _runtime_from_args(args, approver, build_runtime)
+    except (ValueError, OSError) as exc:
+        print(f"praxis-prime code: {exc}", file=sys.stderr)
+        return 2
+    if args.repo:
+        runtime.cwd = Path(args.repo)
+    from praxis_prime.coding.session import run_coding_task
+
+    try:
+        result = run_coding_task(
+            " ".join(args.task),
+            runtime,
+            repo=Path(args.repo) if args.repo else None,
+            disposition=disposition,
+            read_line=input,
+            write=out,
+            interactive=interactive,
+            color=color,
+        )
+    except CodingError as exc:
+        print(f"praxis-prime code: {exc}", file=sys.stderr)
+        return 2
+    except KeyboardInterrupt:
+        print("\n(interrupted)", file=sys.stderr)
+        return 130
+    finally:
+        runtime.close()
+    return 0 if result.ok else 1
 
 
 def _config_command(explicit: str | None, *, force: bool) -> int:

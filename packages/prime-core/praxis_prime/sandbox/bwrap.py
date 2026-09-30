@@ -15,6 +15,7 @@ import shutil
 import signal
 import subprocess
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from pathlib import Path
 
 
@@ -22,11 +23,24 @@ class SandboxError(RuntimeError):
     """The sandbox could not run the command. The host shell was not used."""
 
 
+@dataclass(frozen=True, slots=True)
+class CommandStatus:
+    """Exit code plus combined output. ``code`` is the process status."""
+
+    code: int
+    output: str
+
+
 def bwrap_available() -> bool:
     return shutil.which("bwrap") is not None
 
 
-def build_bwrap_argv(command: str, cwd: Path) -> list[str]:
+def build_bwrap_argv(
+    command: str,
+    cwd: Path,
+    *,
+    ro_binds: list[tuple[str, str]] | None = None,
+) -> list[str]:
     """Return a bwrap command that runs ``command`` with network unshared."""
     work = cwd.resolve()
     argv = [
@@ -62,6 +76,9 @@ def build_bwrap_argv(command: str, cwd: Path) -> list[str]:
     for optional in ("/usr", "/bin", "/lib", "/lib64", "/etc"):
         if Path(optional).exists():
             argv.extend(["--ro-bind", optional, optional])
+    for src, dest in ro_binds or []:
+        if Path(src).exists():
+            argv.extend(["--ro-bind", src, dest])
     argv.extend(["--", "bash", "-lc", command])
     return argv
 
@@ -93,6 +110,63 @@ def run_bwrap(
         raise SandboxError(
             f"bubblewrap failed to start ({exc}); the command was not run on the host"
         ) from exc
+
+
+def run_bwrap_status(
+    command: str,
+    cwd: Path,
+    cancelled: Callable[[], bool],
+    *,
+    timeout: float = 30,
+    env: Mapping[str, str] | None = None,
+    stdin: str = "",
+) -> CommandStatus:
+    """Run ``command`` inside bubblewrap and return its exit code."""
+    if not bwrap_available():
+        raise SandboxError(
+            "bubblewrap is not available; the command was not run on the host"
+        )
+    argv = build_bwrap_argv(command, cwd)
+    source = os.environ if env is None else env
+    try:
+        return run_captured(
+            argv,
+            cwd=cwd,
+            cancelled=cancelled,
+            timeout=timeout,
+            env=scrub_env(source),
+            stdin=stdin,
+        )
+    except OSError as exc:
+        raise SandboxError(
+            f"bubblewrap failed to start ({exc}); the command was not run on the host"
+        ) from exc
+
+
+def run_host_status(
+    command: str,
+    cwd: Path,
+    cancelled: Callable[[], bool],
+    *,
+    timeout: float = 30,
+    env: Mapping[str, str] | None = None,
+    stdin: str = "",
+) -> CommandStatus:
+    """Run a command on the host and return its exit code.
+
+    Callers that use this for a shell tool must already have an approval.
+    Project hooks use it only when bubblewrap is missing, and only with a
+    scrubbed environment.
+    """
+    source = os.environ if env is None else env
+    return run_captured(
+        ["bash", "-lc", command],
+        cwd=cwd,
+        cancelled=cancelled,
+        timeout=timeout,
+        env=scrub_env(source),
+        stdin=stdin,
+    )
 
 
 def run_host_shell(
@@ -136,6 +210,58 @@ def scrub_env(source: Mapping[str, str]) -> dict[str, str]:
             continue
         cleaned[key] = value
     return cleaned
+
+
+def run_captured(
+    argv: list[str],
+    *,
+    cwd: Path,
+    cancelled: Callable[[], bool],
+    timeout: float,
+    env: dict[str, str] | None,
+    stdin: str = "",
+) -> CommandStatus:
+    """Run ``argv`` and return the exit code. Does not fall back to another command."""
+    if cancelled():
+        raise SandboxError("command cancelled")
+    proc = subprocess.Popen(
+        argv,
+        cwd=cwd,
+        env=env,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    waited = 0.0
+    try:
+        if proc.stdin is not None:
+            try:
+                proc.stdin.write(stdin)
+                proc.stdin.close()
+            except BrokenPipeError:
+                pass
+            # communicate() refuses a stdin handle that is already closed.
+            proc.stdin = None
+        while True:
+            if cancelled():
+                _kill(proc)
+                raise SandboxError("command cancelled")
+            try:
+                stdout, stderr = proc.communicate(timeout=0.2)
+                break
+            except subprocess.TimeoutExpired:
+                waited += 0.2
+                if waited >= timeout:
+                    _kill(proc)
+                    raise SandboxError(f"command timed out after {timeout:.0f}s") from None
+        code = proc.returncode if proc.returncode is not None else 1
+        output = _combine(stdout, stderr, None)
+        return CommandStatus(code=code, output=output)
+    finally:
+        if proc.poll() is None:
+            _kill(proc)
 
 
 def run_process(
