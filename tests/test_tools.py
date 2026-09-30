@@ -147,6 +147,13 @@ def test_bwrap_argv_drops_network_and_env_scrub_drops_keys(tmp_path):
     assert "echo hi" in argv
     assert "--bind" not in argv
     assert _workspace_mount(argv) == "--ro-bind"
+    home = argv[argv.index("HOME") + 1]
+    assert home == "/sandbox-home"
+    assert home != "/workspace"
+    assert argv[argv.index("GIT_CONFIG_NOSYSTEM") + 1] == "1"
+    assert argv[argv.index("GIT_CONFIG_GLOBAL") + 1] == "/dev/null"
+    assert "--tmpfs" in argv
+    assert "/sandbox-home" in argv
     cleaned = scrub_env(
         {
             "PATH": "/usr/bin",

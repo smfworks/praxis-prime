@@ -6,7 +6,9 @@ workspace is mounted read-only unless the caller has an approved write scope.
 That scope is one directory: a task worktree or the approved command's
 cwd. It is never ``$HOME`` and never the main checkout when one is named.
 Bash is started with ``--noprofile --norc`` so a login alias cannot rewrite
-an allowlisted command.
+an allowlisted command. ``HOME`` is an empty tmpfs, not the workspace, so a
+repo ``.gitconfig`` is not git's global config. System and global git
+config are disabled.
 
 If the binary is missing, callers must not run the command on the host unless
 a person has approved that command. A failed sandbox does not fall back to an
@@ -30,10 +32,15 @@ class SandboxError(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class CommandStatus:
-    """Exit code plus combined output. ``code`` is the process status."""
+    """Exit code plus combined output. ``code`` is the process status.
+
+    ``stdout`` is the raw standard output, with stderr left out. The git
+    ``--name-only -z`` probe reads that field and does not strip it.
+    """
 
     code: int
     output: str
+    stdout: str = ""
 
 
 def bwrap_available() -> bool:
@@ -102,7 +109,13 @@ def build_bwrap_argv(
         "/usr/local/bin:/usr/bin:/bin",
         "--setenv",
         "HOME",
-        "/workspace",
+        "/sandbox-home",
+        "--setenv",
+        "GIT_CONFIG_NOSYSTEM",
+        "1",
+        "--setenv",
+        "GIT_CONFIG_GLOBAL",
+        "/dev/null",
         "--setenv",
         "LANG",
         "C.UTF-8",
@@ -115,6 +128,8 @@ def build_bwrap_argv(
         "/dev",
         "--tmpfs",
         "/tmp",
+        "--tmpfs",
+        "/sandbox-home",
         mount,
         str(work),
         "/workspace",
@@ -327,7 +342,7 @@ def run_captured(
                     raise SandboxError(f"command timed out after {timeout:.0f}s") from None
         code = proc.returncode if proc.returncode is not None else 1
         output = _combine(stdout, stderr, None)
-        return CommandStatus(code=code, output=output)
+        return CommandStatus(code=code, output=output, stdout=stdout or "")
     finally:
         if proc.poll() is None:
             _kill(proc)

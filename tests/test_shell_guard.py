@@ -30,6 +30,7 @@ from praxis_prime.tools.shellclass import (
     ShellClass,
     build_name_only_command,
     classify_shell,
+    command_for_sandbox,
 )
 
 # Delete and overwrite forms that the old denylist did not force into approval
@@ -396,6 +397,136 @@ def test_name_only_backstop_catches_a_fooled_classifier(tmp_path: Path, monkeypa
         assert prepared.force_approval is True, command
     allowed = classify_command("git diff note.txt", sandbox_ready=True, workspace=tmp_path)
     assert allowed.force_approval is False
+
+
+def test_repo_git_drivers_are_not_auto_approved(tmp_path: Path):
+    (tmp_path / "note.txt").write_text("alpha\n", encoding="utf-8")
+    _track_note(tmp_path)
+    config = tmp_path / ".git" / "config"
+    original = config.read_text(encoding="utf-8")
+    hardened = command_for_sandbox("git status")
+    assert "core.fsmonitor=false" in hardened
+    assert "--no-ext-diff" not in hardened
+    diff = command_for_sandbox("git diff note.txt")
+    assert "--no-ext-diff" in diff
+    assert "--no-textconv" in diff
+    assert "diff.external=" in diff
+
+    def ask(command: str) -> bool:
+        prepared = classify_command(command, sandbox_ready=True, workspace=tmp_path)
+        return prepared.force_approval is True
+
+    config.write_text(original + "\n[core]\n\tfsmonitor = ./pwn.sh\n", encoding="utf-8")
+    assert ask("git status")
+    assert ask("git diff note.txt")
+    assert ask("git diff --stat")
+    config.write_text(original + "\n[diff]\n\texternal = ./pwn.sh\n", encoding="utf-8")
+    assert ask("git diff note.txt")
+    config.write_text(
+        original + '\n[diff "leak"]\n\ttextconv = ./pwn.sh\n\tcommand = ./pwn.sh\n',
+        encoding="utf-8",
+    )
+    assert ask("git diff note.txt")
+    config.write_text(original + '\n[filter "secret"]\n\tclean = ./pwn.sh\n', encoding="utf-8")
+    assert ask("git status")
+    config.write_text(original + "\n[include]\n\tpath = ../other\n", encoding="utf-8")
+    assert ask("git status")
+    config.write_text(original, encoding="utf-8")
+    (tmp_path / ".gitattributes").write_text("* diff=leak\n*.bin filter=secret\n", encoding="utf-8")
+    assert ask("git diff note.txt")
+    assert ask("git diff --stat")
+    status = classify_command("git status", sandbox_ready=True, workspace=tmp_path)
+    assert status.force_approval is False
+
+
+def test_repo_git_config_does_not_run_inside_bwrap(tmp_path: Path):
+    if not _live_bwrap():
+        return
+    sentinel = "SENTINEL-SECRET-VALUE"
+    (tmp_path / "note.txt").write_text("alpha\n", encoding="utf-8")
+    (tmp_path / "secrets.env").write_text(sentinel + "\n", encoding="utf-8")
+    script = tmp_path / "pwn.sh"
+    script.write_text(
+        "#!/bin/sh\necho PWNED\ncat secrets.env\n",
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+    (tmp_path / ".gitconfig").write_text(
+        "\n".join(
+            [
+                "[core]",
+                "    fsmonitor = ./pwn.sh",
+                "[diff]",
+                "    external = ./pwn.sh",
+                '[diff "leak"]',
+                "    textconv = ./pwn.sh",
+                "    command = ./pwn.sh",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / ".config" / "git").mkdir(parents=True)
+    (tmp_path / ".config" / "git" / "config").write_text(
+        (tmp_path / ".gitconfig").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    (tmp_path / ".gitattributes").write_text("* diff=leak\n", encoding="utf-8")
+    _git("init", "-q", cwd=tmp_path)
+    _git(
+        "add",
+        "--",
+        "note.txt",
+        "secrets.env",
+        "pwn.sh",
+        ".gitconfig",
+        ".gitattributes",
+        ".config/git/config",
+        cwd=tmp_path,
+    )
+    _git(
+        "-c",
+        "user.email=tester@example.com",
+        "-c",
+        "user.name=tester",
+        "commit",
+        "-q",
+        "-m",
+        "init",
+        cwd=tmp_path,
+    )
+    (tmp_path / "note.txt").write_text("beta\n", encoding="utf-8")
+    commands = ("git diff note.txt", "git status", "git diff --stat")
+    for command in commands:
+        output = run_bwrap(command_for_sandbox(command), tmp_path, lambda: False)
+        assert sentinel not in output, command
+        assert "PWNED" not in output, command
+    diff = classify_command("git diff note.txt", sandbox_ready=True, workspace=tmp_path)
+    assert diff.force_approval is True
+    status = classify_command("git status", sandbox_ready=True, workspace=tmp_path)
+    assert status.force_approval is False
+    ran = execute_shell({"command": "git status"}, _ctx(tmp_path))
+    assert sentinel not in ran
+    assert "PWNED" not in ran
+
+    config = tmp_path / ".git" / "config"
+    config.write_text(
+        config.read_text(encoding="utf-8") + "\n[core]\n\tfsmonitor = ./pwn.sh\n",
+        encoding="utf-8",
+    )
+    for command in commands:
+        prepared = classify_command(command, sandbox_ready=True, workspace=tmp_path)
+        assert prepared.force_approval is True, command
+        try:
+            execute_shell({"command": command}, _ctx(tmp_path))
+        except RuntimeError as exc:
+            assert "not run" in str(exc)
+        else:
+            raise AssertionError(command)
+        output = run_bwrap(command_for_sandbox(command), tmp_path, lambda: False)
+        assert sentinel not in output, command
+        assert "PWNED" not in output, command
+    _note_live_bwrap("repo git config did not run")
 
 
 def test_name_only_backstop_asks_when_the_probe_fails(tmp_path: Path, monkeypatch):

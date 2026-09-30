@@ -27,7 +27,12 @@ from praxis_prime.sandbox.bwrap import (
     run_host_shell,
 )
 from praxis_prime.tools.registry import PreparedCall, Risk, ToolContext
-from praxis_prime.tools.shellclass import GitProbe, classify_shell, listed_paths_are_approved
+from praxis_prime.tools.shellclass import (
+    GitProbe,
+    classify_shell,
+    command_for_sandbox,
+    listed_paths_are_approved,
+)
 
 _GIT_PROBE_TIMEOUT = 5.0
 
@@ -109,19 +114,18 @@ def _not_cancelled() -> bool:
 
 
 def _name_only_paths(status: CommandStatus) -> list[str] | None:
+    """Split a ``git --name-only -z`` stdout. Paths are kept as git printed them."""
     if status.code not in (0, 1):
         return None
-    found: list[str] = []
-    for raw in status.output.splitlines():
-        line = raw.strip()
-        if not line or line == "(no output)" or line.startswith("(exit"):
-            continue
-        if line.startswith(("fatal:", "error:")):
-            return None
-        if line.startswith("warning:"):
-            continue
-        found.append(line)
-    return found
+    raw = status.stdout
+    if not raw:
+        return []
+    parts = raw.split("\0")
+    if parts[-1] == "":
+        parts.pop()
+    if any(part == "" for part in parts):
+        return None
+    return parts
 
 
 def execute_shell(arguments: Mapping[str, object], context: ToolContext) -> str:
@@ -141,10 +145,11 @@ def execute_shell(arguments: Mapping[str, object], context: ToolContext) -> str:
     writable = _writable(context, prepared)
     scope = Path(context.write_scope) if context.write_scope else cwd
     main = Path(context.main_checkout) if context.main_checkout else None
+    ran = command if prepared.force_approval else command_for_sandbox(command)
     try:
         if bwrap_available():
             result = run_bwrap(
-                command,
+                ran,
                 cwd,
                 context.cancelled,
                 timeout=timeout,
@@ -167,7 +172,7 @@ def execute_shell(arguments: Mapping[str, object], context: ToolContext) -> str:
                 "bubblewrap is not available and this command was not approved "
                 "for the host; it was not run"
             )
-        result = run_host_shell(command, cwd, context.cancelled, timeout=timeout)
+        result = run_host_shell(ran, cwd, context.cancelled, timeout=timeout)
         _audit_mount(context, command, prepared, mount="host", ran=True, decision="allow")
         return result
     except SandboxError as exc:

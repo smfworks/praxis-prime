@@ -13,7 +13,9 @@ non-secret files (or ``--stat`` / ``--name-only`` / ``--name-status``),
 including ``python -m pytest``). A directory, ``.``, or other on-disk non-file
 beside those files asks unless a summary flag is present. An operand that
 starts with ``:`` is a pathspec, allowlisted only when it is an existing
-non-secret file. Secret filenames use
+non-secret file. A repo whose ``.git/config`` (or an include it names) sets
+a diff driver, a filter, or ``core.fsmonitor``, and a ``.gitattributes``
+that assigns ``diff=`` or ``filter=``, is not allowlisted. Secret filenames use
 :func:`praxis_prime.policy.boundary.is_secret_path`, including git pathspecs.
 Globs, ``rev:path``, case-folding magic, and exclude or stacked pathspec
 magic are not allowlisted.
@@ -162,6 +164,23 @@ _GIT_LOG = frozenset(
     }
 )
 _SUMMARY_FLAGS = frozenset({"--stat", "--name-only", "--name-status"})
+# Command-line config that wins over .git/config for the forms -c can name.
+# fsmonitor, external diff, and hooks still need the repo-config check below:
+# a diff driver or filter is not cleared by one -c key.
+_GIT_CONFIG_LOCKS = (
+    "core.fsmonitor=false",
+    "core.hooksPath=/dev/null",
+    "diff.external=",
+    "core.pager=cat",
+    "core.quotePath=true",
+    "diff.noprefix=false",
+    "diff.relative=false",
+)
+_GIT_FALSE_VALUES = frozenset({"", "0", "false", "no", "off"})
+_CONFIG_SECTION = re.compile(
+    r'^\[\s*([A-Za-z0-9-]+)(?:\s+"([^"]*)")?\s*\]\s*(?:[#;].*)?$'
+)
+_SEPARATORS = frozenset({"&&", "||", "|", ";"})
 _SAFE_PATHSPEC_MAGIC = frozenset({"literal", "top"})
 _PYTEST_FLAGS = frozenset(
     {"--collect-only", "--co", "-q", "--quiet", "--disable-warnings"}
@@ -533,20 +552,232 @@ def _git(tokens: list[str], workspace: Path | None) -> _GitView:
                 saw_nonfile = True
         index += 1
     if sub != "diff":
-        return _GitView(True)
+        return _allow_git(True, workspace, sub)
     if saw_nonfile and not summary:
         return _GitView(False)
     if not pathspecs:
-        return _GitView(summary)
+        return _allow_git(summary, workspace, sub)
     if not all(_is_explicit_safe_file(item, workspace) for item in pathspecs):
         return _GitView(False)
     if summary:
-        return _GitView(True)
+        return _allow_git(True, workspace, sub)
     probe = build_name_only_command(shlex.join(tokens))
     if probe is None:
         return _GitView(False)
     approved = frozenset(_normalized_path(item, workspace) for item in pathspecs)
-    return _GitView(True, GitProbe(probe, approved))
+    return _allow_git(True, workspace, sub, GitProbe(probe, approved))
+
+
+def _allow_git(
+    allowed: bool,
+    workspace: Path | None,
+    sub: str,
+    probe: GitProbe | None = None,
+) -> _GitView:
+    if not allowed:
+        return _GitView(False)
+    if workspace is not None and _repo_git_is_unsafe(workspace, sub):
+        return _GitView(False)
+    return _GitView(True, probe)
+
+
+def _git_config_args() -> list[str]:
+    args: list[str] = []
+    for item in _GIT_CONFIG_LOCKS:
+        args.extend(["-c", item])
+    return args
+
+
+def harden_git_tokens(tokens: list[str]) -> list[str]:
+    """Prefix an allowlisted git invocation so repo config cannot run a program."""
+    if not tokens or tokens[0] != "git":
+        return list(tokens)
+    index = 1
+    while index < len(tokens) and tokens[index].startswith("-") and tokens[index] != "--":
+        index += 1
+    locks = _git_config_args()
+    if index >= len(tokens):
+        return ["git", *locks, *tokens[1:]]
+    sub = tokens[index]
+    rebuilt = ["git", *locks, *tokens[1:index], sub]
+    if sub in {"diff", "log", "show"}:
+        rebuilt.extend(["--no-ext-diff", "--no-textconv"])
+    rebuilt.extend(tokens[index + 1 :])
+    return rebuilt
+
+
+def command_for_sandbox(command: str) -> str:
+    """Rewrite allowlisted git segments. Other commands are unchanged."""
+    try:
+        tokens = shlex.split(command, posix=True)
+    except ValueError:
+        return command
+    out: list[str] = []
+    index = 0
+    while index < len(tokens):
+        if tokens[index] in _SEPARATORS:
+            out.append(tokens[index])
+            index += 1
+            continue
+        if tokens[index] != "git":
+            while index < len(tokens) and tokens[index] not in _SEPARATORS:
+                out.append(tokens[index])
+                index += 1
+            continue
+        start = index
+        index += 1
+        while index < len(tokens) and tokens[index] not in _SEPARATORS:
+            index += 1
+        out.extend(harden_git_tokens(tokens[start:index]))
+    return shlex.join(out)
+
+
+def _repo_git_is_unsafe(workspace: Path, sub: str) -> bool:
+    """True when repo config or attributes can still run a program.
+
+    ``-c`` cannot clear every diff driver or filter. An include is refused
+    outright: the file it pulls in is not auto-approved either.
+    """
+    if _git_config_is_hostile(workspace):
+        return True
+    if sub in {"diff", "log", "show"} and _attributes_assign_driver(workspace):
+        return True
+    return False
+
+
+def _git_config_path(workspace: Path) -> Path | None:
+    git = workspace / ".git"
+    try:
+        if git.is_dir():
+            return git / "config"
+        if not git.is_file():
+            return None
+        text = git.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    for line in text.splitlines():
+        if not line.startswith("gitdir:"):
+            continue
+        raw = line.split(":", 1)[1].strip()
+        gitdir = Path(raw)
+        if not gitdir.is_absolute():
+            gitdir = (workspace / gitdir).resolve()
+        return gitdir / "config"
+    return None
+
+
+def _git_config_is_hostile(workspace: Path) -> bool:
+    path = _git_config_path(workspace)
+    if path is None:
+        return False
+    return _config_file_is_hostile(path, set(), 0)
+
+
+def _config_file_is_hostile(path: Path, seen: set[str], depth: int) -> bool:
+    if depth > 8:
+        return True
+    try:
+        key = str(path.resolve())
+    except OSError:
+        return True
+    if key in seen:
+        return True
+    seen.add(key)
+    try:
+        if not path.is_file() or path.stat().st_size > 1_000_000:
+            return path.is_file()
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    section = ""
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith(("#", ";")):
+            continue
+        if line.startswith("["):
+            parsed = _config_section(line)
+            if parsed is None:
+                return True
+            section, _subsection = parsed
+            if section in {"include", "includeif"}:
+                return True
+            continue
+        if line.endswith("\\"):
+            return True
+        name, _, value = line.partition("=")
+        name = name.strip().lower()
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+            value = value[1:-1]
+        if _config_key_is_hostile(section, name, value):
+            return True
+    return False
+
+
+def _config_section(line: str) -> tuple[str, str] | None:
+    match = _CONFIG_SECTION.match(line.strip())
+    if match is None:
+        return None
+    return match.group(1).lower(), match.group(2) or ""
+
+
+def _config_key_is_hostile(section: str, key: str, value: str) -> bool:
+    if section in {"include", "includeif"}:
+        return True
+    if section == "filter" and key:
+        return True
+    lowered = value.lower()
+    if section == "core" and key == "fsmonitor":
+        return lowered not in _GIT_FALSE_VALUES
+    if section == "diff" and key in {"external", "command", "textconv"}:
+        return lowered not in _GIT_FALSE_VALUES
+    return False
+
+
+def _attributes_assign_driver(workspace: Path) -> bool:
+    info: list[Path] = []
+    git_config = _git_config_path(workspace)
+    if git_config is not None:
+        info.append(git_config.parent / "info" / "attributes")
+    for path in info:
+        if path.is_file() and _file_assigns_driver(path):
+            return True
+    seen = 0
+    try:
+        for path in workspace.rglob(".gitattributes"):
+            if ".git" in path.parts:
+                continue
+            seen += 1
+            if seen > 500 or _file_assigns_driver(path):
+                return True
+    except OSError:
+        return True
+    return False
+
+
+def _file_assigns_driver(path: Path) -> bool:
+    try:
+        if path.stat().st_size > 1_000_000:
+            return True
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    return any(_attribute_line_assigns_driver(line) for line in text.splitlines())
+
+
+def _attribute_line_assigns_driver(line: str) -> bool:
+    text = line.strip()
+    if not text or text.startswith("#"):
+        return False
+    try:
+        parts = shlex.split(text, posix=True)
+    except ValueError:
+        return True
+    for part in parts[1:]:
+        for prefix in ("diff=", "filter="):
+            if part.startswith(prefix) and part[len(prefix) :]:
+                return True
+    return False
 
 
 def build_name_only_command(segment: str) -> str | None:
@@ -600,7 +831,16 @@ def build_name_only_command(segment: str) -> str | None:
         content = True
     if not content:
         return None
-    parts = ["git", "--no-optional-locks", sub, "--name-only"]
+    parts = [
+        "git",
+        *_git_config_args(),
+        "--no-optional-locks",
+        sub,
+        "--no-ext-diff",
+        "--no-textconv",
+        "--name-only",
+        "-z",
+    ]
     if cached:
         parts.append("--cached")
     parts.extend(positionals)
