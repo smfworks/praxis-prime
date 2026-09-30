@@ -1,11 +1,12 @@
-"""Session memory.
+"""Session memory and tiers 2–4.
 
-The MVP stores the working transcript in SQLite. Episodic search, semantic
-memory, and procedural skills are not implemented.
+Tier 1 is the session transcript (:class:`SessionStore`). Profile facts,
+episodic summaries, and semantic recall live in :class:`MemoryStore`.
 
-TODO: ARCHITECTURE §10 for tiers 2–4.
+ARCHITECTURE §10. Skills are files, not memory rows (ARCHITECTURE §9).
 """
 
 from praxis_prime.memory.store import SessionStore
+from praxis_prime.memory.tiers import MemoryStore
 
-__all__ = ["SessionStore"]
+__all__ = ["MemoryStore", "SessionStore"]

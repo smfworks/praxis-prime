@@ -62,7 +62,12 @@ hash-chained audit idea, and the public Claude Code hook event names
 Skeptic, and Forecaster are SMF Swarm 2.0's; the lens text in
 `praxis_prime.decide.judges` was written here and was not copied.
 The WebSocket handshake is the public RFC 6455 framing, written here, not
-taken from another project's socket stack. Nothing was vendored. When a
+taken from another project's socket stack. The `SKILL.md` parser reads
+`name` and `description` frontmatter so a folder written for Claude Code,
+Hermes, or OpenClaw still loads. That parser was written here. OpenClaw's
+`skills/skill-creator` tree was not copied. Cron matching follows the
+public five-field shape, including the Vixie day-of-month / day-of-week
+rule, and was also written here. Nothing was vendored. When a
 file is later copied:
 
 1. Record the source repo, path, commit, and license in the table below.

@@ -46,6 +46,7 @@ from praxis_prime.host import Host
 from praxis_prime.observe import JsonLogger
 from praxis_prime.paths import config_dir, data_dir, runtime_dir, state_dir
 from praxis_prime.runtime import build_runtime
+from praxis_prime.scheduler.service import scheduler_for
 from praxis_prime.service import daemon_exec
 
 
@@ -156,6 +157,12 @@ def serve(
 
     queue.on_pending = on_pending
     queue.on_resolved = on_resolved
+    scheduler = None
+
+    def deliver_result(text: str) -> None:
+        if adapter is not None:
+            adapter.send_owner(text)
+
     try:
         server.start()
     except OSError as exc:
@@ -173,6 +180,15 @@ def serve(
         started_at=started,
     )
     logger.info("listen", host="127.0.0.1", port=server.bound_port)
+    scheduler = scheduler_for(
+        runtime,
+        deliver=deliver_result,
+        logger=logger,
+        lane=agent._lock,
+    )
+    server.routine_fire = scheduler.fire_http
+    scheduler.start()
+    logger.info("routines_started")
     if adapter is not None:
         adapter.start()
     else:
@@ -182,7 +198,11 @@ def serve(
             pass
     finally:
         logger.info("shutdown")
+        if scheduler is not None:
+            scheduler.request_stop()
         queue.deny_all(actor="shutdown")
+        if scheduler is not None:
+            scheduler.join()
         if adapter is not None:
             adapter.stop()
         agent.close()

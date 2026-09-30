@@ -38,6 +38,13 @@ class Settings:
     max_iterations: int
     mode: str
     dials: dict[str, str]
+    timezone: str = "America/New_York"
+    embed_spec: str = "local:bge-small"
+    memory_redact: str = "secrets"
+    memory_profile_cap: int = 20
+    memory_profile_chars: int = 4000
+    memory_half_life_days: float = 14.0
+    memory_episodic_ttl_days: int = 90
 
     def __repr__(self) -> str:
         return (
@@ -108,6 +115,7 @@ def load_settings(
         if dial_id in dials and position in {"off", "monitor", "enforce"}:
             dials[str(dial_id)] = str(position)
 
+    memory = _table(file_data.get("memory"))
     mode = _first(environ.get("PRAXIS_PRIME_MODE"), _str(core.get("mode")), "ask")
     if mode not in _MODES:
         mode = "ask"
@@ -165,6 +173,13 @@ def load_settings(
         ),
         mode=mode,
         dials=dials,
+        timezone=_first(_str(core.get("timezone")), "America/New_York"),
+        embed_spec=_first(_str(models.get("embed")), "local:bge-small"),
+        memory_redact=_redact_mode(_first(_str(memory.get("redact")), "secrets")),
+        memory_profile_cap=_bounded_int(_str(memory.get("profile_cap")), 20, 1, 200),
+        memory_profile_chars=_bounded_int(_str(memory.get("profile_chars")), 4000, 200, 100_000),
+        memory_half_life_days=_positive_float(_str(memory.get("episodic_half_life_days")), 14.0),
+        memory_episodic_ttl_days=_bounded_int(_str(memory.get("episodic_ttl_days")), 90, 1, 3650),
     )
 
 
@@ -185,6 +200,32 @@ def _first(*values: str | None) -> str:
         if value:
             return value
     return ""
+
+
+def _redact_mode(value: str) -> str:
+    if value in {"off", "secrets", "pii"}:
+        return value
+    return "secrets"
+
+
+def _bounded_int(value: str, default: int, low: int, high: int) -> int:
+    try:
+        number = int(value)
+    except ValueError:
+        return default
+    if number < low:
+        return default
+    return min(number, high)
+
+
+def _positive_float(value: str, default: float) -> float:
+    try:
+        number = float(value)
+    except ValueError:
+        return default
+    if number <= 0:
+        return default
+    return number
 
 
 def _positive_int(value: str) -> int:

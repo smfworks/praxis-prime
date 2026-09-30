@@ -19,6 +19,7 @@ from pathlib import Path
 from praxis_prime import __version__
 from praxis_prime.config import describe_write, resolve_config_dir, write_default_config
 from praxis_prime.doctor import format_report, report_exit_code, run_system_doctor
+from praxis_prime.user_commands import add_user_commands, dispatch_user_command
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -49,6 +50,9 @@ def main(argv: list[str] | None = None) -> int:
         return _code_command(args)
     if args.command == "decide":
         return _decide_command(args)
+    handled = dispatch_user_command(args)
+    if handled is not None:
+        return handled
     parser.print_help()
     return 2
 
@@ -148,6 +152,7 @@ def build_parser() -> argparse.ArgumentParser:
         "pair",
         help="Print a one-time code. Send it to the bot as /pair CODE.",
     )
+    add_user_commands(commands)
     return parser
 
 

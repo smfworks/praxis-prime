@@ -45,11 +45,13 @@ class FakeHost:
         session_id: str | None = None,
         untrusted: bool = False,
         source: str = "channel",
+        channel: str = "",
         on_event: object = None,
     ) -> TurnResult:
         del session_id, on_event
         assert untrusted is True
         assert source == "telegram"
+        assert channel == "telegram"
         self.texts.append(text)
         return TurnResult(session_id="sess", text="ok", error=None, cancelled=False)
 

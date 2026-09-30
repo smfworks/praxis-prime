@@ -114,6 +114,14 @@ def default_config_document() -> dict[str, object]:
             "approval_ttl_seconds": 900,
         },
         "budgets": {"daily_usd": 5.0, "per_task_usd": 1.0},
+        "memory": {
+            "redact": "secrets",
+            "profile_cap": 20,
+            "profile_chars": 4000,
+            "episodic_half_life_days": 14,
+            "episodic_ttl_days": 90,
+        },
+        "routines": {"min_interval_seconds": 60, "max_iterations": 20},
     }
 
 

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import re
-from collections.abc import AsyncIterator, Iterator, Mapping
+from collections.abc import AsyncIterator, Callable, Iterator, Mapping
 from pathlib import Path
 
 from praxis_prime.approvals.gate import (
@@ -26,7 +26,7 @@ from praxis_prime.decide.screen import ActionScreener
 from praxis_prime.loop.control import TurnControl
 from praxis_prime.loop.events import LoopEvent, StatusEvent, TurnEnded
 from praxis_prime.loop.hooks import HookDecision, HookResult, LoopHooks
-from praxis_prime.loop.prompt import SYSTEM_PROMPT, fence_untrusted
+from praxis_prime.loop.prompt import FENCE_END, SYSTEM_PROMPT, fence_untrusted
 from praxis_prime.memory.store import SessionStore
 from praxis_prime.policy.engine import HookPoint, PolicyContext, PolicyEngine
 from praxis_prime.router.router import ModelRouter
@@ -67,6 +67,8 @@ class AgentLoop:
         session_id: str | None = None,
         hooks: LoopHooks | None = None,
         screener: ActionScreener | None = None,
+        recall_for: Callable[[str], str] | None = None,
+        on_turn_end: Callable[[str, str], None] | None = None,
     ) -> None:
         self.router = router
         self.registry = registry
@@ -83,6 +85,9 @@ class AgentLoop:
         self.session_id = session_id
         self.hooks = hooks
         self.screener = screener
+        self.recall_for = recall_for
+        self.on_turn_end = on_turn_end
+        self._turn_user = ""
 
     def run_turn(
         self,
@@ -91,6 +96,7 @@ class AgentLoop:
     ) -> Iterator[LoopEvent]:
         """Run one user turn, yielding text and timeline events as they happen."""
         control = control or TurnControl()
+        self._turn_user = user_text
         self._ingress(user_text)
         self._add_user(user_text)
         if self.session_id and self.store is not None:
@@ -327,8 +333,11 @@ class AgentLoop:
             )
         )
         body = raw if len(raw) <= _OUTPUT_LIMIT else raw[:_OUTPUT_LIMIT] + "\n…[truncated]"
-        fenced = fence_untrusted(body, source=tool.name, tool=tool.name)
-        self._add_tool(call.id, fenced)
+        if tool.trusted_output:
+            shown = body.replace(FENCE_END, "<<<END UNTRUSTED (quoted)>>>")
+        else:
+            shown = fence_untrusted(body, source=tool.name, tool=tool.name)
+        self._add_tool(call.id, shown)
         self._audit(
             "tool_call",
             f"{tool.name} {'ok' if ok else 'error'}",
@@ -343,8 +352,12 @@ class AgentLoop:
 
     def _add_user(self, text: str) -> None:
         content = text
+        if self.recall_for is not None:
+            extra = self.recall_for(text)
+            if extra:
+                content = f"{extra}\n\n{text}"
         if self.preamble and not self.history:
-            content = f"{self.preamble}\n\n{text}"
+            content = f"{self.preamble}\n\n{content}"
         if self.history and self.history[-1].role == "user":
             previous = self.history[-1]
             merged = ChatMessage(role="user", content=previous.content + "\n\n" + content)
@@ -460,6 +473,15 @@ class AgentLoop:
         cancelled: bool = False,
         error: str | None = None,
     ) -> Iterator[LoopEvent]:
+        if not cancelled and self.on_turn_end is not None:
+            try:
+                self.on_turn_end(self._turn_user, text)
+            except Exception as exc:
+                self._audit(
+                    "memory_error",
+                    "episodic write failed",
+                    {"error": type(exc).__name__},
+                )
         if not cancelled and self.hooks is not None:
             try:
                 result = self.hooks.on_finish(text)

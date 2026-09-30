@@ -1,6 +1,6 @@
 # Using Praxis Prime
 
-This milestone runs the agent loop in a loopback daemon and in the terminal, plus a local Decision Engine. Compliance dials still do nothing while they are off. The approval pre-screener is off until you set `decide.prescreen`. The TUI and web UI are not in this build.
+This milestone runs the agent loop in a loopback daemon and in the terminal, plus a local Decision Engine, saved routines, memory tiers, and skills. Compliance dials still default to off. The approval pre-screener is off until you set `decide.prescreen`. The TUI and web UI are not in this build.
 
 ## Install
 
@@ -192,7 +192,7 @@ Precedence, lowest first:
 
 A directory closer to the working directory outranks the repo root. An override file replaces `AGENTS.md` in that same directory only.
 
-The prompt also gets a short file tree and a keyword search for files that overlap the task. There is no embedding index in this build.
+The prompt also gets a short file tree and a keyword search for files that overlap the task. Coding mode does not build an embedding index of the repo. Semantic memory is a separate store; see [MEMORY.md](MEMORY.md).
 
 ### Hooks
 
@@ -226,6 +226,42 @@ praxis-prime decide report
 
 Every decision is appended to the hash-chained audit log. Dial rules stay quiet while every dial is off.
 
+## Routines
+
+`praxis-primed` runs saved prompts. See [ROUTINES.md](ROUTINES.md).
+
+```bash
+praxis-prime routines add --name morning --prompt "Draft the brief." --cron "0 8 * * *"
+praxis-prime routines list
+praxis-prime routines history
+```
+
+Triggers are cron (including `@every`), an interval, a file watch, or `POST /v1/routines/<id>/fire` with the gateway bearer token. The minimum gap is one minute. A missed run is skipped or caught up once (`--missed skip` or `--missed once`). Always-ask actions inside a daemon run wait on the approval queue and on Telegram when the bot is paired. If nobody answers before the TTL, the action is denied. `routines run` from the CLI denies those actions immediately.
+
+## Memory
+
+Profile facts are copied into the prompt. Past sessions become a short episodic summary. `recall` searches with BM25 unless `models.embed` is an Ollama model. See [MEMORY.md](MEMORY.md).
+
+```bash
+praxis-prime memory list
+praxis-prime memory search "project notes"
+praxis-prime memory export
+```
+
+Secrets are redacted before a write. HIPAA, FERPA, and GDPR still default to off, and an off dial adds no extra rule.
+
+## Skills
+
+`SKILL.md` folders are discovered from the project, the config directory, `~/.agents/skills`, and the bundled examples. The prompt lists names and descriptions. The body loads when the agent calls `use_skill`. See [SKILLS.md](SKILLS.md).
+
+```bash
+praxis-prime skills list
+praxis-prime skills show morning-brief
+praxis-prime skills install ./some-skill
+```
+
+A git URL is cloned only after you confirm it, and only with `git clone --depth 1`. Install does not run scripts.
+
 ## Not in this milestone
 
-MCP, skills, semantic memory (including a coding embedding index), regulatory dial enforcement beyond the Tier 0 detectors, the TUI, and the web UI are still stubs. ONNX classifiers, parallel jury calls, nightly recalibration, and the decision eval suites are not in this build. Per-hunk diff review, the `auto` coding classifier, background cloud coding, Ed25519 device pairing, an approval Edit button, and channels other than Telegram are not either. See [ARCHITECTURE.md](ARCHITECTURE.md) §29 for the rest of the roadmap.
+MCP, a coding-mode embedding index of the repo, regulatory dial enforcement beyond redaction and retention windows, the TUI, and the web UI are still stubs. ONNX classifiers, parallel jury calls, nightly recalibration, and the decision eval suites are not in this build. Per-hunk diff review, the `auto` coding classifier, background cloud coding, Ed25519 device pairing, an approval Edit button, and channels other than Telegram are not either. Natural-language cron, FTS5, sqlite-vec, skill security grading, and a skill hub lockfile are later work. See [ARCHITECTURE.md](ARCHITECTURE.md) §29 for the rest of the roadmap.
