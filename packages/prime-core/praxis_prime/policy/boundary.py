@@ -102,8 +102,12 @@ def _profile(
     return _BrowserProfile(scan=scan, deny=prefix)
 
 
-# Native ``~/.config`` names use their on-disk spelling. Snap and flatpak
-# rows deny the whole app prefix and scan the profile directory under it.
+# Native ``~/.config`` names use their on-disk spelling. Snap rows scan and
+# deny the whole ``snap/<app>`` tree: Brave, Vivaldi, and Opera keep the
+# profile at ``<rev>/.config/<name>/``, and ``current`` is a symlink to that
+# revision. Chromium and Firefox profiles under ``common/`` are inside the
+# same prefix. Flatpak rows deny the app config prefix and scan the profile
+# directory under it.
 _BROWSER_PROFILES: tuple[_BrowserProfile, ...] = (
     _profile((".config", "gcloud")),
     _profile((".config", "google-chrome")),
@@ -119,11 +123,11 @@ _BROWSER_PROFILES: tuple[_BrowserProfile, ...] = (
     _profile((".config", "opera-beta")),
     _profile((".config", "vivaldi")),
     _profile((".config", "vivaldi-snapshot")),
-    _profile(("snap", "chromium", "common", "chromium"), ("snap", "chromium")),
-    _profile(("snap", "firefox", "common", ".mozilla"), ("snap", "firefox")),
-    _profile(("snap", "brave", "common"), ("snap", "brave")),
-    _profile(("snap", "opera", "common"), ("snap", "opera")),
-    _profile(("snap", "vivaldi", "common"), ("snap", "vivaldi")),
+    _profile(("snap", "chromium")),
+    _profile(("snap", "firefox")),
+    _profile(("snap", "brave")),
+    _profile(("snap", "opera")),
+    _profile(("snap", "vivaldi")),
     _profile(
         (".var", "app", "com.google.Chrome", "config", "google-chrome"),
         (".var", "app", "com.google.Chrome", "config"),
@@ -678,20 +682,63 @@ def _components_secret(parts: Sequence[str]) -> bool:
             return True
         if part == ".local" and nxt == "share" and "keyrings" in lower[index + 2 :]:
             return True
+    if _xdg_config_browser(lower):
+        return True
     return _home_browser_prefix(lower)
+
+
+def _path_part_prefixes(path: Path) -> tuple[tuple[str, ...], ...]:
+    """Lowercased parts of ``path`` and of ``path.resolve()``, without duplicates."""
+    found: list[tuple[str, ...]] = []
+    seen: set[tuple[str, ...]] = set()
+    candidates = [path]
+    try:
+        candidates.append(path.resolve(strict=False))
+    except (OSError, RuntimeError, ValueError):
+        pass
+    for candidate in candidates:
+        parts = tuple(part.lower() for part in candidate.parts)
+        if parts and parts not in seen:
+            seen.add(parts)
+            found.append(parts)
+    return tuple(found)
 
 
 def _home_browser_prefix(parts: Sequence[str]) -> bool:
     """True for ``$HOME/snap/<browser>`` and ``$HOME/.var/app/<id>/...`` only.
 
-    A workspace file such as ``ws/snap/firefox/notes.md`` is not under
-    ``$HOME`` and is not a browser profile.
+    Compares both ``Path.home()`` and ``Path.home().resolve()``, so a home
+    that is a symlink (``/home`` -> ``/var/home``) still matches. A workspace
+    file such as ``ws/snap/firefox/notes.md`` is not under ``$HOME``.
     """
-    home = tuple(part.lower() for part in Path.home().parts)
-    if len(parts) < len(home) or parts[: len(home)] != home:
+    for home in _path_part_prefixes(Path.home()):
+        if len(parts) < len(home) or parts[: len(home)] != home:
+            continue
+        relative = parts[len(home) :]
+        if any(relative[: len(prefix)] == prefix for prefix in _HOME_BROWSER_PREFIXES):
+            return True
+    return False
+
+
+def _xdg_config_browser(parts: Sequence[str]) -> bool:
+    """True when ``parts`` is a native browser dir under ``$XDG_CONFIG_HOME``.
+
+    Unset ``XDG_CONFIG_HOME`` stays on the ``~/.config/<name>`` rows. A set
+    value is checked both as given and resolved.
+    """
+    raw = os.environ.get("XDG_CONFIG_HOME")
+    if not raw:
         return False
-    relative = parts[len(home) :]
-    return any(relative[: len(prefix)] == prefix for prefix in _HOME_BROWSER_PREFIXES)
+    try:
+        prefixes = _path_part_prefixes(Path(raw).expanduser())
+    except (OSError, RuntimeError, ValueError):
+        return False
+    for prefix in prefixes:
+        if len(parts) <= len(prefix) or parts[: len(prefix)] != prefix:
+            continue
+        if parts[len(prefix)] in _BROWSER_CONFIG:
+            return True
+    return False
 
 
 def _special_file(path: Path) -> bool:
@@ -699,6 +746,24 @@ def _special_file(path: Path) -> bool:
     if posix == "/etc/shadow":
         return True
     return _PROC_ENVIRON.match(posix) is not None
+
+
+def _xdg_browser_roots(home: Path) -> list[Path]:
+    """Native browser dirs under ``$XDG_CONFIG_HOME`` when that is not ``~/.config``."""
+    raw = os.environ.get("XDG_CONFIG_HOME")
+    if not raw:
+        return []
+    try:
+        config_home = Path(raw).expanduser()
+    except (OSError, RuntimeError, ValueError):
+        return []
+    if _same_resolved(config_home, home / ".config"):
+        return []
+    return [
+        config_home / profile.deny[1]
+        for profile in _BROWSER_PROFILES
+        if profile.deny[0] == ".config" and len(profile.deny) == 2
+    ]
 
 
 def _inode_candidates() -> list[Path]:
@@ -712,6 +777,7 @@ def _inode_candidates() -> list[Path]:
         home / ".mozilla",
     ]
     paths.extend(home.joinpath(*profile.scan) for profile in _BROWSER_PROFILES)
+    paths.extend(_xdg_browser_roots(home))
     paths.extend(
         [
             home / ".netrc",
@@ -769,15 +835,21 @@ def _prune_scan_dirs(
     dirnames: list[str],
     directory: Path,
     kube_root: Path | None,
+    root: Path,
 ) -> None:
-    """Skip symlink children. Skip kube cache dirs only as direct children."""
+    """Skip kube caches and directory symlinks that leave the scan root.
+
+    A symlink that stays inside the root (snap ``current`` -> a revision) is
+    kept. The walk records directory inodes and skips one it has already
+    seen, so ``current`` is not walked twice.
+    """
     direct_kube = kube_root is not None and _same_dir(directory, kube_root)
     kept: list[str] = []
     for name in dirnames:
         child = directory / name
-        if child.is_symlink():
-            continue
         if direct_kube and name.lower() in _KUBE_SKIP_DIRS:
+            continue
+        if child.is_symlink() and not _contains(root, child):
             continue
         kept.append(name)
     dirnames[:] = kept
@@ -797,22 +869,21 @@ def _refuse_capped_inode_scan(limit: int, kind: str) -> None:
 
 
 def _named_root_budget_skips(path: Path, root: Path) -> bool:
-    """True when a credential symlink may be skipped instead of failing closed.
+    """True when a credential symlink to exactly ``/usr`` may be skipped.
 
-    ``~/.ssh`` and the other credential directory names, pointed at ``$HOME``
-    or ``/usr``, can be larger than the entry budget. Skipping that walk
-    keeps ordinary reads working. Secret file names on the target are still
-    denied directly. Every other root still fails closed.
+    ``/usr`` is larger than the entry budget and is not a secret store.
+    A credential root that resolves to ``$HOME``, or to anything under
+    ``/usr``, still fails closed once the budget is exceeded, so a top-level
+    key such as ``id_ed25519`` is not left readable. Every other root fails
+    closed too.
     """
     if path.name.lower() not in _CREDENTIAL_ROOTS:
         return False
-    if _same_resolved(root, Path.home()):
-        return True
     try:
         posix = root.resolve(strict=False).as_posix()
     except (OSError, RuntimeError, ValueError):
         return False
-    return posix == "/usr" or posix.startswith("/usr/")
+    return posix == "/usr"
 
 
 def _warn_skipped_inode_root(path: Path, limit: int) -> None:
@@ -823,12 +894,27 @@ def _warn_skipped_inode_root(path: Path, limit: int) -> None:
     _log.warning(message)
 
 
-def _inside_home(path: Path, home: Path) -> bool:
+def _contains(root: Path, path: Path) -> bool:
+    """True when ``path`` resolves to ``root`` or a path under it."""
     try:
-        path.resolve(strict=False).relative_to(home.resolve(strict=False))
+        path.resolve(strict=False).relative_to(root.resolve(strict=False))
     except (OSError, RuntimeError, ValueError):
         return False
     return True
+
+
+def _inside_home(path: Path, home: Path) -> bool:
+    return _contains(home, path)
+
+
+def _dir_inode(path: Path) -> tuple[int, int] | None:
+    try:
+        st = os.stat(path, follow_symlinks=True)
+    except OSError:
+        return None
+    if not stat.S_ISDIR(st.st_mode):
+        return None
+    return st.st_dev, st.st_ino
 
 
 def _is_unbounded_scan_root(path: Path) -> bool:
@@ -919,15 +1005,23 @@ def _collect_inodes(
     except OSError:
         return None
     try:
-        walker = os.walk(root, followlinks=False)
+        # followlinks so snap ``current`` is entered. Directory inodes are
+        # recorded below; a second path to the same revision is not walked.
+        walker = os.walk(root, followlinks=True)
     except OSError:
         return None
     count = 0
     entries = 0
+    seen_dirs: set[tuple[int, int]] = set()
     budget = _MAX_SCAN_ENTRIES if budget_entries else None
     for dirpath, dirnames, filenames in walker:
         directory = Path(dirpath)
-        _prune_scan_dirs(dirnames, directory, kube_root)
+        inode = _dir_inode(directory)
+        if inode is None or inode in seen_dirs:
+            dirnames[:] = []
+            continue
+        seen_dirs.add(inode)
+        _prune_scan_dirs(dirnames, directory, kube_root, root)
         if budget is not None:
             entries += len(dirnames) + len(filenames)
             if entries > budget:

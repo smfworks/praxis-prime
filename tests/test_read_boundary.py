@@ -420,6 +420,104 @@ def test_browser_table_hardlink_is_denied(tmp_path: Path, monkeypatch, profile):
     assert SECRET not in str(denial)
 
 
+_SNAP_REVISION_LAYOUTS = (
+    ("brave", ("BraveSoftware", "Brave-Browser")),
+    ("vivaldi", ("vivaldi",)),
+    ("opera", ("opera",)),
+)
+
+
+@pytest.mark.parametrize(("app", "config_parts"), _SNAP_REVISION_LAYOUTS)
+def test_snap_revision_profile_denies_direct_reads_and_hardlinks(
+    tmp_path: Path, monkeypatch, app: str, config_parts: tuple[str, ...]
+):
+    home = tmp_path / "home"
+    profile = home.joinpath("snap", app, "123", ".config", *config_parts, "Default")
+    profile.mkdir(parents=True)
+    login = profile / "Login Data"
+    cookies = profile / "Cookies"
+    login.write_text(SECRET, encoding="utf-8")
+    cookies.write_text(SECRET, encoding="utf-8")
+    current = home / "snap" / app / "current"
+    current.symlink_to("123", target_is_directory=True)
+    via_current = current / ".config"
+    for part in config_parts:
+        via_current = via_current / part
+    via_current = via_current / "Default"
+    root = tmp_path / "ws"
+    root.mkdir()
+    (root / "hello.txt").write_text("hello\n", encoding="utf-8")
+    os.link(login, root / "login.txt")
+    os.link(cookies, root / "cookies.txt")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    # Two secret names. A second walk of ``current`` would trip this cap.
+    monkeypatch.setattr("praxis_prime.policy.boundary._MAX_INODE_FILES", 2)
+    access = ReadAccess(allow_paths=(str(home / "snap"),))
+    ctx = _ctx(root, access)
+    for path in (login, cookies, via_current / "Login Data", via_current / "Cookies"):
+        assert is_secret_path(path), path
+        denial = _denied(execute_read_file, {"path": str(path)}, ctx)
+        assert denial.code == "secret_path"
+        assert SECRET not in str(denial)
+    assert execute_read_file({"path": "hello.txt"}, ctx) == "hello\n"
+    for name in ("login.txt", "cookies.txt"):
+        denial = _denied(execute_read_file, {"path": name}, ctx)
+        assert denial.code == "secret_path"
+        assert SECRET not in str(denial)
+
+
+def test_symlinked_home_still_denies_snap_and_flatpak(tmp_path: Path, monkeypatch):
+    real_home = tmp_path / "var" / "home"
+    link_home = tmp_path / "home"
+    real_home.mkdir(parents=True)
+    link_home.symlink_to(real_home, target_is_directory=True)
+    monkeypatch.setenv("HOME", str(link_home))
+    snap = real_home / "snap" / "firefox" / "notes.md"
+    snap.parent.mkdir(parents=True)
+    snap.write_text(SECRET, encoding="utf-8")
+    flatpak = real_home / ".var" / "app" / "com.google.Chrome" / "config" / "Login Data"
+    flatpak.parent.mkdir(parents=True)
+    flatpak.write_text(SECRET, encoding="utf-8")
+    via_link = link_home / "snap" / "vivaldi" / "current" / ".config" / "vivaldi" / "Login Data"
+    workspace = tmp_path / "ws" / "snap" / "firefox" / "notes.md"
+    workspace.parent.mkdir(parents=True)
+    workspace.write_text("hello\n", encoding="utf-8")
+    assert is_secret_path(snap)
+    assert is_secret_path(flatpak)
+    assert is_secret_path(via_link)
+    assert not is_secret_path(workspace)
+
+
+def test_xdg_config_home_browser_profile_is_denied(tmp_path: Path, monkeypatch):
+    home = tmp_path / "home"
+    xdg = tmp_path / "xdg"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
+    secret = xdg / "vivaldi" / "Default" / "Login Data"
+    secret.parent.mkdir(parents=True)
+    secret.write_text(SECRET, encoding="utf-8")
+    ordinary = xdg / "ordinary" / "settings.toml"
+    ordinary.parent.mkdir(parents=True)
+    ordinary.write_text("theme = light\n", encoding="utf-8")
+    root = tmp_path / "ws"
+    root.mkdir()
+    (root / "hello.txt").write_text("hello\n", encoding="utf-8")
+    os.link(secret, root / "notes.txt")
+    found = set(_inode_candidates())
+    for profile in _BROWSER_PROFILES:
+        if profile.deny[0] == ".config" and len(profile.deny) == 2:
+            assert xdg / profile.deny[1] in found
+    assert is_secret_path(secret)
+    assert not is_secret_path(ordinary)
+    ctx = _ctx(root, ReadAccess(allow_paths=(str(xdg),)))
+    assert execute_read_file({"path": "hello.txt"}, ctx) == "hello\n"
+    assert execute_read_file({"path": str(ordinary)}, ctx) == "theme = light\n"
+    denial = _denied(execute_read_file, {"path": "notes.txt"}, ctx)
+    assert denial.code == "secret_path"
+    assert SECRET not in str(denial)
+
+
 def test_symlinked_profile_root_still_catches_a_hardlink(tmp_path: Path, monkeypatch):
     home = tmp_path / "home"
     real = home / "real-chromium"
@@ -739,32 +837,32 @@ def test_proc_subdirectory_is_entry_budgeted(tmp_path: Path, monkeypatch, caplog
     assert "hello" not in str(denial)
 
 
-def test_ssh_symlink_to_home_over_budget_skips_the_walk(tmp_path: Path, monkeypatch, caplog):
+def test_ssh_symlink_to_home_over_budget_denies_top_level_key(
+    tmp_path: Path, monkeypatch, caplog
+):
     home = tmp_path / "home"
     home.mkdir()
-    for index in range(5):
-        (home / f"notes-{index}.txt").write_text("plain\n", encoding="utf-8")
-    key = home / "id_rsa"
+    key = home / "id_ed25519"
     key.write_text(SECRET, encoding="utf-8")
+    budget = boundary_mod._MAX_SCAN_ENTRIES
+    for index in range(budget):
+        fd = os.open(home / f"n{index}", os.O_CREAT | os.O_WRONLY, 0o644)
+        os.close(fd)
     (home / ".ssh").symlink_to(home, target_is_directory=True)
-    root = home / "ws"
+    root = tmp_path / "ws"
     root.mkdir()
     (root / "hello.txt").write_text("hello\n", encoding="utf-8")
+    os.link(key, root / "alias.txt")
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setattr(
         "praxis_prime.policy.boundary._inode_candidates", lambda: [home / ".ssh"]
     )
-    monkeypatch.setattr("praxis_prime.policy.boundary._MAX_SCAN_ENTRIES", 1)
-    access = ReadAccess(allow_paths=(str(home),))
-    ctx = _ctx(root, access)
+    ctx = _ctx(root)
     with caplog.at_level(logging.WARNING, logger="praxis_prime.policy.boundary"):
-        assert execute_read_file({"path": "hello.txt"}, ctx) == "hello\n"
-        kept = execute_read_file({"path": str(home / "notes-0.txt")}, ctx)
-    assert kept == "plain\n"
-    assert "skipping inode walk" in caplog.text
-    assert ".ssh" in caplog.text
-    denial = _denied(execute_read_file, {"path": str(key)}, ctx)
-    assert denial.code == "secret_path"
+        denial = _denied(execute_read_file, {"path": "alias.txt"}, ctx)
+    assert denial.code == "inode_scan_capped"
+    assert "directory-entry cap" in caplog.text
+    assert "skipping inode walk" not in caplog.text
     assert SECRET not in str(denial)
 
 
@@ -783,6 +881,25 @@ def test_ssh_symlink_to_usr_over_budget_skips_the_walk(tmp_path: Path, monkeypat
         assert execute_read_file({"path": "hello.txt"}, _ctx(root)) == "hello\n"
     assert "skipping inode walk" in caplog.text
     assert "inode_scan_capped" not in caplog.text
+
+
+def test_ssh_symlink_under_usr_over_budget_fails_closed(tmp_path: Path, monkeypatch, caplog):
+    home = tmp_path / "home"
+    link = home / ".ssh"
+    link.parent.mkdir()
+    link.symlink_to("/usr/bin")
+    root = tmp_path / "ws"
+    root.mkdir()
+    (root / "hello.txt").write_text("hello\n", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr("praxis_prime.policy.boundary._inode_candidates", lambda: [link])
+    monkeypatch.setattr("praxis_prime.policy.boundary._MAX_SCAN_ENTRIES", 1)
+    with caplog.at_level(logging.WARNING, logger="praxis_prime.policy.boundary"):
+        denial = _denied(execute_read_file, {"path": "hello.txt"}, _ctx(root))
+    assert denial.code == "inode_scan_capped"
+    assert "directory-entry cap" in caplog.text
+    assert "skipping inode walk" not in caplog.text
+    assert "hello" not in str(denial)
 
 
 def test_generic_symlink_over_budget_still_fails_closed(tmp_path: Path, monkeypatch, caplog):
