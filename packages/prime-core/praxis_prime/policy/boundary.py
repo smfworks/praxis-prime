@@ -21,9 +21,7 @@ import re
 import socket
 import ssl
 import stat
-from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
-from contextlib import contextmanager
-from contextvars import ContextVar
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
@@ -62,6 +60,7 @@ _EXACT_NAMES = frozenset(
         ".envrc",
         "service_account.json",
         "service-account.json",
+        ".boto",
     }
 )
 _SERVICE_ACCOUNT_SUFFIXES = (
@@ -83,8 +82,8 @@ _BROWSER_CONFIG = frozenset(
         "opera",
     }
 )
-# Every candidate tree contributes only these filenames, plus the denylist
-# patterns. Cache and log files are listed and then skipped.
+# Browser and gcloud trees contribute these filenames, plus the denylist
+# patterns. Credential directories count every file instead.
 _PROFILE_SECRET_NAMES = frozenset(
     {
         "login data",
@@ -198,13 +197,20 @@ def assess_read(
     *,
     workspace_root: str,
     access: ReadAccess,
+    cache: InodeScanCache | None = None,
 ) -> ReadDenied | None:
     """Return a denial for a concrete read that must not run.
 
     A missing path is left to the tool. Any unexpected error denies the read.
     """
     try:
-        return _assess_read(tool, arguments, workspace_root=workspace_root, access=access)
+        return _assess_read(
+            tool,
+            arguments,
+            workspace_root=workspace_root,
+            access=access,
+            cache=cache,
+        )
     except ReadDenied as exc:
         return exc
     except Exception:
@@ -251,7 +257,11 @@ def is_secret_path(path: Path) -> bool:
         return True
 
 
-def inode_is_secret(path: Path, inodes: set[tuple[int, int]] | None = None) -> bool:
+def inode_is_secret(
+    path: Path,
+    inodes: set[tuple[int, int]] | None = None,
+    cache: InodeScanCache | None = None,
+) -> bool:
     """True when ``path`` is a hard link to a known secret file."""
     try:
         st = path.stat(follow_symlinks=True)
@@ -259,54 +269,47 @@ def inode_is_secret(path: Path, inodes: set[tuple[int, int]] | None = None) -> b
         return False
     if not stat.S_ISREG(st.st_mode):
         return False
-    known = secret_inode_set() if inodes is None else inodes
+    known = secret_inode_set(cache) if inodes is None else inodes
     return (st.st_dev, st.st_ino) in known
 
 
-@dataclass
-class _InodeScanCache:
-    done: bool = False
-    found: set[tuple[int, int]] | None = None
-    error: ReadDenied | None = None
+class InodeScanCache:
+    """One turn's inode scan. The loop owns it and clears it after each tool."""
+
+    def __init__(self) -> None:
+        self.ready = False
+        self.found: set[tuple[int, int]] | None = None
+        self.error: ReadDenied | None = None
+
+    def clear(self) -> None:
+        self.ready = False
+        self.found = None
+        self.error = None
 
 
-_inode_scan_cache: ContextVar[_InodeScanCache | None] = ContextVar(
-    "praxis_prime_inode_scan",
-    default=None,
-)
-
-
-@contextmanager
-def inode_scan_scope() -> Iterator[None]:
-    """Reuse one secret-inode scan for the current turn."""
-    token = _inode_scan_cache.set(_InodeScanCache())
-    try:
-        yield
-    finally:
-        _inode_scan_cache.reset(token)
-
-
-def secret_inode_set() -> set[tuple[int, int]]:
+def secret_inode_set(cache: InodeScanCache | None = None) -> set[tuple[int, int]]:
     """Inodes of well-known secret files, so a hard link can be recognized.
 
-    Every candidate tree contributes files whose names match the secret
-    patterns. The file cap denies the read when a matching file is left
-    unscanned. Inside ``inode_scan_scope`` the scan runs once.
+    Credential directories contribute every file except known kube cache
+    directories. Browser and gcloud trees contribute secret-named files.
+    The file cap denies the read when a candidate file is left unscanned.
+    ``cache`` reuses one scan until the loop clears it.
     """
-    cache = _inode_scan_cache.get()
-    if cache is not None and cache.done:
+    if cache is not None and cache.ready:
         if cache.error is not None:
             raise cache.error
-        return cache.found or set()
+        if cache.found is None:
+            return set()
+        return cache.found
     try:
         found = _scan_secret_inodes()
     except ReadDenied as exc:
         if cache is not None:
-            cache.done = True
+            cache.ready = True
             cache.error = exc
         raise
     if cache is not None:
-        cache.done = True
+        cache.ready = True
         cache.found = found
     return found
 
@@ -321,10 +324,15 @@ def _scan_secret_inodes() -> set[tuple[int, int]]:
     return found
 
 
-def assert_readable(path: Path, *, requested: Path | None = None) -> None:
+def assert_readable(
+    path: Path,
+    *,
+    requested: Path | None = None,
+    cache: InodeScanCache | None = None,
+) -> None:
     """Refuse secret names and hard links. The message names the file only."""
     target = requested if requested is not None else path
-    if is_secret_path(target) or is_secret_path(path) or inode_is_secret(path):
+    if is_secret_path(target) or is_secret_path(path) or inode_is_secret(path, cache=cache):
         raise ReadDenied(
             f"refusing to read secret file {target.name}",
             "secret_path",
@@ -332,7 +340,14 @@ def assert_readable(path: Path, *, requested: Path | None = None) -> None:
         )
 
 
-def read_confined_bytes(path: Path, *, cwd: str, access: ReadAccess, limit: int) -> bytes:
+def read_confined_bytes(
+    path: Path,
+    *,
+    cwd: str,
+    access: ReadAccess,
+    limit: int,
+    cache: InodeScanCache | None = None,
+) -> bytes:
     """Open a confined regular file and read at most ``limit`` + 1 bytes."""
     roots = workspace_roots(cwd, access)
     flags = os.O_RDONLY | os.O_CLOEXEC
@@ -346,7 +361,7 @@ def read_confined_bytes(path: Path, *, cwd: str, access: ReadAccess, limit: int)
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):
             raise ReadDenied("refusing to read a non-regular file", "outside_workspace")
-        if (st.st_dev, st.st_ino) in secret_inode_set():
+        if (st.st_dev, st.st_ino) in secret_inode_set(cache):
             raise ReadDenied(
                 f"refusing to read secret file {path.name}",
                 "secret_path",
@@ -492,6 +507,7 @@ def _assess_read(
     *,
     workspace_root: str,
     access: ReadAccess,
+    cache: InodeScanCache | None = None,
 ) -> ReadDenied | None:
     if tool == "web_fetch":
         if not arguments or "url" not in arguments:
@@ -525,7 +541,11 @@ def _assess_read(
         return ReadDenied("no workspace root configured", "outside_workspace")
     requested = Path(raw_path)
     resolved = confine_path(raw_path, cwd=workspace_root or ".", access=access)
-    assert_readable(resolved, requested=requested if requested.name else resolved)
+    assert_readable(
+        resolved,
+        requested=requested if requested.name else resolved,
+        cache=cache,
+    )
     return None
 
 
@@ -606,6 +626,7 @@ def _inode_candidates() -> list[Path]:
         home / ".var" / "app" / "org.chromium.Chromium" / "config" / "chromium",
         home / ".var" / "app" / "org.mozilla.firefox" / ".mozilla",
         home / ".netrc",
+        home / ".boto",
         home / ".git-credentials",
         home / ".docker" / "config.json",
         Path("/etc/shadow"),
@@ -632,17 +653,44 @@ def _profile_file_is_secret(name: str) -> bool:
     return False
 
 
+_CREDENTIAL_ROOTS = frozenset({".ssh", ".aws", ".gnupg", ".kube", "keyrings"})
+_KUBE_SKIP_DIRS = frozenset({"cache", "http-cache"})
+
+
 def _inode_file_is_secret(name: str, directory: Path) -> bool:
-    """True when this filename is a secret candidate under ``directory``."""
+    """True when this filename is a secret candidate under a named root."""
     if _profile_file_is_secret(name):
         return True
     lower = name.lower()
     if lower in _GCLOUD_SECRET_NAMES:
         return True
     parts = tuple(part.lower() for part in directory.parts)
-    if lower == "config" and ".kube" in parts:
-        return True
     return "legacy_credentials" in parts
+
+
+def _scan_mode(path: Path) -> str:
+    """Credential dirs count every file. Browser and gcloud roots match names."""
+    if path.name.lower() in _CREDENTIAL_ROOTS:
+        return "all"
+    return "named"
+
+
+def _under_kube(directory: Path) -> bool:
+    if directory.name.lower() == ".kube":
+        return True
+    return ".kube" in {part.lower() for part in directory.parts}
+
+
+def _prune_scan_dirs(dirnames: list[str], directory: Path, mode: str) -> None:
+    kept: list[str] = []
+    for name in dirnames:
+        child = directory / name
+        if child.is_symlink():
+            continue
+        if mode == "all" and _under_kube(directory) and name.lower() in _KUBE_SKIP_DIRS:
+            continue
+        kept.append(name)
+    dirnames[:] = kept
 
 
 def _refuse_capped_inode_scan() -> None:
@@ -654,19 +702,44 @@ def _refuse_capped_inode_scan() -> None:
     raise ReadDenied(message, "inode_scan_capped")
 
 
-def _resolve_scan_root(path: Path) -> Path:
-    """Follow a top-level candidate symlink. Nested links stay unfollowed."""
+def _inside_home(path: Path, home: Path) -> bool:
     try:
-        if path.is_symlink():
-            return path.resolve(strict=False)
+        path.resolve(strict=False).relative_to(home.resolve(strict=False))
     except (OSError, RuntimeError, ValueError):
-        return path
-    return path
+        return False
+    return True
+
+
+def _resolve_scan_root(path: Path) -> Path | None:
+    """Follow a top-level symlink that stays inside $HOME. Leave others alone.
+
+    A symlink that resolves outside $HOME is skipped so a profile link to
+    ``/`` cannot walk the whole filesystem.
+    """
+    try:
+        if not path.is_symlink():
+            return path
+        resolved = path.resolve(strict=False)
+        if _inside_home(resolved, Path.home()):
+            return resolved
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return None
+
+
+def _file_counts(name: str, directory: Path, mode: str) -> bool:
+    if mode == "all":
+        return True
+    return _inode_file_is_secret(name, directory)
 
 
 def _collect_inodes(path: Path, found: set[tuple[int, int]], count: int) -> tuple[int, bool]:
     """Return ``(count, capped)``. ``capped`` means a secret candidate was skipped."""
-    path = _resolve_scan_root(path)
+    mode = _scan_mode(path)
+    resolved = _resolve_scan_root(path)
+    if resolved is None:
+        return count, False
+    path = resolved
     try:
         if path.is_file():
             if count >= _MAX_INODE_FILES:
@@ -677,21 +750,16 @@ def _collect_inodes(path: Path, found: set[tuple[int, int]], count: int) -> tupl
     except OSError:
         return count, False
     if count >= _MAX_INODE_FILES:
-        return count, _has_pending_secret(path)
+        return count, _has_pending_secret(path, mode)
     try:
         walker = os.walk(path, followlinks=False)
     except OSError:
         return count, False
     for dirpath, dirnames, filenames in walker:
-        kept: list[str] = []
-        for name in dirnames:
-            child = Path(dirpath) / name
-            if not child.is_symlink():
-                kept.append(name)
-        dirnames[:] = kept
         directory = Path(dirpath)
+        _prune_scan_dirs(dirnames, directory, mode)
         for name in filenames:
-            if not _inode_file_is_secret(name, directory):
+            if not _file_counts(name, directory, mode):
                 continue
             if count >= _MAX_INODE_FILES:
                 return count, True
@@ -699,9 +767,8 @@ def _collect_inodes(path: Path, found: set[tuple[int, int]], count: int) -> tupl
     return count, False
 
 
-def _has_pending_secret(path: Path) -> bool:
+def _has_pending_secret(path: Path, mode: str) -> bool:
     """True when ``path`` still contains a secret-candidate file."""
-    path = _resolve_scan_root(path)
     try:
         if path.is_file():
             return True
@@ -714,15 +781,10 @@ def _has_pending_secret(path: Path) -> bool:
     except OSError:
         return False
     for dirpath, dirnames, filenames in walker:
-        kept: list[str] = []
-        for name in dirnames:
-            child = Path(dirpath) / name
-            if not child.is_symlink():
-                kept.append(name)
-        dirnames[:] = kept
         directory = Path(dirpath)
+        _prune_scan_dirs(dirnames, directory, mode)
         for name in filenames:
-            if _inode_file_is_secret(name, directory):
+            if _file_counts(name, directory, mode):
                 return True
     return False
 

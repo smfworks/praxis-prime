@@ -29,7 +29,7 @@ from praxis_prime.loop.events import LoopEvent, StatusEvent, TurnEnded
 from praxis_prime.loop.hooks import HookDecision, HookResult, LoopHooks
 from praxis_prime.loop.prompt import FENCE_END, SYSTEM_PROMPT, fence_untrusted
 from praxis_prime.memory.store import SessionStore
-from praxis_prime.policy.boundary import ReadAccess, ReadDenied, inode_scan_scope
+from praxis_prime.policy.boundary import InodeScanCache, ReadAccess, ReadDenied
 from praxis_prime.policy.engine import HookPoint, PolicyContext, PolicyEngine
 from praxis_prime.router.router import ModelRouter
 from praxis_prime.router.types import (
@@ -91,6 +91,7 @@ class AgentLoop:
         self.recall_for = recall_for
         self.on_turn_end = on_turn_end
         self.read_access = read_access or ReadAccess()
+        self.inode_cache = InodeScanCache()
         self._turn_user = ""
 
     def run_turn(
@@ -99,8 +100,9 @@ class AgentLoop:
         control: TurnControl | None = None,
     ) -> Iterator[LoopEvent]:
         """Run one user turn, yielding text and timeline events as they happen."""
-        with inode_scan_scope():
-            yield from self._run_turn(user_text, control)
+        self.policy.inode_cache = self.inode_cache
+        self.inode_cache.clear()
+        yield from self._run_turn(user_text, control)
 
     def _run_turn(
         self,
@@ -321,6 +323,7 @@ class AgentLoop:
             allow_paths=self.read_access.allow_paths,
             fetch_allow=tuple(sorted(self.read_access.fetch_allow)),
         )
+        self.inode_cache.clear()
         verdict = self.policy.evaluate(ctx)
         if self.screener is not None:
             verdict = self.screener.apply(verdict, ctx)
@@ -395,6 +398,7 @@ class AgentLoop:
             host_shell_approved=host_approved,
             session_id=self.session_id,
             read_access=self.read_access,
+            inode_cache=self.inode_cache,
         )
         try:
             raw = tool.execute(dict(call.arguments), tool_ctx)

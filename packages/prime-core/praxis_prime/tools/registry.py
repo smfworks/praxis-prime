@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
-from praxis_prime.policy.boundary import ReadAccess
+from praxis_prime.policy.boundary import InodeScanCache, ReadAccess
 
 
 class Risk(StrEnum):
@@ -45,6 +45,7 @@ class ToolContext:
     host_shell_approved: bool = False
     session_id: str | None = None
     read_access: ReadAccess | None = None
+    inode_cache: InodeScanCache | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -18,11 +18,11 @@ from praxis_prime.coding.tools import execute_glob, execute_grep
 from praxis_prime.loop.engine import AgentLoop
 from praxis_prime.loop.events import StatusEvent
 from praxis_prime.policy.boundary import (
+    InodeScanCache,
     ReadAccess,
     ReadDenied,
     _inode_candidates,
     fetch_public,
-    inode_scan_scope,
     is_secret_path,
     secret_inode_set,
 )
@@ -37,7 +37,7 @@ from praxis_prime.tools.builtin import (
     execute_read_file,
     execute_web_fetch,
 )
-from praxis_prime.tools.registry import Risk, ToolContext
+from praxis_prime.tools.registry import Risk, Tool, ToolContext
 
 SECRET = "SUPERSECRETVALUE"
 
@@ -133,6 +133,7 @@ def test_secret_names_inside_the_workspace_are_unreadable(tmp_path: Path):
         "service-account.json": '{"private_key": "SUPERSECRETVALUE"}\n',
         "prod-service-account.json": '{"private_key": "SUPERSECRETVALUE"}\n',
         "prod-service_account.json": '{"private_key": "SUPERSECRETVALUE"}\n',
+        ".boto": "aws_secret_access_key = SUPERSECRETVALUE\n",
     }
     for name, body in samples.items():
         path = root / name
@@ -174,6 +175,7 @@ def test_secret_names_inside_the_workspace_are_unreadable(tmp_path: Path):
     listed = execute_list_dir({"path": "."}, ctx)
     assert ".env" not in listed.splitlines()
     assert ".envrc" not in listed.splitlines()
+    assert ".boto" not in listed.splitlines()
     assert "service_account.json" not in listed.splitlines()
     assert _denied(execute_list_dir, {"path": ".ssh"}, ctx).code == "secret_path"
     assert "id_rsa" not in execute_glob({"pattern": "**/*", "path": "."}, ctx)
@@ -267,8 +269,11 @@ def test_kube_cache_does_not_trip_the_inode_cap(tmp_path: Path, monkeypatch):
     kube = tmp_path / ".kube"
     discovery = kube / "cache" / "discovery"
     discovery.mkdir(parents=True)
+    http_cache = kube / "http-cache"
+    http_cache.mkdir()
     for index in range(600):
         (discovery / f"item-{index}.json").write_text("{}", encoding="utf-8")
+        (http_cache / f"item-{index}.json").write_text("{}", encoding="utf-8")
     config = kube / "config"
     config.write_text("apiVersion: v1\n", encoding="utf-8")
     root = tmp_path / "ws"
@@ -351,16 +356,18 @@ def test_packaged_browser_root_hardlink_is_denied(tmp_path: Path, monkeypatch, r
 
 
 def test_symlinked_profile_root_still_catches_a_hardlink(tmp_path: Path, monkeypatch):
-    real = tmp_path / "real-chromium"
-    real.mkdir()
+    home = tmp_path / "home"
+    real = home / "real-chromium"
+    real.mkdir(parents=True)
     secret = real / "Login Data"
     secret.write_text(SECRET, encoding="utf-8")
-    linked = tmp_path / "chromium"
+    linked = home / "chromium"
     linked.symlink_to(real, target_is_directory=True)
     root = tmp_path / "ws"
     root.mkdir()
     (root / "hello.txt").write_text("hello\n", encoding="utf-8")
     os.link(secret, root / "notes.txt")
+    monkeypatch.setenv("HOME", str(home))
     monkeypatch.setattr("praxis_prime.policy.boundary._inode_candidates", lambda: [linked])
     ctx = _ctx(root)
     assert execute_read_file({"path": "hello.txt"}, ctx) == "hello\n"
@@ -392,7 +399,7 @@ def test_firefox_session_backups_are_secret_inodes(tmp_path: Path, monkeypatch):
         assert SECRET not in str(denial)
 
 
-def test_inode_scan_runs_once_per_turn(tmp_path: Path, monkeypatch):
+def test_inode_scan_cache_reuses_until_cleared(monkeypatch):
     calls = {"n": 0}
     real = _inode_candidates
 
@@ -401,13 +408,154 @@ def test_inode_scan_runs_once_per_turn(tmp_path: Path, monkeypatch):
         return real()
 
     monkeypatch.setattr("praxis_prime.policy.boundary._inode_candidates", counted)
-    with inode_scan_scope():
-        secret_inode_set()
-        secret_inode_set()
+    cache = InodeScanCache()
+    secret_inode_set(cache)
+    secret_inode_set(cache)
     assert calls["n"] == 1
-    secret_inode_set()
+    cache.clear()
+    secret_inode_set(cache)
     assert calls["n"] == 2
-    del tmp_path
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        ".ssh/github",
+        ".ssh/work_ed25519",
+        ".aws/sso/cache/token.json",
+        ".aws/cli/cache/session.json",
+        ".gnupg/secring.gpg",
+        ".kube/config-staging",
+        ".kube/configs/prod.yaml",
+        ".local/share/keyrings/default.bin",
+    ],
+)
+def test_credential_dir_file_hardlink_is_denied(tmp_path: Path, monkeypatch, relative: str):
+    home = tmp_path / "home"
+    secret = home.joinpath(*relative.split("/"))
+    secret.parent.mkdir(parents=True)
+    secret.write_text(SECRET, encoding="utf-8")
+    root = tmp_path / "ws"
+    root.mkdir()
+    (root / "hello.txt").write_text("hello\n", encoding="utf-8")
+    os.link(secret, root / "notes.txt")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    ctx = _ctx(root)
+    assert execute_read_file({"path": "hello.txt"}, ctx) == "hello\n"
+    denial = _denied(execute_read_file, {"path": "notes.txt"}, ctx)
+    assert denial.code == "secret_path"
+    assert SECRET not in str(denial)
+
+
+def test_boto_hardlink_is_denied(tmp_path: Path, monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    boto = home / ".boto"
+    boto.write_text(SECRET, encoding="utf-8")
+    root = tmp_path / "ws"
+    root.mkdir()
+    (root / "hello.txt").write_text("hello\n", encoding="utf-8")
+    os.link(boto, root / "notes.txt")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    ctx = _ctx(root)
+    assert execute_read_file({"path": "hello.txt"}, ctx) == "hello\n"
+    denial = _denied(execute_read_file, {"path": "notes.txt"}, ctx)
+    assert denial.code == "secret_path"
+    assert SECRET not in str(denial)
+
+
+def test_profile_symlink_outside_home_is_not_walked(tmp_path: Path, monkeypatch):
+    home = tmp_path / "home"
+    opera = home / ".config" / "opera"
+    opera.parent.mkdir(parents=True)
+    opera.symlink_to("/")
+    root = tmp_path / "ws"
+    root.mkdir()
+    (root / "hello.txt").write_text("hello\n", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr("praxis_prime.policy.boundary._inode_candidates", lambda: [opera])
+    monkeypatch.setattr("praxis_prime.policy.boundary._MAX_INODE_FILES", 1)
+    real_walk = os.walk
+
+    def guarded(top, *args, **kwargs):
+        if Path(top).resolve() == Path("/"):
+            raise AssertionError("inode scan walked /")
+        return real_walk(top, *args, **kwargs)
+
+    monkeypatch.setattr("praxis_prime.policy.boundary.os.walk", guarded)
+    assert execute_read_file({"path": "hello.txt"}, _ctx(root)) == "hello\n"
+
+
+def test_secret_created_mid_turn_then_hardlinked_is_denied(tmp_path: Path, monkeypatch):
+    home = tmp_path / "home"
+    ssh = home / ".ssh"
+    ssh.mkdir(parents=True)
+    root = tmp_path / "ws"
+    root.mkdir()
+    (root / "hello.txt").write_text("hello\n", encoding="utf-8")
+    alias = root / "notes.txt"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    monkeypatch.setattr("praxis_prime.policy.boundary._inode_candidates", lambda: [ssh])
+
+    def plant(_arguments, _context):
+        secret = ssh / "github"
+        secret.write_text(SECRET, encoding="utf-8")
+        os.link(secret, alias)
+        return "planted"
+
+    registry = builtin_registry()
+    registry.register(
+        Tool(
+            name="plant_secret",
+            description="Create a secret and hardlink it into the workspace.",
+            parameters={"type": "object", "properties": {}},
+            risk=Risk.READ,
+            execute=plant,
+        )
+    )
+    provider = ScriptedProvider(
+        [
+            AssistantFinal(
+                content="",
+                tool_calls=(
+                    ToolCall(id="c1", name="read_file", arguments={"path": "hello.txt"}),
+                ),
+            ),
+            AssistantFinal(
+                content="",
+                tool_calls=(ToolCall(id="c2", name="plant_secret", arguments={}),),
+            ),
+            AssistantFinal(
+                content="",
+                tool_calls=(
+                    ToolCall(id="c3", name="read_file", arguments={"path": "notes.txt"}),
+                ),
+            ),
+            AssistantFinal(content="done"),
+        ]
+    )
+    loop = AgentLoop(
+        router=ModelRouter([ModelRef("ollama", "fake")], {"ollama": provider}),
+        registry=registry,
+        policy=PolicyEngine(),
+        gate=ApprovalGate(None),
+        cwd=root,
+        max_iterations=6,
+    )
+    list(loop.run_turn("read, plant a secret, read the alias"))
+    assert loop.policy.inode_cache is loop.inode_cache
+    tool_text = [
+        message.content
+        for message in provider.requests[-1].messages
+        if message.role == "tool"
+    ]
+    assert any("hello" in text for text in tool_text)
+    assert any("planted" in text for text in tool_text)
+    assert any("notes.txt" in text and "secret" in text.lower() for text in tool_text)
+    assert all(SECRET not in text for text in tool_text)
 
 
 def test_allowlist_is_explicit_and_does_not_unlock_secrets(tmp_path: Path):

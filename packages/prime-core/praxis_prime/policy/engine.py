@@ -17,7 +17,7 @@ from typing import Literal, Protocol
 
 from praxis_prime.compliance.packs import PolicyPack, load_packs
 from praxis_prime.compliance.providers import ProviderFlags
-from praxis_prime.policy.boundary import ReadAccess, ReadDenied, assess_read
+from praxis_prime.policy.boundary import InodeScanCache, ReadAccess, ReadDenied, assess_read
 from praxis_prime.policy.dials import DIALS, default_positions
 from praxis_prime.router.types import ModelRef
 from praxis_prime.tools.registry import CONSEQUENTIAL_RISKS, Risk
@@ -142,6 +142,7 @@ class PolicyEngine:
         self.session_id: str | None = None
         self.read_access = read_access or ReadAccess()
         self.workspace_root = workspace_root
+        self.inode_cache: InodeScanCache | None = None
 
     def dials_active(self) -> bool:
         return any(position != "off" for position in self.positions.values())
@@ -265,6 +266,7 @@ class PolicyEngine:
                 ctx.arguments,
                 workspace_root=root,
                 access=access,
+                cache=self.inode_cache,
             )
         except Exception:
             return ReadDenied("read boundary check failed closed", "check_failed")
