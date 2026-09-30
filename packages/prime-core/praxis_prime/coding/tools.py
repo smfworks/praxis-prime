@@ -16,7 +16,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from pathlib import Path
 
 from praxis_prime.policy.boundary import (
@@ -266,7 +266,7 @@ def execute_glob(arguments: Mapping[str, object], context: ToolContext) -> str:
     assert_readable(base, requested=Path(raw_path), cache=context.inode_cache)
     if not base.is_dir():
         raise ValueError(f"not a directory: {base}")
-    inodes, capped = secret_scan(context.inode_cache)
+    inodes = secret_scan(context.inode_cache)
     matches: list[str] = []
     for path in sorted(base.glob(pattern)):
         if _skipped(path) or is_secret_path(path):
@@ -280,7 +280,6 @@ def execute_glob(arguments: Mapping[str, object], context: ToolContext) -> str:
             cwd=context.cwd,
             access=access,
             inodes=inodes,
-            capped_roots=capped,
         ):
             if not (resolved.is_dir() and not is_secret_path(resolved)):
                 continue
@@ -583,8 +582,8 @@ def _python_grep(
     except re.error as exc:
         raise ValueError(f"invalid grep pattern: {exc}") from exc
     lines: list[str] = []
-    inodes, capped = secret_scan(cache)
-    for path in _search_files(base, cwd=cwd, access=access, inodes=inodes, capped_roots=capped):
+    inodes = secret_scan(cache)
+    for path in _search_files(base, cwd=cwd, access=access, inodes=inodes):
         try:
             data = read_confined_bytes(
                 path,
@@ -613,7 +612,6 @@ def _search_files(
     cwd: str,
     access: ReadAccess,
     inodes: set[tuple[int, int]],
-    capped_roots: Sequence[Path] = (),
 ) -> list[Path]:
     if base.is_file() or base.is_symlink():
         if readable_file(
@@ -621,7 +619,6 @@ def _search_files(
             cwd=cwd,
             access=access,
             inodes=inodes,
-            capped_roots=capped_roots,
         ):
             return [base.resolve(strict=False)]
         return []
@@ -645,7 +642,6 @@ def _search_files(
                 cwd=cwd,
                 access=access,
                 inodes=inodes,
-                capped_roots=capped_roots,
             ):
                 continue
             try:

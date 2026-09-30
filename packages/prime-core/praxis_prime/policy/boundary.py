@@ -31,7 +31,6 @@ from praxis_prime.paths import config_dir, runtime_dir
 _log = logging.getLogger(__name__)
 
 MAX_REDIRECTS = 5
-_MAX_INODE_FILES = 500
 _MAX_CREDENTIAL_FILES = 5_000
 _MAX_SCAN_ENTRIES = 20_000
 # Exact paths a symlink must not walk. ``/etc``, ``/usr``, and ``/dev`` are
@@ -195,6 +194,33 @@ _GCLOUD_SECRET_NAMES = frozenset(
 )
 _PROFILE_SIDECAR_SUFFIXES = ("-journal", "-wal", "-shm")
 _SKIP_WALK = frozenset({".git", "node_modules", ".venv", "__pycache__"})
+# Disk-cache directory names skipped inside a browser scan root. Chrome stores
+# these beside Login Data / Cookies (Cache, Code Cache, GPUCache, Service
+# Worker/CacheStorage). Firefox stores them beside logins.json / key4.db
+# (cache2, and snap ``common/.cache``). None of those credential names live in
+# the skipped directories. A secret-named file placed directly in one is still
+# recorded; the walk does not descend, so cache entries do not use the budget.
+_BROWSER_CACHE_DIRS = frozenset(
+    {
+        ".cache",
+        "cache",
+        "cache2",
+        "code cache",
+        "gpucache",
+        "media cache",
+        "shadercache",
+        "grshadercache",
+        "dawncache",
+        "dawnwebgpucache",
+        "dawngraphitecache",
+        "startupcache",
+        "offlinecache",
+        "shader-cache",
+        "jumplistcache",
+        "scriptcache",
+        "cachestorage",
+    }
+)
 
 Resolver = Callable[..., list[tuple[object, ...]]]
 Exchange = Callable[[str, str, float, str, int], tuple[int, Mapping[str, str], bytes]]
@@ -352,13 +378,8 @@ def inode_is_secret(
         return False
     if not stat.S_ISREG(st.st_mode):
         return False
-    roots: tuple[Path, ...] = ()
     if inodes is None:
-        inodes, roots = _load_secret_scan(cache)
-    elif cache is not None and cache.ready:
-        roots = cache.capped_roots
-    if _under_capped_root(path, roots):
-        return True
+        inodes = _load_secret_scan(cache)
     return (st.st_dev, st.st_ino) in inodes
 
 
@@ -374,20 +395,16 @@ class InodeScanCache:
     def __init__(self) -> None:
         self.ready = False
         self.found: set[tuple[int, int]] | None = None
-        self.capped_roots: tuple[Path, ...] = ()
         self.error: ReadDenied | None = None
 
     def clear(self) -> None:
         self.ready = False
         self.found = None
-        self.capped_roots = ()
         self.error = None
 
 
-def secret_scan(
-    cache: InodeScanCache | None = None,
-) -> tuple[set[tuple[int, int]], tuple[Path, ...]]:
-    """Secret inodes, and roots whose named walk hit the secret-file cap."""
+def secret_scan(cache: InodeScanCache | None = None) -> set[tuple[int, int]]:
+    """Inodes of well-known secret files from one finished scan."""
     return _load_secret_scan(cache)
 
 
@@ -396,28 +413,24 @@ def secret_inode_set(cache: InodeScanCache | None = None) -> set[tuple[int, int]
 
     Credential directories contribute every file except ``.kube/cache`` and
     ``.kube/http-cache`` directly under ``.kube``. Browser and gcloud trees
-    contribute secret-named files. A root that cannot be finished under the
-    entry budget or the credential-file cap denies the read. A named walk
-    that hits the secret-file cap instead records that root: reads under it
-    are denied, and inodes already seen stay secret, but other reads continue.
-    ``cache`` reuses one scan until the loop clears it. ``found`` is published
-    before ``ready``.
+    contribute every secret-named file, with no secret-file count cap.
+    Browser disk-cache directories are not descended into. A root that cannot
+    be finished under the entry budget, or a credential directory that hits
+    the credential-file cap, denies every read. ``cache`` reuses one scan
+    until the loop clears it. ``found`` is published before ``ready``.
     """
-    found, _roots = _load_secret_scan(cache)
-    return found
+    return _load_secret_scan(cache)
 
 
-def _load_secret_scan(
-    cache: InodeScanCache | None,
-) -> tuple[set[tuple[int, int]], tuple[Path, ...]]:
+def _load_secret_scan(cache: InodeScanCache | None) -> set[tuple[int, int]]:
     if cache is not None and cache.ready:
         if cache.error is not None:
             raise cache.error
         if cache.found is None:
-            return set(), cache.capped_roots
-        return cache.found, cache.capped_roots
+            return set()
+        return cache.found
     try:
-        found, capped = _scan_secret_inodes()
+        found = _scan_secret_inodes()
     except ReadDenied as exc:
         if cache is not None:
             cache.error = exc
@@ -425,23 +438,17 @@ def _load_secret_scan(
         raise
     if cache is not None:
         cache.found = found
-        cache.capped_roots = capped
         cache.ready = True
-    return found, capped
+    return found
 
 
-def _scan_secret_inodes() -> tuple[set[tuple[int, int]], tuple[Path, ...]]:
+def _scan_secret_inodes() -> set[tuple[int, int]]:
     found: set[tuple[int, int]] = set()
-    capped: list[Path] = []
     for path in _inode_candidates():
         hit = _collect_inodes(path, found)
-        if hit is None:
-            continue
-        if hit.scoped:
-            capped.append(hit.root)
-            continue
-        _refuse_capped_inode_scan(hit.limit, hit.kind)
-    return found, tuple(capped)
+        if hit is not None:
+            _refuse_capped_inode_scan(hit.limit, hit.kind)
+    return found
 
 
 def assert_readable(
@@ -481,8 +488,8 @@ def read_confined_bytes(
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):
             raise ReadDenied("refusing to read a non-regular file", "outside_workspace")
-        found, capped = _load_secret_scan(cache)
-        if _under_capped_root(path, capped) or (st.st_dev, st.st_ino) in found:
+        found = _load_secret_scan(cache)
+        if (st.st_dev, st.st_ino) in found:
             raise ReadDenied(
                 f"refusing to read secret file {path.name}",
                 "secret_path",
@@ -502,7 +509,6 @@ def readable_file(
     cwd: str,
     access: ReadAccess,
     inodes: set[tuple[int, int]],
-    capped_roots: Sequence[Path] = (),
 ) -> bool:
     """False when a search result is secret, outside the workspace, or unsafe."""
     if any(part in _SKIP_WALK for part in path.parts):
@@ -517,13 +523,7 @@ def readable_file(
         return False
     if not _inside_any(resolved, roots):
         return False
-    if (
-        _under_capped_root(path, capped_roots)
-        or _under_capped_root(resolved, capped_roots)
-        or is_secret_path(path)
-        or is_secret_path(resolved)
-        or inode_is_secret(resolved, inodes)
-    ):
+    if is_secret_path(path) or is_secret_path(resolved) or inode_is_secret(resolved, inodes):
         return False
     try:
         st = path.stat(follow_symlinks=True)
@@ -888,12 +888,17 @@ def _prune_scan_dirs(
     directory: Path,
     kube_root: Path | None,
     root: Path,
+    found: set[tuple[int, int]],
+    *,
+    skip_browser_caches: bool,
 ) -> None:
-    """Skip kube caches and directory symlinks that leave the scan root.
+    """Skip kube caches, browser disk caches, and symlinks that leave the root.
 
     A symlink that stays inside the root (snap ``current`` -> a revision) is
     kept. The walk records directory inodes and skips one it has already
-    seen, so ``current`` is not walked twice.
+    seen, so ``current`` is not walked twice. Browser disk-cache directories
+    are not descended into. A secret-named file directly inside one is still
+    recorded.
     """
     direct_kube = kube_root is not None and _same_dir(directory, kube_root)
     kept: list[str] = []
@@ -903,8 +908,22 @@ def _prune_scan_dirs(
             continue
         if child.is_symlink() and not _contains(root, child):
             continue
+        if skip_browser_caches and name.lower() in _BROWSER_CACHE_DIRS:
+            _record_direct_secret_inodes(child, found)
+            continue
         kept.append(name)
     dirnames[:] = kept
+
+
+def _record_direct_secret_inodes(directory: Path, found: set[tuple[int, int]]) -> None:
+    """Record secret-named files sitting directly in a skipped cache directory."""
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        return
+    for name in names:
+        if _inode_file_is_secret(name, directory):
+            _add_inode(directory / name, found, 0)
 
 
 def _same_dir(left: Path, right: Path) -> bool:
@@ -913,17 +932,10 @@ def _same_dir(left: Path, right: Path) -> bool:
 
 @dataclass(frozen=True, slots=True)
 class _CapHit:
-    """A scan root that stopped early.
-
-    ``scoped`` is the named secret-file cap: reads under ``root`` are denied
-    and inodes already recorded stay secret, but the rest of the scan
-    continues. Anything else fails the whole scan closed.
-    """
+    """A scan root that stopped early. The caller fails every read closed."""
 
     limit: int
     kind: str
-    scoped: bool
-    root: Path
 
 
 def _refuse_capped_inode_scan(limit: int, kind: str) -> None:
@@ -946,10 +958,6 @@ def _contains(root: Path, path: Path) -> bool:
 
 def _inside_home(path: Path, home: Path) -> bool:
     return _contains(home, path)
-
-
-def _under_capped_root(path: Path, roots: Sequence[Path]) -> bool:
-    return any(_contains(root, path) for root in roots)
 
 
 def _dir_inode(path: Path) -> tuple[int, int] | None:
@@ -1002,7 +1010,10 @@ def _resolve_scan_root(path: Path) -> tuple[Path, bool] | None:
     budget too, so ``~/.ssh -> $HOME`` does not walk the home directory
     without a cap. Browser scan roots use the same entry budget even when
     they are real directories, so ``~/snap/<app>`` cannot walk without a cap.
-    Hitting that budget fails the scan closed, the same as a credential root.
+    Browser roots record every secret-named inode and have no secret-file
+    count cap. Hitting the entry budget or the credential-file cap fails
+    every read closed, including a credential root that fell back to named
+    matching because it resolved to ``$HOME``.
     """
     try:
         browser = _is_browser_scan_root(path)
@@ -1041,9 +1052,9 @@ def _file_counts(name: str, directory: Path, mode: str) -> bool:
 def _collect_inodes(path: Path, found: set[tuple[int, int]]) -> _CapHit | None:
     """Scan one candidate.
 
-    Return a hit when the walk stops early. A named secret-file cap is
-    scoped to that root. An entry-budget or credential-file cap is not:
-    the caller fails the whole scan closed.
+    Return a hit when the walk stops early. The caller fails every read
+    closed. Named browser and gcloud walks record every secret-named inode.
+    Only an entry-budget or credential-file cap stops the scan.
     """
     resolved = _resolve_scan_root(path)
     if resolved is None:
@@ -1052,10 +1063,13 @@ def _collect_inodes(path: Path, found: set[tuple[int, int]]) -> _CapHit | None:
     mode = _scan_mode(path)
     if mode == "all" and budget_entries and _same_resolved(root, Path.home()):
         # Counting every file under $HOME trips the credential cap and marks
-        # ordinary files secret. Keep the entry budget; record secret names.
+        # ordinary files secret. Keep the entry budget and record secret
+        # names. This fallback has no secret-file cap: a budget hit fails
+        # every read closed, and every secret-named inode is recorded.
         mode = "named"
-    cap = _MAX_CREDENTIAL_FILES if mode == "all" else _MAX_INODE_FILES
+    file_cap = _MAX_CREDENTIAL_FILES if mode == "all" else None
     kube_root = root if path.name.lower() == ".kube" else None
+    skip_browser_caches = _is_browser_scan_root(path)
     try:
         if root.is_file():
             _add_inode(root, found, 0)
@@ -1081,31 +1095,23 @@ def _collect_inodes(path: Path, found: set[tuple[int, int]]) -> _CapHit | None:
             dirnames[:] = []
             continue
         seen_dirs.add(inode)
-        _prune_scan_dirs(dirnames, directory, kube_root, root)
+        _prune_scan_dirs(
+            dirnames,
+            directory,
+            kube_root,
+            root,
+            found,
+            skip_browser_caches=skip_browser_caches,
+        )
         if budget is not None:
             entries += len(dirnames) + len(filenames)
             if entries > budget:
-                return _CapHit(budget, "directory-entry", False, root)
+                return _CapHit(budget, "directory-entry")
         for name in filenames:
             if not _file_counts(name, directory, mode):
                 continue
-            if count >= cap:
-                # Named trees (browser and gcloud profiles) can hold more
-                # secret-named files than ``_MAX_INODE_FILES``. Stop this
-                # root only: reads under it are denied, inodes already
-                # recorded still match hard links, and a read outside the
-                # root is allowed. A hard link of a file this walk did not
-                # reach is not caught. Credential directories keep the
-                # global fail-closed file cap.
-                if mode == "named":
-                    _log.warning(
-                        "secret inode scan hit the %s secret-file cap under %s; "
-                        "denying reads under that tree",
-                        cap,
-                        root,
-                    )
-                    return _CapHit(cap, "secret-file", True, root)
-                return _CapHit(cap, "secret-file", False, root)
+            if file_cap is not None and count >= file_cap:
+                return _CapHit(file_cap, "secret-file")
             count = _add_inode(directory / name, found, count)
     return None
 
