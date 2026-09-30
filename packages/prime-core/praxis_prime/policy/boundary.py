@@ -460,6 +460,8 @@ def _load_secret_scan(cache: InodeScanCache | None) -> set[tuple[int, int]]:
 def _scan_secret_inodes() -> set[tuple[int, int]]:
     found: set[tuple[int, int]] = set()
     candidates = _inode_candidates()
+    if isinstance(candidates, _CapHit):
+        _refuse_capped_inode_scan(candidates.limit, candidates.kind, candidates.path)
     keyring_roots = [path for path in candidates if _is_flatpak_keyring_dir(path)]
     if len(keyring_roots) > _MAX_FLATPAK_KEYRING_ROOTS:
         _refuse_capped_inode_scan(
@@ -857,25 +859,33 @@ def _xdg_browser_roots(home: Path) -> list[Path]:
     ]
 
 
-def _flatpak_keyring_dirs(home: Path) -> list[Path]:
+def _flatpak_keyring_dirs(home: Path) -> list[Path] | _CapHit:
     """Existing ``~/.var/app/*/data/keyrings`` directories.
 
     Stop after one more than ``_MAX_FLATPAK_KEYRING_ROOTS``. The scan fails
     closed on that overflow instead of giving every match its own budget.
+    EACCES or EPERM on ``~/.var/app`` or on an app directory fails closed.
+    ENOENT and ENOTDIR still mean that root is absent.
     """
     root = home / ".var" / "app"
     found: list[Path] = []
     limit = _MAX_FLATPAK_KEYRING_ROOTS + 1
     try:
         children = list(root.iterdir())
-    except OSError:
+    except OSError as exc:
+        hit = _listing_failure(exc, str(root))
+        if hit is not None:
+            return hit
         return []
     for child in children:
         candidate = child / "data" / "keyrings"
         try:
             if not candidate.is_dir():
                 continue
-        except OSError:
+        except OSError as exc:
+            hit = _listing_failure(exc, str(candidate))
+            if hit is not None:
+                return hit
             continue
         found.append(candidate)
         if len(found) >= limit:
@@ -897,7 +907,7 @@ def _is_flatpak_keyring_dir(path: Path) -> bool:
     )
 
 
-def _inode_candidates() -> list[Path]:
+def _inode_candidates() -> list[Path] | _CapHit:
     home = Path.home()
     paths = [
         home / ".ssh",
@@ -909,7 +919,10 @@ def _inode_candidates() -> list[Path]:
     ]
     paths.extend(home.joinpath(*profile.scan) for profile in _BROWSER_PROFILES)
     paths.extend(_xdg_browser_roots(home))
-    paths.extend(_flatpak_keyring_dirs(home))
+    keyrings = _flatpak_keyring_dirs(home)
+    if isinstance(keyrings, _CapHit):
+        return keyrings
+    paths.extend(keyrings)
     paths.extend(
         [
             home / ".netrc",
@@ -1008,15 +1021,27 @@ def _record_cache_secret_inodes(
 
     Directory entries are counted only toward ``tally``, not the scan root's
     entry budget. Symlinks that leave the cache directory are not followed.
-    ENOENT and ENOTDIR mean the directory vanished during the scan and are
-    ignored. Any other listing failure fails the scan closed.
+    ENOENT and ENOTDIR mean the directory vanished during the scan. The
+    parent is re-listed once so a rename is not skipped. Any other listing
+    or stat failure, including EACCES and EPERM, fails the scan closed.
     """
     seen_dirs: set[tuple[int, int]] = set()
     pending = [cache_root]
+    retried = False
+    examined_at_start = tally.examined
     while pending:
         current = pending.pop()
         inode = _dir_inode(current)
+        if isinstance(inode, _CapHit):
+            return inode
         if inode is None or inode in seen_dirs:
+            if inode is None and not retried:
+                hit = _retry_parent(current, pending, seen_dirs)
+                if isinstance(hit, _CapHit):
+                    return hit
+                if hit:
+                    retried = True
+                    tally.examined = examined_at_start
             continue
         if not _contains(cache_root, current):
             continue
@@ -1024,13 +1049,18 @@ def _record_cache_secret_inodes(
         try:
             children = list(os.scandir(current))
         except OSError as exc:
-            if _listing_errno_ignored(exc):
+            hit = _listing_failure(exc, _error_filename(exc) or str(current))
+            if hit is not None:
+                return hit
+            if retried:
                 continue
-            return _CapHit(
-                0,
-                "unreadable-directory",
-                _error_filename(exc) or str(current),
-            )
+            queued = _retry_parent(current, pending, seen_dirs)
+            if isinstance(queued, _CapHit):
+                return queued
+            if queued:
+                retried = True
+                tally.examined = examined_at_start
+            continue
         tally.examined += len(children)
         if tally.examined > _MAX_CACHE_NAME_ENTRIES:
             return _CapHit(_MAX_CACHE_NAME_ENTRIES, "cache-name")
@@ -1045,11 +1075,34 @@ def _record_cache_secret_inodes(
                 elif child.is_dir(follow_symlinks=False):
                     pending.append(path)
                     continue
-            except OSError:
+            except OSError as exc:
+                hit = _listing_failure(exc, str(path))
+                if hit is not None:
+                    return hit
                 continue
             if _inode_file_is_secret(child.name, current):
-                _add_inode(path, found, 0)
+                added = _add_inode(path, found, 0)
+                if isinstance(added, _CapHit):
+                    return added
     return None
+
+
+def _retry_parent(
+    current: Path,
+    pending: list[Path],
+    seen_dirs: set[tuple[int, int]],
+) -> _CapHit | bool:
+    """Queue a fresh listing of ``current``'s parent. True when that happened."""
+    try:
+        names = os.listdir(current.parent)
+    except OSError as exc:
+        hit = _listing_failure(exc, str(current.parent))
+        if hit is not None:
+            return hit
+        return False
+    seen_dirs.clear()
+    pending.extend(current.parent / name for name in names)
+    return True
 
 
 def _same_dir(left: Path, right: Path) -> bool:
@@ -1080,14 +1133,21 @@ class _CapHit:
 
 
 def _listing_errno_ignored(exc: OSError) -> bool:
-    """True when a listed directory vanished or was replaced during the scan.
+    """True when a path vanished or was replaced during the scan.
 
     Chrome rewrites IndexedDB and ``blob_storage`` while a profile is open.
-    ``os.walk`` reports that as ENOENT or ENOTDIR. Those are not a directory
-    hiding a secret. EACCES, EPERM, and any other listing failure still fail
-    closed, and that denial stays cached for the rest of the turn.
+    That is ENOENT or ENOTDIR. EACCES, EPERM, and any other listing or stat
+    failure still fail closed, and that denial stays cached for the rest of
+    the turn.
     """
     return exc.errno in _IGNORED_LISTING_ERRNOS
+
+
+def _listing_failure(exc: OSError, path: str) -> _CapHit | None:
+    """A closed-scan hit, or None when the path only vanished."""
+    if _listing_errno_ignored(exc):
+        return None
+    return _CapHit(0, "unreadable-directory", path)
 
 
 def _error_filename(exc: OSError) -> str | None:
@@ -1099,20 +1159,36 @@ def _error_filename(exc: OSError) -> str | None:
     return str(filename)
 
 
+def _home_relative(path: str) -> str:
+    """``~/...`` when ``path`` is under the home directory, otherwise ``path``."""
+    home = str(Path.home())
+    if path == home:
+        return "~"
+    prefix = home + os.sep
+    if path.startswith(prefix):
+        return "~/" + path[len(prefix) :].replace(os.sep, "/")
+    return path
+
+
+def _under_gnupg(path: str | None) -> bool:
+    return path is not None and ".gnupg" in Path(path).parts
+
+
 def _refuse_capped_inode_scan(limit: int, kind: str, path: str | None = None) -> None:
     if kind == "unbounded-root":
         detail = "secret inode scan refused an unbounded root"
     elif kind == "unreadable-directory":
-        where = path if path else "a directory"
-        detail = (
-            f"secret inode scan could not list {where} "
-            "(a root-owned dir, e.g. from `sudo gpg`, in ~/.gnupg or a browser "
-            "profile; fix ownership)"
-        )
+        shown = repr(_home_relative(path)) if path else repr("a directory")
+        detail = f"secret inode scan could not list {shown}"
+        if _under_gnupg(path):
+            detail += " (a root-owned dir, e.g. from `sudo gpg`, in ~/.gnupg; fix ownership)"
     else:
         detail = f"secret inode scan hit the {limit} {kind} cap"
     message = f"{detail}; denying the read because a secret file could have been missed"
-    _log.warning(message)
+    if kind == "unreadable-directory" and path:
+        _log.warning("%s full_path=%s", message, repr(path))
+    else:
+        _log.warning("%s", message)
     raise ReadDenied(message, "inode_scan_capped")
 
 
@@ -1129,10 +1205,18 @@ def _inside_home(path: Path, home: Path) -> bool:
     return _contains(home, path)
 
 
-def _dir_inode(path: Path) -> tuple[int, int] | None:
+def _dir_inode(path: Path) -> tuple[int, int] | _CapHit | None:
+    """Directory inode, a closed-scan hit, or None when the path is not a dir.
+
+    ENOENT and ENOTDIR return None. EACCES, EPERM, and other stat failures
+    fail the scan closed. Mode 0400 lists names but cannot stat children.
+    """
     try:
         st = os.stat(path, follow_symlinks=True)
-    except OSError:
+    except OSError as exc:
+        hit = _listing_failure(exc, str(path))
+        if hit is not None:
+            return hit
         return None
     if not stat.S_ISDIR(st.st_mode):
         return None
@@ -1224,7 +1308,14 @@ def _resolve_scan_root(path: Path) -> tuple[Path, bool] | _CapHit | None:
         if _is_unbounded_scan_root(resolved):
             return _CapHit(0, "unbounded-root")
         return resolved, browser or _scan_root_needs_budget(resolved, Path.home())
-    except (OSError, RuntimeError, ValueError):
+    except OSError as exc:
+        # A mode 000 parent hides the root. That is not the same as a root
+        # that does not exist.
+        hit = _listing_failure(exc, str(path))
+        if hit is not None:
+            return hit
+        return None
+    except (RuntimeError, ValueError):
         return None
 
 
@@ -1299,88 +1390,162 @@ def _collect_inodes(
     tally = _NameTally()
     try:
         if root.is_file():
-            _add_inode(root, found, 0)
+            added = _add_inode(root, found, 0)
+            if isinstance(added, _CapHit):
+                return added
             return None
         if not root.is_dir():
             return None
-    except OSError:
-        return None
-    try:
-        # followlinks so snap ``current`` is entered. Directory inodes are
-        # recorded below; a second path to the same revision is not walked.
-        # onerror fails closed when a directory cannot be listed. ENOENT and
-        # ENOTDIR are a directory that vanished mid-walk (Chrome IndexedDB
-        # and blob_storage). Those are ignored. os.walk would otherwise skip
-        # an unreadable directory and miss a secret inside it.
-        walker = os.walk(root, followlinks=True, onerror=_raise_scan_io)
     except OSError as exc:
-        if _listing_errno_ignored(exc):
-            return None
-        return _CapHit(0, "unreadable-directory", _error_filename(exc) or str(root))
+        hit = _listing_failure(exc, str(root))
+        if hit is not None:
+            return hit
+        return None
+    # Listing errors are handled here. os.walk is a generator, so a
+    # try/except around the call itself never sees scandir failures.
     count = 0
     entries = 0
     seen_dirs: set[tuple[int, int]] = set()
     budget = _directory_entry_budget(path, budget_entries)
-    try:
-        for dirpath, dirnames, filenames in walker:
-            directory = Path(dirpath)
-            inode = _dir_inode(directory)
-            if inode is None or inode in seen_dirs:
-                dirnames[:] = []
+    shared_before = shared.count if shared is not None else 0
+    use_listdir = False
+    stack = [root]
+    while stack:
+        directory = stack.pop()
+        listed = _list_dir(directory, use_listdir=use_listdir)
+        if isinstance(listed, _CapHit):
+            return listed
+        if listed is None:
+            # The directory vanished between listing and descending. Rescan
+            # the root once with listdir, which sees the renamed tree, then
+            # accept any further ENOENT or ENOTDIR.
+            if not use_listdir:
+                use_listdir = True
+                stack = [root]
+                seen_dirs.clear()
+                entries = 0
+                count = 0
+                tally.examined = 0
+                if shared is not None:
+                    shared.count = shared_before
                 continue
-            seen_dirs.add(inode)
-            hit = _prune_scan_dirs(
-                dirnames,
-                directory,
-                kube_root,
-                root,
-                found,
-                tally,
-                skip_browser_caches=skip_browser_caches,
-            )
-            if hit is not None:
-                return hit
-            added = len(dirnames) + len(filenames)
-            if budget is not None:
-                entries += added
-                if entries > budget:
-                    return _CapHit(budget, "directory-entry")
-            if shared is not None:
-                shared.count += added
-                if shared.count > _MAX_SCAN_ENTRIES:
-                    return _CapHit(_MAX_SCAN_ENTRIES, "directory-entry", str(directory))
-            for name in filenames:
-                if not _file_counts(name, directory, mode):
-                    continue
-                if file_cap is not None and count >= file_cap:
-                    return _CapHit(file_cap, "secret-file")
-                count = _add_inode(directory / name, found, count)
-    except _ScanIOError as exc:
-        return _CapHit(0, "unreadable-directory", exc.path or str(root))
+            continue
+        dirnames, filenames = listed
+        inode = _dir_inode(directory)
+        if isinstance(inode, _CapHit):
+            return inode
+        if inode is None or inode in seen_dirs:
+            if inode is None and not use_listdir:
+                use_listdir = True
+                stack = [root]
+                seen_dirs.clear()
+                entries = 0
+                count = 0
+                tally.examined = 0
+                if shared is not None:
+                    shared.count = shared_before
+            continue
+        seen_dirs.add(inode)
+        hit = _prune_scan_dirs(
+            dirnames,
+            directory,
+            kube_root,
+            root,
+            found,
+            tally,
+            skip_browser_caches=skip_browser_caches,
+        )
+        if hit is not None:
+            return hit
+        added = len(dirnames) + len(filenames)
+        if budget is not None:
+            entries += added
+            if entries > budget:
+                return _CapHit(budget, "directory-entry")
+        if shared is not None:
+            shared.count += added
+            if shared.count > _MAX_SCAN_ENTRIES:
+                return _CapHit(_MAX_SCAN_ENTRIES, "directory-entry", str(directory))
+        for name in filenames:
+            if not _file_counts(name, directory, mode):
+                continue
+            if file_cap is not None and count >= file_cap:
+                return _CapHit(file_cap, "secret-file")
+            counted = _add_inode(directory / name, found, count)
+            if isinstance(counted, _CapHit):
+                return counted
+            count = counted
+        for name in reversed(dirnames):
+            stack.append(directory / name)
     return None
 
 
-class _ScanIOError(Exception):
-    """os.walk could not list a directory inside a scan root."""
+def _list_dir(
+    directory: Path, *, use_listdir: bool
+) -> tuple[list[str], list[str]] | _CapHit | None:
+    """Names in ``directory``, a closed-scan hit, or None if it vanished.
 
-    def __init__(self, message: str, *, path: str | None) -> None:
-        super().__init__(message)
-        self.path = path
+    ``use_listdir`` is the one rescan after a rename. It does not go through
+    ``os.scandir``, so a directory renamed between the first listing and the
+    descent is still visible.
+    """
+    if use_listdir:
+        try:
+            names = os.listdir(directory)
+        except OSError as exc:
+            hit = _listing_failure(exc, str(directory))
+            if hit is not None:
+                return hit
+            return None
+        dirnames: list[str] = []
+        filenames: list[str] = []
+        for name in names:
+            child = directory / name
+            try:
+                is_dir = child.is_dir()
+            except OSError as exc:
+                hit = _listing_failure(exc, str(child))
+                if hit is not None:
+                    return hit
+                continue
+            if is_dir:
+                dirnames.append(name)
+            else:
+                filenames.append(name)
+        return dirnames, filenames
+    try:
+        entries = list(os.scandir(directory))
+    except OSError as exc:
+        hit = _listing_failure(exc, _error_filename(exc) or str(directory))
+        if hit is not None:
+            return hit
+        return None
+    dirnames = []
+    filenames = []
+    for entry in entries:
+        try:
+            is_dir = entry.is_dir(follow_symlinks=True)
+        except OSError as exc:
+            hit = _listing_failure(exc, entry.path)
+            if hit is not None:
+                return hit
+            continue
+        if is_dir:
+            dirnames.append(entry.name)
+        else:
+            filenames.append(entry.name)
+    return dirnames, filenames
 
 
-def _raise_scan_io(exc: OSError) -> None:
-    if _listing_errno_ignored(exc):
-        return
-    raise _ScanIOError(
-        exc.strerror or "unreadable directory",
-        path=_error_filename(exc),
-    ) from exc
-
-
-def _add_inode(path: Path, found: set[tuple[int, int]], count: int) -> int:
+def _add_inode(path: Path, found: set[tuple[int, int]], count: int) -> int | _CapHit:
     try:
         st = path.stat(follow_symlinks=True)
-    except OSError:
+    except OSError as exc:
+        # Mode 0400 can list the name and still refuse the stat. That hides
+        # a hard link unless the scan fails closed. A vanished file does not.
+        hit = _listing_failure(exc, str(path))
+        if hit is not None:
+            return hit
         return count
     if stat.S_ISREG(st.st_mode):
         found.add((st.st_dev, st.st_ino))
