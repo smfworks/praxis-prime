@@ -58,13 +58,32 @@ def migration_in_progress(data_root: Path) -> bool:
     """True when a lock file is present, including a stale one.
 
     A dead pid still means the move may be half done. ``profile migrate``
-    is what clears that lock, after it finishes the move.
+    is what clears that lock, after it finishes the move. An empty lock,
+    a garbage lock, or a reused pid is stale and ``profile migrate``
+    replaces it. ``--force`` replaces a lock that still names a live process.
     """
     return lstat_kind(migration_lock_path(data_root)) is not StatKind.MISSING
 
 
-def acquire_migration_lock(data_root: Path) -> Path:
-    """Create the lock, replacing one whose process is gone."""
+def migration_lock_hint(data_root: Path) -> str:
+    """Daemon and CLI text: where the lock is, and how to clear it."""
+    path = migration_lock_path(data_root)
+    return (
+        f"a profile migration lock is present ({path}). "
+        "Finish the move with `praxis-prime profile migrate`. "
+        "If that refuses, `praxis-prime profile migrate --force` replaces a "
+        "leftover lock. --force does not override an open prime.db."
+    )
+
+
+def acquire_migration_lock(data_root: Path, *, force: bool = False) -> Path:
+    """Create the lock, replacing one whose process is gone.
+
+    The file records the pid and that process's start time. A live pid
+    with a different start time was reused and is stale. ``force`` replaces
+    a lock that still matches a live process. An open ``prime.db`` is a
+    separate flock and is not overridden.
+    """
     root = Path(data_root)
     root.mkdir(parents=True, exist_ok=True)
     path = migration_lock_path(root)
@@ -73,19 +92,17 @@ def acquire_migration_lock(data_root: Path) -> Path:
         try:
             fd = os.open(path, flags, 0o600)
         except FileExistsError:
-            if not _lock_is_stale(path):
-                raise MigrationBusy("a profile migration is already in progress") from None
-            try:
-                os.unlink(path)
-            except FileNotFoundError:
-                continue
+            if not force and not _lock_is_stale(path):
+                raise MigrationBusy(migration_lock_hint(root)) from None
+            if not _remove_lock_file(path):
+                raise MigrationBusy(migration_lock_hint(root)) from None
             continue
         try:
-            os.write(fd, f"{os.getpid()}\n".encode())
+            os.write(fd, _lock_payload().encode())
         finally:
             os.close(fd)
         return path
-    raise MigrationBusy("a profile migration is already in progress")
+    raise MigrationBusy(migration_lock_hint(root))
 
 
 def release_migration_lock(path: Path) -> None:
@@ -103,13 +120,20 @@ def migrate_under_lock(
     *,
     owner_account: str = "",
     daemon_running: Callable[[], bool] | None = None,
+    force: bool = False,
 ) -> MigrationResult:
     """Migrate while holding the lock the daemon checks at startup.
 
-    The running check happens again after the lock exists. A daemon that
-    appears between the two checks makes this raise ``MigrationBusy``
-    before any account row has to exist. The lock stays if the move fails
-    after it has started and the marker was not written.
+    The running check happens again after the database flock is held and
+    before ``.migration.lock`` is replaced. A daemon that appears in that
+    window makes this raise ``MigrationBusy`` before the pid lock changes.
+    The lock stays if the move fails after it has started and the marker
+    was not written. ``force`` replaces a pid lock that still looks live.
+    It does not steal the ``prime.db`` flock.
+
+    When the database still has to move, the exclusive flock is taken
+    before ``.migration.lock`` is removed or replaced. A busy database
+    leaves the existing lock file untouched.
     """
     running = daemon_is_running if daemon_running is None else daemon_running
     if running():
@@ -118,14 +142,58 @@ def migrate_under_lock(
             "it still has prime.db open"
         )
     root = Path(data_root)
-    lock = acquire_migration_lock(root)
-    keep = False
+    marker = migration_marker(root)
+    marker_kind = _kind(marker)
+    if marker_kind not in {StatKind.MISSING, StatKind.FILE}:
+        raise OSError(errno.EPERM, "migration marker is not a regular file", str(marker))
+    if marker_kind is StatKind.FILE:
+        return _finish_under_migration_lock(
+            root,
+            config_dir,
+            owner_account,
+            force,
+            move=False,
+        )
+    from praxis_prime.state import release_db_locks
+
+    held = _hold_exclusive_db_locks(root)
     try:
         if running():
             raise MigrationBusy(
                 "stop praxis-primed before creating the first account; "
                 "it still has prime.db open"
             )
+        return _finish_under_migration_lock(
+            root,
+            config_dir,
+            owner_account,
+            force,
+            move=True,
+        )
+    finally:
+        release_db_locks(held)
+
+
+def _finish_under_migration_lock(
+    root: Path,
+    config_dir: Path | None,
+    owner_account: str,
+    force: bool,
+    *,
+    move: bool,
+) -> MigrationResult:
+    """Replace the pid lock only after the caller has checked the daemon.
+
+    ``move`` is true only when the caller already holds the database flock.
+    A busy flock never reaches this function, so ``--force`` cannot delete
+    the pid lock and then fail. ``move`` is false when the marker is already
+    a regular file; that path does not relocate ``prime.db``.
+    """
+    lock = acquire_migration_lock(root, force=force)
+    keep = False
+    try:
+        if move:
+            return _migrate_holding_locks(root, config_dir, owner_account)
         return migrate_single_user(
             root,
             config_dir,
@@ -144,22 +212,79 @@ def migrate_under_lock(
 
 
 def _lock_is_stale(path: Path) -> bool:
+    """True when the lock is not a live process with the recorded start time.
+
+    Empty and garbage contents are stale. A pid that is alive but started
+    at a different time was reused. A non-regular file is not stale; ``--force``
+    is what removes it.
+    """
     if lstat_kind(path) is not StatKind.FILE:
         return False
-    pid = _read_lock_pid(path)
+    pid, start = _read_lock_identity(path)
     if pid is None:
-        return False
-    return not _pid_alive(pid)
+        return True
+    if not _pid_alive(pid):
+        return True
+    current = _process_starttime(pid)
+    if current is None or start is None or current != start:
+        return True
+    return False
 
 
-def _read_lock_pid(path: Path) -> int | None:
+def _read_lock_identity(path: Path) -> tuple[int | None, str | None]:
     try:
-        text = path.read_text(encoding="utf-8").strip()
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return None, None
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines or not lines[0].isdigit():
+        return None, None
+    start = lines[1] if len(lines) > 1 and lines[1].isdigit() else None
+    return int(lines[0]), start
+
+
+def _lock_payload() -> str:
+    pid = os.getpid()
+    start = _process_starttime(pid)
+    if start is None:
+        return f"{pid}\n"
+    return f"{pid}\n{start}\n"
+
+
+def _process_starttime(pid: int) -> str | None:
+    """Clock ticks since boot, from ``/proc/<pid>/stat`` field 22.
+
+    A reused pid has a different start time. The comm field may contain
+    spaces, so the clock fields are read after the last ``)``.
+    """
+    try:
+        raw = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
     except OSError:
         return None
-    if not text.isdigit():
+    end = raw.rfind(")")
+    if end < 0:
         return None
-    return int(text)
+    fields = raw[end + 2 :].split()
+    # Field 3 is index 0 after the comm field. Field 22 is starttime.
+    if len(fields) <= 19 or not fields[19].isdigit():
+        return None
+    return fields[19]
+
+
+def _remove_lock_file(path: Path) -> bool:
+    """Unlink a regular file or a symlink. Never follow the link, never rmdir."""
+    kind = lstat_kind(path)
+    if kind is StatKind.MISSING:
+        return True
+    if kind is StatKind.DIR or kind is StatKind.UNREADABLE:
+        return False
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return True
 
 
 def _pid_alive(pid: int) -> bool:
@@ -209,7 +334,42 @@ def migrate_single_user(
             "stop praxis-primed before creating the first account; "
             "it still has prime.db open"
         )
+    held = _hold_exclusive_db_locks(root)
+    try:
+        return _migrate_holding_locks(root, config_dir, owner_account)
+    finally:
+        from praxis_prime.state import release_db_locks
 
+        release_db_locks(held)
+
+
+def _hold_exclusive_db_locks(root: Path) -> list[int]:
+    """Lock the database a holder would have open. Never the destination alone.
+
+    ``create_profile`` opens ``profiles/default/prime.db`` in this process.
+    An exclusive lock on that path would deadlock the shared lock ``StateDB``
+    takes. The destination is locked only when a legacy file is about to move,
+    which does not open ``StateDB``.
+    """
+    from praxis_prime.state import DatabaseBusy, acquire_exclusive_db_locks
+
+    legacy = root / "prime.db"
+    moving = _is_data_file(legacy) or _any_legacy(root)
+    paths = [legacy]
+    if moving:
+        paths.append(ProfileHome(root, "default").db_path)
+    try:
+        return acquire_exclusive_db_locks(paths)
+    except DatabaseBusy as exc:
+        raise MigrationBusy(str(exc)) from exc
+
+
+def _migrate_holding_locks(
+    root: Path,
+    config_dir: Path | None,
+    owner_account: str,
+) -> MigrationResult:
+    marker = migration_marker(root)
     home = ProfileHome(root, "default")
     backup_rel = ""
     legacy = root / "prime.db"

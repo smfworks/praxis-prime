@@ -41,6 +41,14 @@ def add_profile_parser(commands: argparse._SubParsersAction[argparse.ArgumentPar
     )
     migrate.add_argument("--data-dir")
     migrate.add_argument("--config-dir")
+    migrate.add_argument(
+        "--force",
+        action="store_true",
+        help=(
+            "Replace a leftover migration lock whose pid still looks live. "
+            "Does not override an open prime.db."
+        ),
+    )
 
 
 def profile_command(args: argparse.Namespace) -> int:
@@ -134,7 +142,12 @@ def _migrate(args: argparse.Namespace) -> int:
         finally:
             store.close()
     try:
-        result = migrate_under_lock(root, _config(args), owner_account=owner)
+        result = migrate_under_lock(
+            root,
+            _config(args),
+            owner_account=owner,
+            force=bool(getattr(args, "force", False)),
+        )
     except MigrationBusy as exc:
         print(f"praxis-prime profile: {exc}", file=sys.stderr)
         return 2

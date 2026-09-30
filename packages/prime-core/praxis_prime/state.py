@@ -11,6 +11,8 @@ are later work. This module is the MVP store.
 
 from __future__ import annotations
 
+import fcntl
+import os
 import sqlite3
 from collections.abc import Mapping
 from pathlib import Path
@@ -20,22 +22,166 @@ from praxis_prime.paths import data_dir
 DB_FILENAME = "prime.db"
 
 
+class DatabaseBusy(RuntimeError):
+    """Another process holds the shared lock on this database."""
+
+    def __init__(self, db_path: Path) -> None:
+        self.db_path = Path(db_path)
+        self.lock_path = db_lock_path(self.db_path)
+        super().__init__(
+            f"{self.db_path.name} is open in another process ({self.lock_path}). "
+            "Stop praxis-primed and any local chat before migrating. "
+            "--force does not override an open database."
+        )
+
+
+class MigrationInProgress(RuntimeError):
+    """An opener refused to wait on, or recreate, a database mid-migration."""
+
+    def __init__(self, detail: str = "migration in progress") -> None:
+        super().__init__(detail)
+
+
+def db_lock_path(path: Path) -> Path:
+    """Sidecar flock held for as long as ``path`` is open."""
+    return Path(f"{path}.lock")
+
+
+def _open_lock_fd(db_path: Path) -> int:
+    lock = db_lock_path(db_path)
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    flags = os.O_CREAT | os.O_RDWR
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    return os.open(lock, flags, 0o600)
+
+
+def acquire_exclusive_db_locks(paths: list[Path]) -> list[int]:
+    """Non-blocking exclusive locks. The caller closes every returned fd.
+
+    A shared lock from ``StateDB`` in another process makes this raise
+    ``DatabaseBusy`` and drops any locks already taken.
+    """
+    held: list[int] = []
+    try:
+        for db_path in paths:
+            fd = _open_lock_fd(db_path)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                os.close(fd)
+                raise DatabaseBusy(db_path) from None
+            except OSError:
+                os.close(fd)
+                raise
+            held.append(fd)
+    except Exception:
+        release_db_locks(held)
+        raise
+    return held
+
+
+def release_db_locks(fds: list[int]) -> None:
+    for fd in fds:
+        if fd < 0:
+            continue
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
 def default_db_path(env: Mapping[str, str] | None = None) -> Path:
+    """Pre-migration path ``<data>/prime.db``.
+
+    Openers use ``resolve_runtime_layout``. After the marker exists, that
+    opens ``profiles/default/prime.db`` instead of this file.
+    """
     return data_dir(env) / DB_FILENAME
 
 
-class StateDB:
-    """One WAL connection and the schema for sessions plus the audit chain."""
+def data_root_for_database(path: Path) -> Path:
+    """Data directory that owns ``path``.
 
-    def __init__(self, path: Path) -> None:
+    Profile files live at ``<root>/profiles/<id>/prime.db``. Every other
+    database is treated as the legacy file directly under its parent.
+    """
+    candidate = Path(path)
+    if candidate.name == DB_FILENAME and candidate.parent.parent.name == "profiles":
+        return candidate.parent.parent.parent
+    return candidate.parent
+
+
+def refuse_if_migrating(path: Path) -> None:
+    """CLI and daemon openers call this before they create a database file."""
+    from praxis_prime.profiles.migrate import migration_in_progress
+
+    root = data_root_for_database(path)
+    if migration_in_progress(root):
+        raise MigrationInProgress("migration in progress")
+    if _legacy_path_closed(path, root):
+        moved = root / "profiles" / "default" / DB_FILENAME
+        raise MigrationInProgress(f"this database moved to {moved} after migration")
+
+
+def _legacy_path_closed(path: Path, root: Path) -> bool:
+    """True when ``path`` is the pre-move ``prime.db`` and the marker exists.
+
+    Opening it would create a fresh empty file beside the database that
+    already moved under ``profiles/default``.
+    """
+    if Path(path) != Path(root) / DB_FILENAME:
+        return False
+    from praxis_prime.profiles.home import migration_marker
+    from praxis_prime.statfile import StatKind, lstat_kind
+
+    return lstat_kind(migration_marker(root)) is StatKind.FILE
+
+
+class StateDB:
+    """One WAL connection and the schema for sessions plus the audit chain.
+
+    The process holds a shared flock on ``<path>.lock`` until ``close``.
+    The lock is non-blocking: an exclusive migration lock fails the open
+    with ``migration in progress`` instead of waiting and then creating a
+    new file at a path chosen before the move. Migration takes that file
+    exclusively and refuses when it is held.
+
+    ``allow_during_migration`` is only for ``create_profile`` while the
+    move itself is creating ``profiles/default/prime.db``.
+    """
+
+    def __init__(self, path: Path, *, allow_during_migration: bool = False) -> None:
         self.path = Path(path)
+        self._lock_fd = -1
+        if not allow_during_migration:
+            refuse_if_migrating(self.path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(self.path, check_same_thread=False)
-        self.conn.row_factory = sqlite3.Row
-        self.conn.execute("PRAGMA journal_mode=WAL")
-        self.conn.execute("PRAGMA foreign_keys=ON")
-        self.conn.execute("PRAGMA busy_timeout=5000")
-        self._migrate()
+        self._lock_fd = _open_lock_fd(self.path)
+        conn: sqlite3.Connection | None = None
+        try:
+            try:
+                fcntl.flock(self._lock_fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise MigrationInProgress("migration in progress") from None
+            if not allow_during_migration:
+                refuse_if_migrating(self.path)
+            conn = sqlite3.connect(self.path, check_same_thread=False)
+            self.conn = conn
+            self.conn.row_factory = sqlite3.Row
+            self.conn.execute("PRAGMA journal_mode=WAL")
+            self.conn.execute("PRAGMA foreign_keys=ON")
+            self.conn.execute("PRAGMA busy_timeout=5000")
+            self._migrate()
+        except Exception:
+            if conn is not None:
+                conn.close()
+            self._release_lock()
+            raise
 
     def _migrate(self) -> None:
         self.conn.executescript(
@@ -180,3 +326,18 @@ class StateDB:
 
     def close(self) -> None:
         self.conn.close()
+        self._release_lock()
+
+    def _release_lock(self) -> None:
+        fd = self._lock_fd
+        self._lock_fd = -1
+        if fd < 0:
+            return
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        try:
+            os.close(fd)
+        except OSError:
+            pass

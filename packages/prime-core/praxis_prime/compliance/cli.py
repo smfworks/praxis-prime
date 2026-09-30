@@ -18,8 +18,9 @@ from praxis_prime.compliance.report import collect_events, explain_event, render
 from praxis_prime.compliance.subject import dumps_export, erase_subject, export_subject
 from praxis_prime.paths import config_dir
 from praxis_prime.policy.dials import DIALS, default_positions
+from praxis_prime.profiles.home import resolve_runtime_layout
 from praxis_prime.router.settings import load_settings
-from praxis_prime.state import StateDB, default_db_path
+from praxis_prime.state import StateDB
 
 
 def add_compliance_parsers(
@@ -275,6 +276,7 @@ def _config_dir(args: argparse.Namespace) -> Path:
 
 
 def _db(args: argparse.Namespace) -> StateDB:
-    if getattr(args, "data_dir", None):
-        return StateDB(Path(args.data_dir) / "prime.db")
-    return StateDB(default_db_path())
+    raw = getattr(args, "data_dir", None)
+    data_file = Path(raw) / "prime.db" if raw else None
+    path = resolve_runtime_layout(None, data_file=data_file, profile=None).db_path
+    return StateDB(path)

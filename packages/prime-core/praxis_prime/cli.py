@@ -24,10 +24,19 @@ from praxis_prime.doctor import format_report, report_exit_code, run_system_doct
 from praxis_prime.mcp.cli import add_mcp_parser, mcp_command
 from praxis_prime.packs.cli import add_packs_parsers, dispatch_packs
 from praxis_prime.profiles.cli import add_profile_parser, profile_command
+from praxis_prime.state import MigrationInProgress
 from praxis_prime.user_commands import add_user_commands, dispatch_user_command
 
 
 def main(argv: list[str] | None = None) -> int:
+    try:
+        return _main(argv)
+    except MigrationInProgress as exc:
+        print(f"praxis-prime: {exc}", file=sys.stderr)
+        return 2
+
+
+def _main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.version:
@@ -232,7 +241,7 @@ def _chat_command(args: argparse.Namespace) -> int:
     approver = terminal_approver(input, writer, color=color)
     try:
         runtime = _runtime_from_args(args, approver, build_runtime)
-    except (ValueError, OSError) as exc:
+    except (ValueError, OSError, MigrationInProgress) as exc:
         print(f"praxis-prime chat: {exc}", file=sys.stderr)
         return 2
     try:
@@ -296,7 +305,7 @@ def _ask_command(args: argparse.Namespace) -> int:
         approver = noninteractive_approver(err)
     try:
         runtime = _runtime_from_args(args, approver, build_runtime)
-    except (ValueError, OSError) as exc:
+    except (ValueError, OSError, MigrationInProgress) as exc:
         print(f"praxis-prime ask: {exc}", file=sys.stderr)
         return 2
     try:
@@ -460,7 +469,7 @@ def _code_command(args: argparse.Namespace) -> int:
         approver = noninteractive_approver(err)
     try:
         runtime = _runtime_from_args(args, approver, build_runtime)
-    except (ValueError, OSError) as exc:
+    except (ValueError, OSError, MigrationInProgress) as exc:
         print(f"praxis-prime code: {exc}", file=sys.stderr)
         return 2
     if args.repo:

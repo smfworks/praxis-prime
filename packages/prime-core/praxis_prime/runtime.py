@@ -37,7 +37,7 @@ from praxis_prime.router.settings import Settings, load_settings
 from praxis_prime.router.types import parse_model_spec
 from praxis_prime.skills.catalog import SkillCatalog, bundled_skills_dir
 from praxis_prime.skills.tools import install_skill_tool
-from praxis_prime.state import StateDB
+from praxis_prime.state import StateDB, refuse_if_migrating
 from praxis_prime.tools.builtin import builtin_registry
 from praxis_prime.tools.registry import ToolRegistry
 
@@ -182,6 +182,7 @@ def build_runtime(
         requested.update(layout.profile_dials)
         settings = replace(settings, dials=clamp_dials(layout.floor_dials, requested))
     path = layout.db_path
+    refuse_if_migrating(path)
     db = StateDB(path)
     audit = AuditLog(db)
     audit.bind(actor_account=actor_account, profile=layout.profile_id)
