@@ -19,6 +19,10 @@ approval_session_id: ContextVar[str | None] = ContextVar(
     "praxis_prime_approval_session",
     default=None,
 )
+approval_account_id: ContextVar[str] = ContextVar(
+    "praxis_prime_approval_account",
+    default="",
+)
 approval_actor: ContextVar[str] = ContextVar("praxis_prime_approval_actor", default="")
 
 
@@ -55,18 +59,23 @@ class ApprovalGate:
         self._grants: set[str] = set()
         self._session_grants: dict[str, set[str]] = {}
 
-    def clear(self, session_id: str | None = None) -> None:
-        """Drop session grants. With no id, drop every grant this process holds."""
+    def clear(self, session_id: str | None = None, *, account_id: str = "") -> None:
+        """Drop session grants. With no id, drop every grant this process holds.
+
+        Grants are keyed by account and session. Clearing one account's
+        session does not drop another account's grant for that id.
+        """
         if session_id is None:
             self._grants.clear()
             self._session_grants.clear()
             return
-        self._session_grants.pop(session_id, None)
+        self._session_grants.pop(_grant_bucket(session_id, account_id), None)
 
     def _bucket(self, session_id: str | None) -> set[str]:
-        if not session_id:
+        key = _grant_bucket(session_id, approval_account_id.get())
+        if not key:
             return self._grants
-        return self._session_grants.setdefault(session_id, set())
+        return self._session_grants.setdefault(key, set())
 
     def authorize(self, request: ApprovalRequest) -> ApprovalDecision:
         grants = self._bucket(approval_session_id.get())
@@ -88,3 +97,9 @@ class ApprovalGate:
         if decision == ApprovalDecision.ALLOW_ONCE:
             return decision
         return ApprovalDecision.DENY
+
+
+def _grant_bucket(session_id: str | None, account_id: str) -> str:
+    if account_id and session_id:
+        return f"{account_id}:{session_id}"
+    return session_id or ""

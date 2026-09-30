@@ -12,12 +12,14 @@ Enforcement of the tool list happens at tool dispatch, not only in the UI.
 
 from __future__ import annotations
 
+import os
 import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
 from praxis_prime.policy.dials import DIAL_POSITIONS, default_positions
+from praxis_prime.statfile import StatKind, lstat_kind
 
 _RANK = {"off": 0, "monitor": 1, "enforce": 2}
 _MCP_META = frozenset({"mcp_find_tools", "mcp_read_resource", "mcp_get_prompt"})
@@ -111,11 +113,23 @@ def parse_allow(value: object) -> frozenset[str] | None:
 
 
 def load_layer(path: Path, *, table: str) -> LayerAllow:
-    """Load ``[table.tools]``, ``[table.mcp]``, and ``[table.dials]``."""
-    if not path.is_file():
+    """Load ``[table.tools]``, ``[table.mcp]``, and ``[table.dials]``.
+
+    A missing file is unrestricted, so an install with no org policy keeps
+    the old tool set. A symlink or a path that cannot be classified is
+    refused: ``Path.is_file`` on Python 3.14 is False for both, which would
+    look like "no policy".
+    """
+    kind = lstat_kind(path)
+    if kind is StatKind.MISSING:
         return unrestricted()
+    if kind is not StatKind.FILE:
+        raise ValueError(f"could not read {path.name}")
     try:
-        loaded = tomllib.loads(path.read_text(encoding="utf-8"))
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags)
+        with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
+            loaded = tomllib.loads(handle.read())
     except (OSError, UnicodeError, tomllib.TOMLDecodeError) as exc:
         raise ValueError(f"could not read {path.name}") from exc
     raw = loaded.get(table, loaded)
@@ -197,8 +211,13 @@ def _named(name: str, allowed: frozenset[str] | None) -> bool:
 
 
 def _mcp_server(name: str) -> str:
+    """Server segment of ``mcp__<server>__<tool>``.
+
+    Server names cannot contain ``__``. A longer name is a prefix collision
+    (``mcp__gh__x__secret`` must not match an allow entry of ``gh``).
+    """
     parts = name.split("__")
-    if len(parts) < 3 or not parts[1]:
+    if len(parts) != 3 or parts[0] != "mcp" or not parts[1] or not parts[2]:
         return ""
     return parts[1]
 

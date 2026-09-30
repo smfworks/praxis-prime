@@ -43,14 +43,14 @@ def profile_role(value: object) -> ProfileRole | None:
 def can_approve(role: str, membership: str | None) -> bool:
     """True when both the server role and the profile role may approve.
 
-    ``membership`` is None for an unscoped legacy approval. Owner and admin
-    may decide those. A named profile still needs a membership check by
-    the caller; pass that profile role here.
+    ``membership`` is None for an unscoped approval (no profile on the
+    card). Only owner and admin may decide those. A named profile still
+    needs a membership check by the caller; pass that profile role here.
     """
     if role not in APPROVE_SERVER_ROLES:
         return False
     if membership is None:
-        return role in MANAGE_ROLES or role == "operator"
+        return role in MANAGE_ROLES
     return membership in APPROVE_PROFILE_ROLES
 
 

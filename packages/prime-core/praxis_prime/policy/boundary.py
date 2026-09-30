@@ -27,7 +27,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
-from praxis_prime.paths import config_dir, runtime_dir
+from praxis_prime.paths import config_dir, data_dir, runtime_dir
+from praxis_prime.statfile import StatKind, lstat_kind, stat_kind
 
 _log = logging.getLogger(__name__)
 
@@ -705,8 +706,85 @@ def _assess_read(
     return None
 
 
+def private_data_command(command: str, workspace: Path) -> bool:
+    """True when a shell command names account or profile data."""
+    root = _data_root()
+    if root is not None and str(root) in command:
+        return True
+    for token in command.split():
+        if token.startswith("-"):
+            continue
+        candidate = Path(token)
+        if not candidate.is_absolute():
+            candidate = workspace / candidate
+        if _is_private_data(candidate):
+            return True
+    return False
+
+
+def _data_root() -> Path | None:
+    try:
+        return data_dir().resolve(strict=False)
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
+def _is_private_data(path: Path) -> bool:
+    """Accounts database, profile trees, and SOUL files under the data dir.
+
+    A path that cannot be classified is private. ``Path.resolve`` and
+    ``Path.is_file`` on Python 3.14 hide permission errors, so this uses
+    ``os.stat`` / ``os.path.realpath``.
+    """
+    root = _data_root()
+    if root is None:
+        return True
+    if lstat_kind(path) is StatKind.UNREADABLE or stat_kind(path) is StatKind.UNREADABLE:
+        return True
+    try:
+        resolved = Path(os.path.realpath(path, strict=False))
+    except (OSError, RuntimeError, ValueError):
+        return True
+    if resolved == root / "accounts.db":
+        return True
+    if resolved.parent == root and resolved.name.startswith("accounts.db-"):
+        return True
+    if _same_regular_inode(resolved, root / "accounts.db"):
+        return True
+    profiles = root / "profiles"
+    try:
+        resolved.relative_to(profiles)
+        return True
+    except ValueError:
+        pass
+    if resolved.name.lower() == "soul.md":
+        try:
+            resolved.relative_to(root)
+        except ValueError:
+            return False
+        return True
+    return False
+
+
+def _same_regular_inode(path: Path, target: Path) -> bool:
+    """True when both paths are the same regular file, including a hard link."""
+    try:
+        left = os.stat(path, follow_symlinks=True)
+        right = os.stat(target, follow_symlinks=True)
+    except OSError:
+        return False
+    if not stat.S_ISREG(left.st_mode) or not stat.S_ISREG(right.st_mode):
+        return False
+    return (left.st_dev, left.st_ino) == (right.st_dev, right.st_ino)
+
+
 def _is_secret_path(path: Path) -> bool:
-    if _name_is_secret(path.name) or _components_secret(path.parts) or _special_file(path):
+    if (
+        _is_private_data(path)
+        or _name_is_secret(path.name)
+        or _components_secret(path.parts)
+        or _special_file(path)
+    ):
         return True
     try:
         resolved = path.resolve(strict=False)
@@ -715,7 +793,8 @@ def _is_secret_path(path: Path) -> bool:
     if resolved == path:
         return False
     return (
-        _name_is_secret(resolved.name)
+        _is_private_data(resolved)
+        or _name_is_secret(resolved.name)
         or _components_secret(resolved.parts)
         or _special_file(resolved)
     )

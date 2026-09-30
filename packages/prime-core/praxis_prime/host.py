@@ -13,6 +13,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from praxis_prime import __version__
+from praxis_prime.approvals.gate import approval_account_id
 from praxis_prime.approvals.queue import ApprovalQueue
 from praxis_prime.channels.trust import untrusted_channel_message
 from praxis_prime.loop.events import StatusEvent, TurnEnded
@@ -51,16 +52,24 @@ class Host:
         source: str = "channel",
         channel: str = "",
         on_event: EventCallback | None = None,
+        owner_account: str = "",
+        owner_profile: str = "",
     ) -> TurnResult:
         with self._lock:
             if self._closed:
                 raise RuntimeError("daemon is shut down")
             body = untrusted_channel_message(text, source=source) if untrusted else text
-            active_id, loop = self.runtime.open_loop(session_id, channel=channel)
+            active_id, loop = self.runtime.open_loop(
+                session_id,
+                channel=channel,
+                owner_account=owner_account,
+                owner_profile=owner_profile,
+            )
             final = ""
             error: str | None = None
             cancelled = False
             token = memory_channel.set(channel)
+            account_token = approval_account_id.set(owner_account)
             try:
                 for event in loop.run_turn(body):
                     payload = event_payload(event)
@@ -73,6 +82,7 @@ class Host:
                         error = event.error
                         cancelled = event.cancelled
             finally:
+                approval_account_id.reset(account_token)
                 memory_channel.reset(token)
             return TurnResult(
                 session_id=active_id,
@@ -87,10 +97,23 @@ class Host:
                 raise RuntimeError("daemon is shut down")
             return self.runtime.set_model(spec)
 
-    def drop_session(self, session_id: str | None) -> None:
+    def drop_session(self, session_id: str | None, *, account_id: str = "") -> None:
         with self._lock:
-            if session_id:
-                self.runtime.gate.clear(session_id)
+            if not session_id:
+                return
+            if account_id:
+                found = self.runtime.store.owner(session_id)
+                if found is None:
+                    raise LookupError(f"no session {session_id}")
+                owner_account, owner_profile = found
+                if owner_account != account_id:
+                    raise PermissionError("session belongs to another account")
+                runtime_profile = self.runtime.profile_id
+                if owner_profile and runtime_profile and owner_profile != runtime_profile:
+                    raise PermissionError("session belongs to another account")
+                self.runtime.gate.clear(session_id, account_id=account_id)
+                return
+            self.runtime.gate.clear(session_id)
 
     def status(self) -> dict[str, object]:
         with self._lock:

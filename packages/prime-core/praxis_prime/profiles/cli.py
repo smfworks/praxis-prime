@@ -29,6 +29,10 @@ def add_profile_parser(commands: argparse._SubParsersAction[argparse.ArgumentPar
     assign.add_argument("--account", required=True)
     assign.add_argument("--role", required=True, choices=PROFILE_ROLES)
     assign.add_argument("--data-dir")
+    remove = sub.add_parser("unassign", help="Remove an account from a profile.")
+    remove.add_argument("name")
+    remove.add_argument("--account", required=True)
+    remove.add_argument("--data-dir")
 
 
 def profile_command(args: argparse.Namespace) -> int:
@@ -39,7 +43,9 @@ def profile_command(args: argparse.Namespace) -> int:
         return _list(args)
     if command == "assign":
         return _assign(args)
-    print("usage: praxis-prime profile {create|list|assign}", file=sys.stderr)
+    if command == "unassign":
+        return _unassign(args)
+    print("usage: praxis-prime profile {create|list|assign|unassign}", file=sys.stderr)
     return 2
 
 
@@ -78,7 +84,26 @@ def _assign(args: argparse.Namespace) -> int:
     except AccountError as exc:
         print(f"praxis-prime profile: {exc}", file=sys.stderr)
         return 2
-    print(f"assigned {account.username} as {args.role} on {args.name}")
+    print(f"{account.username} is {args.role} on {args.name}")
+    return 0
+
+
+def _unassign(args: argparse.Namespace) -> int:
+    root = _data(args)
+    store = AccountStore(root / "accounts.db")
+    account = store.get_username(args.account)
+    if account is None:
+        print("praxis-prime profile: no such account", file=sys.stderr)
+        return 2
+    try:
+        removed = store.remove_membership(account.id, args.name)
+    except AccountError as exc:
+        print(f"praxis-prime profile: {exc}", file=sys.stderr)
+        return 2
+    if not removed:
+        print(f"praxis-prime profile: {account.username} is not on {args.name}", file=sys.stderr)
+        return 2
+    print(f"removed {account.username} from {args.name}")
     return 0
 
 

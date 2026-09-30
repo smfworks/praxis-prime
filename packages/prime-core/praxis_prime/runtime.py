@@ -87,12 +87,18 @@ class Runtime:
         skill: str = "",
         channel: str = "",
         scope: str = "",
+        owner_account: str = "",
+        owner_profile: str = "",
     ) -> tuple[str, AgentLoop]:
         scopes = self.memory.scopes(channel, scope)
         preamble = _preamble(self, scopes, skill)
         if session_id:
             if not self.store.exists(session_id):
                 raise LookupError(f"no session {session_id}")
+            if owner_account:
+                found = self.store.owner(session_id)
+                if found is None or not _same_owner(found, owner_account, owner_profile):
+                    raise PermissionError("session belongs to another account")
             history = self.store.load(session_id)
             active_preamble = "" if history else preamble
         else:
@@ -101,6 +107,8 @@ class Runtime:
             session_id = self.store.create(
                 model=self.router.primary.spec(),
                 preamble=preamble,
+                owner_account=owner_account,
+                owner_profile=owner_profile,
             )
         episode_scope = scope or project_scope(self.cwd)
         bound_session = session_id
@@ -231,7 +239,7 @@ def build_runtime(
         cwd=work,
         env=environ,
     )
-    return Runtime(
+    built = Runtime(
         settings=settings,
         router=router,
         registry=tools,
@@ -252,6 +260,16 @@ def build_runtime(
         tool_policy=layout.allowlist,
         profile_id=layout.profile_id,
     )
+    if built.mcp is not None and layout.allowlist is not None:
+        built.mcp.allowed_servers = layout.allowlist.mcp
+    return built
+
+
+def _same_owner(found: tuple[str, str], account: str, profile: str) -> bool:
+    owner_account, owner_profile = found
+    if owner_account != account:
+        return False
+    return not owner_profile or not profile or owner_profile == profile
 
 
 def _preamble(runtime: Runtime, scopes: tuple[str, ...], skill: str) -> str:

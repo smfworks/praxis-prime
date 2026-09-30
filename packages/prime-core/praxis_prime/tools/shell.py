@@ -138,6 +138,10 @@ def execute_shell(arguments: Mapping[str, object], context: ToolContext) -> str:
         raise ValueError("shell requires a command string")
     timeout = _timeout(arguments.get("timeout_seconds"))
     cwd = Path(context.cwd)
+    from praxis_prime.policy.boundary import private_data_command
+
+    if private_data_command(command, cwd):
+        raise RuntimeError("refusing to read protected account or profile data")
     prepared = classify_command(command, workspace=cwd, cache=context.inode_cache)
     approved = context.shell_approved or context.host_shell_approved
     if prepared.force_approval and not approved:

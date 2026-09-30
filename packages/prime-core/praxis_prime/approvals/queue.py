@@ -11,7 +11,7 @@ import re
 import secrets
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -131,10 +131,19 @@ class ApprovalQueue:
         pending.sort(key=lambda item: str(item["id"]))
         return pending
 
-    def list_meta(self) -> list[dict[str, object]]:
-        """Content-free rows for every item still in this process."""
+    def list_meta(
+        self,
+        *,
+        profiles: Collection[str] | None = None,
+    ) -> list[dict[str, object]]:
+        """Content-free rows. ``profiles`` limits the set; None keeps every row."""
         with self._lock:
-            rows = [item.meta() for item in self._items.values()]
+            items = list(self._items.values())
+        rows: list[dict[str, object]] = []
+        for item in items:
+            if profiles is not None and item.profile_id not in profiles:
+                continue
+            rows.append(item.meta())
         rows.sort(key=lambda item: str(item["id"]))
         return rows
 

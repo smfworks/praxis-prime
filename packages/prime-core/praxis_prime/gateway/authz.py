@@ -22,6 +22,8 @@ from praxis_prime.accounts.db import (
     session_cookie,
 )
 from praxis_prime.accounts.roles import (
+    APPROVE_SERVER_ROLES,
+    CHAT_SERVER_ROLES,
     can_approve,
     can_chat,
     sees_all_profiles,
@@ -41,6 +43,7 @@ class Principal:
     username: str
     role: str
     session_token: str = ""
+    session_id: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,6 +96,7 @@ def authenticate_http(
             username=session.username,
             role=session.role,
             session_token=cookie,
+            session_id=session.id,
         )
     if bearer_enabled and token_ok(bearer_token(headers), bootstrap_token):
         owner = store.owner()
@@ -107,6 +111,11 @@ def authenticate_http(
     return Denial(401, "unauthorized", "authentication required")
 
 
+# Chat, approval, routine fire, model.set, and session.drop. Until per-profile
+# workers exist, these run only on the profile this process opened.
+_SCOPED_ACTIONS = frozenset({"chat", "approve"})
+
+
 def authorize_action(
     store: AccountStore | None,
     principal: Principal,
@@ -114,13 +123,20 @@ def authorize_action(
     action: str,
     profile: str,
     profile_exists: Callable[[str], bool] | None = None,
+    runtime_profile: str = "",
 ) -> Denial:
-    """Enforce the server role and, when a profile is named, membership."""
+    """Enforce the server role and membership on this process's profile.
+
+    An empty profile is not a pass. Scoped actions need the runtime profile
+    and a membership, unless the caller is owner or admin. Unscoped
+    approvals (no profile on the card and none on this process) are
+    owner/admin only.
+    """
     if principal.kind == "legacy" or store is None or not accounts_enforced(store):
         return _ALLOW
-    if action == "approve" and not can_approve(principal.role, None):
+    if action == "approve" and principal.role not in APPROVE_SERVER_ROLES:
         return Denial(403, "forbidden", "this role cannot approve")
-    if action == "chat" and not can_chat(principal.role, None):
+    if action == "chat" and principal.role not in CHAT_SERVER_ROLES:
         return Denial(403, "forbidden", "this role cannot chat")
     if action == "admin" and not sees_all_profiles(principal.role):
         return Denial(403, "forbidden", "admin role required")
@@ -128,11 +144,21 @@ def authorize_action(
         return Denial(403, "forbidden", "audit role required")
     if action == "content" and principal.role == "auditor":
         return Denial(403, "forbidden", "auditor cannot read chat content")
-    if not profile:
-        if action == "approve" and principal.role == "operator":
-            return _ALLOW
+    effective = profile
+    if action in _SCOPED_ACTIONS:
+        scoped = _scoped_profile(profile, runtime_profile)
+        if scoped.code == "unscoped" and action == "approve":
+            if can_approve(principal.role, None):
+                return _ALLOW
+            return Denial(403, "forbidden", "unscoped approvals are owner or admin only")
+        if scoped.code == "unscoped":
+            return Denial(403, "forbidden", "a profile is required")
+        if not scoped.ok:
+            return scoped
+        effective = scoped.message
+    if not effective:
         return _ALLOW
-    checked = profile_id(profile)
+    checked = profile_id(effective)
     if checked is None:
         return Denial(400, "bad_request", "invalid profile id")
     exists = True if profile_exists is None else profile_exists(checked)
@@ -233,7 +259,11 @@ def issue_ws_ticket(
     if account is None:
         return 401, _error("unauthorized", "authentication required")
     try:
-        ticket = store.issue_ticket(account, profile=profile)
+        ticket = store.issue_ticket(
+            account,
+            profile=profile,
+            session_id=principal.session_id,
+        )
     except ValueError as exc:
         return 400, _error("bad_request", str(exc))
     return 200, {"ok": True, "ticket": ticket, "expiresIn": 30}
@@ -248,7 +278,32 @@ def principal_from_ticket(store: AccountStore, token: str) -> Principal | None:
         account_id=ticket.account_id,
         username=ticket.username,
         role=ticket.role,
+        session_id=ticket.session_id,
     )
+
+
+def _scoped_profile(requested: str, runtime_profile: str) -> Denial:
+    """The profile this action may use, or a denial.
+
+    ``message`` holds the profile id when ``code`` is empty. ``unscoped``
+    means neither the caller nor this process named a profile.
+    """
+    raw = requested.strip()
+    bound = runtime_profile.strip()
+    if raw:
+        named = profile_id(raw)
+        if named is None:
+            return Denial(400, "bad_request", "invalid profile id")
+        bound_id = profile_id(bound) if bound else None
+        if bound_id is None or named != bound_id:
+            return Denial(403, "forbidden", "this daemon runs a different profile")
+        return Denial(0, "", named)
+    if bound:
+        named = profile_id(bound)
+        if named is None:
+            return Denial(403, "forbidden", "this daemon runs a different profile")
+        return Denial(0, "", named)
+    return Denial(0, "unscoped", "")
 
 
 def _audit(audit: AuditLog | None, kind: str, summary: str, payload: dict[str, object]) -> None:

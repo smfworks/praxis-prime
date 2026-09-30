@@ -16,13 +16,17 @@ praxis-prime account transfer-owner bea
 
 An empty `allow` list allows nothing. That is fail closed. A profile cannot add a tool or MCP server the org floor omitted.
 
-A profile created without an explicit list, including the migrated `default` profile, is written with `allow = ["*"]` for tools and for MCP. `*` means that layer adds no extra restriction, so a single-user install keeps the same tools after the upgrade. Tighten the list in `profile.toml` when you want fewer tools. An approval cannot put a tool back.
+The migrated `default` profile is written with `allow = ["*"]` for tools and for MCP. `*` means that layer adds no extra restriction, so a single-user install keeps the same tools after the upgrade. A profile created after that starts with an empty allow list. A missing `profile.toml` allows nothing. Tighten `default` in `profile.toml` when you want fewer tools. An approval cannot put a tool back.
+
+Stop `praxis-primed` before the first `account create`. That command moves `prime.db` into `profiles/default/`. The command refuses while the daemon is running, because an open connection would lose writes.
+
+This process runs one profile. Chat, approvals, `model.set`, and `session.drop` require that profile plus a membership (owner and admin are not limited to memberships). A chat whose profile is not the one the daemon opened is refused. The audit `profile` column is that runtime profile.
 
 ## Auditors
 
 An auditor does not chat and does not receive approval content. `GET /v1/approvals` stays 403 for that role.
 
-`GET /v1/approvals/meta` is the content-free view: `id`, `tool`, `risk`, `createdAt`, and `decision`, plus a `count`. It has no arguments, summary, reason, or mount line. Auditors may read it. Pending rows use `decision` `pending`.
+`GET /v1/approvals/meta` is the content-free view: `id`, `tool`, `risk`, `createdAt`, and `decision`, plus a `count`. It has no arguments, summary, reason, or mount line. Auditors, the owner, and admins see every profile. Other accounts see only profiles they belong to. Pending rows use `decision` `pending`. `GET /v1/approvals` omits another account's `sessionId`.
 
 ## Loopback bearer token
 
@@ -38,6 +42,10 @@ praxis-prime daemon stop
 praxis-prime daemon start
 ```
 
-`rotate-token` does not print the new token. Clients that read the file (the CLI, after restart) pick it up from disk. Delete the file and start the daemon if you want `praxis-primed` to create one itself.
+`rotate-token` does not print the new token. It writes a temporary file in the same directory and replaces `gateway.token`, so a reader does not see a half-written secret. Clients that read the file (the CLI, after restart) pick it up from disk. Delete the file and start the daemon if you want `praxis-primed` to create one itself.
+
+The session cookie is `HttpOnly`, `Secure`, and `SameSite=Strict`. Browsers send it to `http://127.0.0.1`. `httpx` and `urllib` cookie jars drop `Secure` cookies on `http://` URLs, including loopback. Non-browser clients should send the `Cookie` and `x-csrf-token` headers themselves, or use the bearer token.
+
+`account passwd`, `account disable`, and `account role` revoke that account's sessions and WebSocket tickets. A ticket is bound to the session that minted it, so logout invalidates a ticket that was issued before the logout. An open WebSocket is checked again on the next frame. `profile unassign` removes a membership; the next chat on that profile is refused.
 
 `gateway.bearer` defaults to `true`. After an account exists, set `bearer = false` in `config.toml` and restart to refuse the token. Cookie sessions and WebSocket tickets still work. Before any account exists the flag does not apply, so the gateway is not left open and the first-run token still works.

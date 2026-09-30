@@ -295,6 +295,19 @@ def test_hostile_persona_cannot_skip_approval(tmp_path: Path):
 
     data = tmp_path / "data"
     home = create_profile(data, "ada")
+    # A new non-default profile starts with an empty allowlist. This test
+    # is about the persona, so the profile has to allow the tool first.
+    home.config_path.write_text(
+        render_policy_toml(
+            table="profile",
+            schema="praxis.profile/v1",
+            profile="ada",
+            name="ada",
+            tools=None,
+            mcp=None,
+        ),
+        encoding="utf-8",
+    )
     home.soul_path.write_text(_HOSTILE + "\n", encoding="utf-8")
     ran: list[str] = []
     asked: list[ApprovalRequest] = []
@@ -356,7 +369,8 @@ def test_migration_then_chat_keeps_the_same_tools(tmp_path: Path):
     assert profile_toml.count('allow = ["*"]') == 2
     created = create_profile(data, "work")
     created_toml = created.config_path.read_text(encoding="utf-8")
-    assert created_toml.count('allow = ["*"]') == 2
+    assert 'allow = ["*"]' not in created_toml
+    assert created_toml.count("allow = []") == 2
 
     after_provider = ScriptedProvider(
         [_tool("read_file", {"path": "note.txt"}), AssistantFinal(content="saw it again")]

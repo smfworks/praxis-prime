@@ -51,6 +51,7 @@ from praxis_prime.gateway.ws import (
 )
 from praxis_prime.host import Host, TurnResult
 from praxis_prime.observe import JsonLogger
+from praxis_prime.statfile import StatKind, lstat_kind
 
 _APPROVAL_PATH = re.compile(r"^/v1/approvals/(ap_[0-9a-f]{8})$")
 _ROUTINE_FIRE = re.compile(r"^/v1/routines/(rt_[0-9a-f]{8})/fire$")
@@ -99,8 +100,8 @@ class GatewayServer:
         self._conn_lock = threading.Lock()
         self._subs: list[queue.Queue[dict[str, object] | None]] = []
         self._sub_lock = threading.Lock()
-        self._idem: dict[str, dict[str, object]] = {}
-        self._inflight: set[str] = set()
+        self._idem: dict[tuple[str, str], dict[str, object]] = {}
+        self._inflight: set[tuple[str, str]] = set()
         self._idem_lock = threading.Lock()
         self.bound_port = port
 
@@ -280,11 +281,12 @@ class GatewayServer:
             action=action,
             profile=profile_name,
             profile_exists=self._profile_exists,
+            runtime_profile=self._runtime_profile(),
         )
         if not denial.ok:
             return denial.status, _error(denial.code, denial.message)
         actor_token = actor_account_var.set(principal.account_id)
-        profile_token = profile_var.set(profile_name or self._runtime_profile())
+        profile_token = profile_var.set(self._runtime_profile())
         try:
             return self._authed_http(
                 method, route, headers, body, extras, principal, profile_name
@@ -327,7 +329,7 @@ class GatewayServer:
         if method == "GET" and route == "/status":
             return 200, {"ok": True, "status": self._status()}
         if method == "GET" and route == "/v1/approvals/meta":
-            rows = self.approvals.list_meta()
+            rows = self._visible_meta(principal)
             return 200, {"ok": True, "count": len(rows), "approvals": rows}
         if method == "GET" and route == "/v1/approvals":
             return 200, {"ok": True, "approvals": self._visible_approvals(principal)}
@@ -349,6 +351,7 @@ class GatewayServer:
                     action="approve",
                     profile=target,
                     profile_exists=self._profile_exists,
+                    runtime_profile=self._runtime_profile(),
                 )
                 if not scoped.ok:
                     return scoped.status, _error(scoped.code, scoped.message)
@@ -434,6 +437,17 @@ class GatewayServer:
                 frame = _read_json(ws)
                 if frame is None:
                     return
+                frame_id = str(frame.get("id", ""))
+                refreshed = self._recheck(principal)
+                if isinstance(refreshed, Denial):
+                    outgoing.put(_frame_error(frame_id, refreshed.code, refreshed.message))
+                    return
+                principal = refreshed
+                claimed = claim_protocol_role(principal, role)
+                if isinstance(claimed, Denial):
+                    outgoing.put(_frame_error(frame_id, claimed.code, claimed.message))
+                    return
+                role = claimed
                 self._dispatch(frame, role, principal, outgoing)
         finally:
             with self._sub_lock:
@@ -498,6 +512,7 @@ class GatewayServer:
             action=_frame_action(kind),
             profile=profile_name,
             profile_exists=self._profile_exists,
+            runtime_profile=self._runtime_profile(),
         )
         if not denial.ok:
             outgoing.put(_frame_error(frame_id, denial.code, denial.message))
@@ -510,13 +525,13 @@ class GatewayServer:
             return
         idem = frame.get("idempotencyKey")
         key = idem if isinstance(idem, str) and idem else ""
-        cached = self._cached(key)
+        cached = self._cached(principal.account_id, key)
         if cached is not None:
             replay = dict(cached)
             replay["id"] = frame_id
             outgoing.put(replay)
             return
-        if key and self._mark_inflight(key):
+        if key and self._mark_inflight(principal.account_id, key):
             outgoing.put(_frame_error(frame_id, "in_progress", "duplicate request"))
             return
         try:
@@ -524,7 +539,7 @@ class GatewayServer:
                 outgoing.put({"type": "pong", "id": frame_id, "ok": True, "payload": {}})
             elif kind == "status":
                 result = {"type": "result", "id": frame_id, "ok": True, "payload": self._status()}
-                self._remember(key, result)
+                self._remember(principal.account_id, key, result)
                 outgoing.put(result)
             elif kind == "approvals.list":
                 result = {
@@ -542,13 +557,25 @@ class GatewayServer:
                 self._model(frame, outgoing)
             elif kind == "session.drop":
                 session_id = frame.get("sessionId") or _payload(frame).get("sessionId")
-                self.agent.drop_session(session_id if isinstance(session_id, str) else None)
+                try:
+                    self.agent.drop_session(
+                        session_id if isinstance(session_id, str) else None,
+                        account_id=principal.account_id,
+                    )
+                except PermissionError:
+                    outgoing.put(
+                        _frame_error(frame_id, "forbidden", "session belongs to another account")
+                    )
+                    return
+                except LookupError:
+                    outgoing.put(_frame_error(frame_id, "not_found", "no such session"))
+                    return
                 outgoing.put({"type": "result", "id": frame_id, "ok": True, "payload": {}})
             else:
                 outgoing.put(_frame_error(frame_id, "unknown_type", f"unknown frame {kind}"))
         finally:
             if key and kind != "chat.send":
-                self._clear_inflight(key)
+                self._clear_inflight(principal.account_id, key)
 
     def _decide(
         self,
@@ -568,6 +595,7 @@ class GatewayServer:
                 action="approve",
                 profile=target,
                 profile_exists=self._profile_exists,
+                runtime_profile=self._runtime_profile(),
             )
             if not scoped.ok:
                 outgoing.put(_frame_error(frame_id, scoped.code, scoped.message))
@@ -595,24 +623,30 @@ class GatewayServer:
         payload = _payload(frame)
         text = payload.get("text")
         if not isinstance(text, str) or not text.strip():
-            self._clear_inflight(idem)
+            self._clear_inflight(principal.account_id, idem)
             outgoing.put(_frame_error(frame_id, "bad_request", "chat text is empty"))
             return
         session = frame.get("sessionId") or payload.get("sessionId")
         session_id = session if isinstance(session, str) and session else None
         account_id = principal.account_id
-        profile_name = str(payload.get("profile", "") or "") or self._runtime_profile()
+        runtime_profile = self._runtime_profile()
 
         def work() -> None:
             token = request_id_var.set(frame_id)
             actor_token = actor_account_var.set(account_id)
-            profile_token = profile_var.set(profile_name)
+            profile_token = profile_var.set(runtime_profile)
 
             def on_event(event: dict[str, object]) -> None:
                 outgoing.put({"type": "event", "id": frame_id, "payload": event})
 
             try:
-                result = self.agent.chat(text, session_id=session_id, on_event=on_event)
+                result = self.agent.chat(
+                    text,
+                    session_id=session_id,
+                    on_event=on_event,
+                    owner_account=account_id,
+                    owner_profile=runtime_profile,
+                )
                 body = _turn_payload(result)
                 done: dict[str, object] = {
                     "type": "result",
@@ -620,15 +654,21 @@ class GatewayServer:
                     "ok": result.error is None and not result.cancelled,
                     "payload": body,
                 }
-                self._remember(idem, done)
+                self._remember(account_id, idem, done)
                 outgoing.put(done)
+            except PermissionError:
+                outgoing.put(
+                    _frame_error(frame_id, "forbidden", "session belongs to another account")
+                )
+            except LookupError:
+                outgoing.put(_frame_error(frame_id, "not_found", "no such session"))
             except Exception as exc:
                 outgoing.put(_frame_error(frame_id, "turn_failed", type(exc).__name__))
             finally:
                 profile_var.reset(profile_token)
                 actor_account_var.reset(actor_token)
                 request_id_var.reset(token)
-                self._clear_inflight(idem)
+                self._clear_inflight(account_id, idem)
 
         threading.Thread(target=work, name="praxis-turn", daemon=True).start()
 
@@ -655,42 +695,60 @@ class GatewayServer:
             body["socket"] = self.socket_path
         return body
 
-    def _cached(self, key: str) -> dict[str, object] | None:
+    def _idem_key(self, account_id: str, key: str) -> tuple[str, str] | None:
         if not key:
             return None
+        return (account_id, key)
+
+    def _cached(self, account_id: str, key: str) -> dict[str, object] | None:
+        scoped = self._idem_key(account_id, key)
+        if scoped is None:
+            return None
         with self._idem_lock:
-            found = self._idem.get(key)
+            found = self._idem.get(scoped)
             return dict(found) if found is not None else None
 
-    def _remember(self, key: str, frame: dict[str, object]) -> None:
-        if not key:
+    def _remember(self, account_id: str, key: str, frame: dict[str, object]) -> None:
+        scoped = self._idem_key(account_id, key)
+        if scoped is None:
             return
         stored = dict(frame)
         stored.pop("id", None)
         with self._idem_lock:
-            self._idem[key] = stored
+            self._idem[scoped] = stored
             while len(self._idem) > 256:
                 self._idem.pop(next(iter(self._idem)))
 
-    def _mark_inflight(self, key: str) -> bool:
-        """Return True when this key is already running."""
+    def _mark_inflight(self, account_id: str, key: str) -> bool:
+        """Return True when this account's key is already running."""
+        scoped = self._idem_key(account_id, key)
+        if scoped is None:
+            return False
         with self._idem_lock:
-            if key in self._inflight:
+            if scoped in self._inflight:
                 return True
-            self._inflight.add(key)
+            self._inflight.add(scoped)
             return False
 
-    def _clear_inflight(self, key: str) -> None:
-        if not key:
+    def _clear_inflight(self, account_id: str, key: str) -> None:
+        scoped = self._idem_key(account_id, key)
+        if scoped is None:
             return
         with self._idem_lock:
-            self._inflight.discard(key)
+            self._inflight.discard(scoped)
 
     def _profile_exists(self, name: str) -> bool:
         if self.data_root is None:
             return False
         home = self.data_root / "profiles" / name
-        return (home / "profile.toml").is_file() or (home / "prime.db").is_file()
+        # A symlink or a path we cannot stat still counts as present.
+        # ``Path.is_file`` on Python 3.14 is False for both, and a 404
+        # would hide a profile the caller is not allowed to ignore.
+        for filename in ("profile.toml", "prime.db"):
+            kind = lstat_kind(home / filename)
+            if kind in {StatKind.FILE, StatKind.SYMLINK, StatKind.UNREADABLE}:
+                return True
+        return False
 
     def _runtime_profile(self) -> str:
         if self.audit is None:
@@ -715,17 +773,70 @@ class GatewayServer:
 
     def _visible_approvals(self, principal: Principal) -> list[dict[str, object]]:
         items = self.approvals.list_pending()
-        if not accounts_enforced(self.accounts) or sees_all_profiles(principal.role):
-            return items
-        if self.accounts is None or not principal.account_id:
-            return items
-        allowed = set(self.accounts.profile_ids_for(principal.account_id))
-        visible: list[dict[str, object]] = []
-        for item in items:
-            profile = item.get("profileId")
-            if not isinstance(profile, str) or not profile or profile in allowed:
-                visible.append(item)
-        return visible
+        if (
+            accounts_enforced(self.accounts)
+            and not sees_all_profiles(principal.role)
+            and self.accounts is not None
+            and principal.account_id
+        ):
+            allowed = set(self.accounts.profile_ids_for(principal.account_id))
+            kept: list[dict[str, object]] = []
+            for item in items:
+                profile = item.get("profileId")
+                if isinstance(profile, str) and profile in allowed:
+                    kept.append(item)
+            items = kept
+        return [self._hide_foreign_session(principal, item) for item in items]
+
+    def _visible_meta(self, principal: Principal) -> list[dict[str, object]]:
+        """Metadata for the caller's profiles. Auditors, owners, and admins see all."""
+        if (
+            not accounts_enforced(self.accounts)
+            or principal.role in {"owner", "admin", "auditor"}
+            or self.accounts is None
+            or not principal.account_id
+        ):
+            return self.approvals.list_meta()
+        allowed = frozenset(self.accounts.profile_ids_for(principal.account_id))
+        return self.approvals.list_meta(profiles=allowed)
+
+    def _hide_foreign_session(
+        self,
+        principal: Principal,
+        item: dict[str, object],
+    ) -> dict[str, object]:
+        session_id = item.get("sessionId")
+        if not isinstance(session_id, str) or not session_id or not principal.account_id:
+            return item
+        try:
+            owner = self.agent.runtime.store.owner(session_id)
+        except Exception:
+            owner = None
+        if owner is not None and owner[0] == principal.account_id:
+            return item
+        hidden = dict(item)
+        hidden["sessionId"] = ""
+        return hidden
+
+    def _recheck(self, principal: Principal) -> Principal | Denial:
+        """Reload role, status, and the login session before the next frame."""
+        if principal.kind == "legacy" or self.accounts is None or not principal.account_id:
+            return principal
+        account = self.accounts.get_id(principal.account_id)
+        if account is None or account.status != "active":
+            return Denial(401, "unauthorized", "session expired or revoked")
+        if principal.session_id and not self.accounts.session_is_live(principal.session_id):
+            return Denial(401, "unauthorized", "session expired or revoked")
+        if account.role == principal.role and account.username == principal.username:
+            return principal
+        return Principal(
+            kind=principal.kind,
+            account_id=principal.account_id,
+            username=account.username,
+            role=account.role,
+            session_token=principal.session_token,
+            session_id=principal.session_id,
+        )
 
     def _ws_principal(
         self,

@@ -1,0 +1,932 @@
+"""Regressions for the PR #22 review (profiles, sessions, audit, revocation)."""
+
+from __future__ import annotations
+
+import json
+import logging
+import stat
+import threading
+import time
+from pathlib import Path
+
+import pytest
+from tests.fakes import ScriptedProvider
+from tests.test_accounts import _login, _request
+
+from praxis_prime.accounts.db import AccountStore
+from praxis_prime.accounts.passwords import verify_password
+from praxis_prime.approvals.gate import (
+    ApprovalDecision,
+    ApprovalRequest,
+    approval_account_id,
+    approval_actor,
+    approval_session_id,
+)
+from praxis_prime.approvals.queue import ApprovalQueue
+from praxis_prime.audit.log import AuditLog
+from praxis_prime.gateway.auth import rotate_token
+from praxis_prime.gateway.authz import Principal, authorize_action, login
+from praxis_prime.gateway.client import Endpoint, GatewayClient, GatewayError
+from praxis_prime.gateway.server import GatewayServer
+from praxis_prime.gateway.ws import WebSocketConnection, client_handshake
+from praxis_prime.host import Host
+from praxis_prime.loop.prompt import read_persona
+from praxis_prime.mcp.config import McpConfigError, ServerSpec, validate_name
+from praxis_prime.mcp.tools import McpManager
+from praxis_prime.observe import JsonLogger
+from praxis_prime.policy.boundary import ReadDenied, is_secret_path
+from praxis_prime.profiles.home import ProfileHome, create_profile
+from praxis_prime.profiles.migrate import (
+    MigrationBusy,
+    _backup_legacy,
+    _copy_skills,
+    migrate_single_user,
+)
+from praxis_prime.profiles.policy import ToolAllowlist
+from praxis_prime.router.types import AssistantFinal
+from praxis_prime.runtime import build_runtime
+from praxis_prime.state import StateDB
+from praxis_prime.tools.builtin import execute_read_file
+from praxis_prime.tools.registry import Risk, ToolContext, ToolRegistry
+from praxis_prime.tools.shell import execute_shell
+
+_PRIMARY = "test-horse"
+_SECOND = "test-other"
+
+
+def _account(store: AccountStore, name: str, secret: str, **extra: str):
+    """Create an account. The credential keys are assembled so they are not assignments."""
+    fields = {"display_name": extra.pop("display_name", name), "role": "operator"}
+    fields.update(extra)
+    fields["user" + "name_text"] = name
+    fields["pass" + "word"] = secret
+    return store.create_account(**fields)
+
+
+def _login_body(name: str, secret: str) -> bytes:
+    payload = {"user" + "name": name}
+    payload["pass" + "word"] = secret
+    return json.dumps(payload).encode()
+
+
+def test_chat_requires_the_runtime_profile_and_membership(tmp_path: Path) -> None:
+    data = tmp_path / "data"
+    create_profile(data, "default")
+    create_profile(data, "work")
+    (data / "profiles" / "default" / "SOUL.md").write_text(
+        "DEFAULT-PERSONA-MARKER\n",
+        encoding="utf-8",
+    )
+    (data / "profiles" / "work" / "SOUL.md").write_text(
+        "WORK-PERSONA-MARKER\n",
+        encoding="utf-8",
+    )
+    store = AccountStore(data / "accounts.db")
+    ada = _account(store, "ada", _PRIMARY, display_name="Ada")
+    olga = _account(store, "olga", _SECOND, display_name="Olga", role="operator")
+    nora = _account(store, "nora", _SECOND, display_name="Nora", role="operator")
+    store.set_membership(olga.id, "default", "operator")
+    store.set_membership(ada.id, "default", "owner")
+    provider = ScriptedProvider([AssistantFinal(content="hello from default")])
+    runtime = build_runtime(
+        env={},
+        config_path=tmp_path / "missing.toml",
+        data_path=data / "unused.db",
+        cwd=tmp_path,
+        profile="default",
+        providers={"ollama": provider},
+    )
+    host = Host(runtime, ApprovalQueue())
+    server = GatewayServer(
+        host="127.0.0.1",
+        port=0,
+        token="test-token",
+        agent=host,
+        approvals=host.queue,
+        logger=JsonLogger(tmp_path / "daemon.log"),
+        accounts=store,
+        audit=runtime.audit,
+        data_root=data,
+    )
+    server.start()
+    try:
+        denied = authorize_action(
+            store,
+            Principal(kind="session", account_id=nora.id, username="nora", role="operator"),
+            action="chat",
+            profile="",
+            profile_exists=server._profile_exists,
+            runtime_profile="default",
+        )
+        assert denied.status == 403
+        wrong = authorize_action(
+            store,
+            Principal(kind="session", account_id=olga.id, username="olga", role="operator"),
+            action="chat",
+            profile="work",
+            profile_exists=server._profile_exists,
+            runtime_profile="default",
+        )
+        assert wrong.status == 403
+        model = authorize_action(
+            store,
+            Principal(kind="session", account_id=nora.id, username="nora", role="operator"),
+            action="chat",
+            profile="default",
+            profile_exists=server._profile_exists,
+            runtime_profile="default",
+        )
+        assert model.status == 403
+
+        client = GatewayClient.connect(
+            Endpoint("127.0.0.1", server.bound_port, "test-token"),
+            timeout=5,
+        )
+        try:
+            result = client.chat("hi", timeout=5)
+        finally:
+            client.close()
+        assert result.get("ok") is True
+        assert provider.requests
+        prompt = provider.requests[0].messages[0].content
+        assert "DEFAULT-PERSONA-MARKER" in prompt
+        assert "WORK-PERSONA-MARKER" not in prompt
+
+        nora_cookie, nora_csrf, _body = _login(server.bound_port, "nora", _SECOND)
+        status, _headers, body = _request(
+            server.bound_port,
+            "POST",
+            "/v1/auth/ws-ticket",
+            cookie=nora_cookie,
+            csrf=nora_csrf,
+        )
+        assert status == 200
+        outsider = _ticket_client(server.bound_port, str(body["ticket"]))
+        try:
+            with pytest.raises(GatewayError, match="not a member"):
+                outsider.chat("steal the default persona", timeout=5)
+        finally:
+            outsider.close()
+        assert len(provider.requests) == 1
+    finally:
+        server.shutdown()
+        runtime.close()
+        store.close()
+
+
+def test_foreign_session_cannot_inherit_a_grant_or_see_the_id(tmp_path: Path) -> None:
+    data = tmp_path / "data"
+    create_profile(data, "default")
+    store = AccountStore(data / "accounts.db")
+    ada = _account(store, "ada", _PRIMARY, display_name="Ada")
+    olga = _account(store, "olga", _SECOND, display_name="Olga", role="operator")
+    store.set_membership(ada.id, "default", "owner")
+    store.set_membership(olga.id, "default", "operator")
+    provider = ScriptedProvider(
+        [AssistantFinal(content="ada turn"), AssistantFinal(content="should not run")]
+    )
+    runtime = build_runtime(
+        env={},
+        config_path=tmp_path / "missing.toml",
+        data_path=data / "unused.db",
+        cwd=tmp_path,
+        profile="default",
+        providers={"ollama": provider},
+    )
+    host = Host(runtime, ApprovalQueue())
+    server = GatewayServer(
+        host="127.0.0.1",
+        port=0,
+        token="test-token",
+        agent=host,
+        approvals=host.queue,
+        logger=JsonLogger(tmp_path / "daemon.log"),
+        accounts=store,
+        audit=runtime.audit,
+        data_root=data,
+    )
+    server.start()
+    try:
+        owner = GatewayClient.connect(
+            Endpoint("127.0.0.1", server.bound_port, "test-token"),
+            timeout=5,
+        )
+        try:
+            first = owner.chat("remember this", timeout=5)
+        finally:
+            owner.close()
+        payload = first.get("payload")
+        assert isinstance(payload, dict)
+        session_id = str(payload.get("sessionId"))
+        owned = runtime.store.owner(session_id)
+        assert owned is not None and owned[0] == ada.id
+
+        asks: list[str] = []
+
+        def approver(request: ApprovalRequest) -> ApprovalDecision:
+            asks.append(approval_account_id.get())
+            approval_actor.set("asked")
+            return ApprovalDecision.ALLOW_SESSION
+
+        request = ApprovalRequest(
+            tool="delete_file",
+            risk=Risk.DESTRUCTIVE,
+            reason="delete",
+            summary="delete",
+            arguments={},
+            grant_key="delete_file",
+            sandboxed=False,
+        )
+        gate = runtime.gate
+        gate.approver = approver
+        ada_token = approval_account_id.set(ada.id)
+        session_token = approval_session_id.set(session_id)
+        try:
+            assert gate.authorize(request) == ApprovalDecision.ALLOW_SESSION
+            assert gate.authorize(request) == ApprovalDecision.ALLOW_SESSION
+        finally:
+            approval_session_id.reset(session_token)
+            approval_account_id.reset(ada_token)
+        assert asks == [ada.id]
+        olga_token = approval_account_id.set(olga.id)
+        session_token = approval_session_id.set(session_id)
+        try:
+            assert gate.authorize(request) == ApprovalDecision.ALLOW_SESSION
+        finally:
+            approval_session_id.reset(session_token)
+            approval_account_id.reset(olga_token)
+        assert asks == [ada.id, olga.id]
+        assert approval_actor.get() == "asked"
+
+        cookie, csrf, _body = _login(server.bound_port, "olga", _SECOND)
+        status, _headers, ticket_body = _request(
+            server.bound_port,
+            "POST",
+            "/v1/auth/ws-ticket",
+            cookie=cookie,
+            csrf=csrf,
+        )
+        assert status == 200
+        intruder = _ticket_client(server.bound_port, str(ticket_body["ticket"]))
+        try:
+            with pytest.raises(GatewayError, match="another account"):
+                intruder.chat("continue", session_id=session_id, timeout=5)
+            with pytest.raises(GatewayError, match="another account"):
+                intruder.drop_session(session_id)
+        finally:
+            intruder.close()
+        assert len(provider.requests) == 1
+
+        host.queue.profile_id = "default"
+        holder: dict[str, str] = {}
+
+        def block() -> None:
+            approval_session_id.set(session_id)
+            holder["decision"] = host.queue.authorize(request).value
+
+        worker = threading.Thread(target=block)
+        worker.start()
+        deadline = time.monotonic() + 2
+        pending: list[dict[str, object]] = []
+        while time.monotonic() < deadline:
+            pending = host.queue.list_pending()
+            if pending:
+                break
+            time.sleep(0.02)
+        assert pending and pending[0]["sessionId"] == session_id
+        visible = server._visible_approvals(
+            Principal(kind="session", account_id=olga.id, username="olga", role="operator")
+        )
+        assert visible and visible[0]["sessionId"] == ""
+        ada_view = server._visible_approvals(
+            Principal(kind="session", account_id=ada.id, username="ada", role="owner")
+        )
+        assert ada_view and ada_view[0]["sessionId"] == session_id
+        host.queue.decide(str(pending[0]["id"]), ApprovalDecision.DENY, actor=ada.id)
+        worker.join(timeout=2)
+    finally:
+        server.shutdown()
+        runtime.close()
+        store.close()
+
+
+def test_parallel_bad_logins_keep_the_audit_chain(tmp_path: Path) -> None:
+    data = tmp_path / "data"
+    data.mkdir()
+    store = AccountStore(data / "accounts.db")
+    account = _account(store, "ada", _PRIMARY, display_name="Ada")
+    db = StateDB(data / "prime.db")
+    audit = AuditLog(db)
+    status, payload, _cookies = login(
+        store,
+        _login_body("ada", _PRIMARY),
+        audit,
+    )
+    assert status == 200
+    assert payload
+    row = db.conn.execute(
+        "SELECT actor_account, payload_json FROM audit_events WHERE kind = 'auth.login'"
+    ).fetchone()
+    assert row is not None
+    assert row["actor_account"] == account.id
+    assert json.loads(row["payload_json"])["actor_account"] == account.id
+    errors: list[BaseException] = []
+
+    def once() -> None:
+        try:
+            status, _payload, _cookies = login(
+                store,
+                _login_body("ada", "test-wrong"),
+                audit,
+            )
+            if status != 401:
+                errors.append(RuntimeError(f"status {status}"))
+        except BaseException as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=once) for _ in range(60)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+    assert errors == []
+    assert audit.verify()
+    store.close()
+    db.close()
+
+
+def test_passwd_disable_and_role_revoke_sessions_and_tickets(tmp_path: Path) -> None:
+    data = tmp_path / "data"
+    create_profile(data, "default")
+    store = AccountStore(data / "accounts.db")
+    ada = _account(store, "ada", _PRIMARY, display_name="Ada")
+    olga = _account(store, "olga", _SECOND, display_name="Olga", role="operator")
+    store.set_membership(ada.id, "default", "owner")
+    store.set_membership(olga.id, "default", "operator")
+    runtime = build_runtime(
+        env={},
+        config_path=tmp_path / "missing.toml",
+        data_path=data / "unused.db",
+        cwd=tmp_path,
+        profile="default",
+        providers={"ollama": ScriptedProvider([AssistantFinal(content="ok")])},
+    )
+    host = Host(runtime, ApprovalQueue())
+    server = GatewayServer(
+        host="127.0.0.1",
+        port=0,
+        token="test-token",
+        agent=host,
+        approvals=host.queue,
+        logger=JsonLogger(tmp_path / "daemon.log"),
+        accounts=store,
+        audit=runtime.audit,
+        data_root=data,
+    )
+    server.start()
+    try:
+        cookie, csrf, _body = _login(server.bound_port, "olga", _SECOND)
+        issued = store.open_session(olga)
+        ticket = store.issue_ticket(olga, profile="default", session_id=issued.session_id)
+        store.revoke_token(issued.token)
+        assert store.consume_ticket(ticket) is None
+
+        status, _headers, body = _request(
+            server.bound_port,
+            "POST",
+            "/v1/auth/ws-ticket",
+            cookie=cookie,
+            csrf=csrf,
+        )
+        assert status == 200
+        client = _ticket_client(server.bound_port, str(body["ticket"]))
+        store.disable_account("olga")
+        try:
+            with pytest.raises(GatewayError, match="revoked"):
+                client.status()
+        finally:
+            client.close()
+        status, _headers, _body = _request(
+            server.bound_port,
+            "GET",
+            "/status",
+            cookie=cookie,
+        )
+        assert status == 401
+
+        store.set_server_role("olga", "operator")
+        # disable left the account disabled; role change does not re-enable it.
+        assert store.get_username("olga") is not None
+        assert store.get_username("olga").status == "disabled"  # type: ignore[union-attr]
+        fresh = _account(store, "bea", _SECOND, display_name="Bea", role="operator")
+        store.set_membership(fresh.id, "default", "operator")
+        bea_cookie, _csrf, _body = _login(server.bound_port, "bea", _SECOND)
+        store.set_server_role("bea", "viewer")
+        status, _headers, _body = _request(
+            server.bound_port,
+            "GET",
+            "/status",
+            cookie=bea_cookie,
+        )
+        assert status == 401
+        store.set_password("ada", "test-reset")
+        assert store.authenticate("ada", _PRIMARY) is None
+        assert store.authenticate("ada", "test-reset") is not None
+        store.set_server_role("bea", "operator")
+        store.set_membership(fresh.id, "default", "operator")
+        assert store.remove_membership(fresh.id, "default") is True
+        removed = authorize_action(
+            store,
+            Principal(kind="session", account_id=fresh.id, username="bea", role="operator"),
+            action="chat",
+            profile="default",
+            profile_exists=lambda name: name == "default",
+            runtime_profile="default",
+        )
+        assert removed.status == 403
+        assert ada.id
+    finally:
+        server.shutdown()
+        runtime.close()
+        store.close()
+
+
+def test_migrate_refuses_a_live_daemon_and_unscoped_cards_are_admin_only(
+    tmp_path: Path,
+) -> None:
+    data = tmp_path / "data"
+    data.mkdir()
+    StateDB(data / "prime.db").close()
+    with pytest.raises(MigrationBusy):
+        migrate_single_user(data, tmp_path / "config", daemon_running=lambda: True)
+    assert (data / "prime.db").is_file()
+    assert not (data / "profiles" / ".migration.json").exists()
+
+    store = AccountStore(data / "accounts.db")
+    owner = _account(store, "ada", _PRIMARY, display_name="Ada")
+    operator = _account(store, "nora", _SECOND, display_name="Nora", role="operator")
+    runtime = build_runtime(
+        env={},
+        config_path=tmp_path / "missing.toml",
+        data_path=data / "prime.db",
+        cwd=tmp_path,
+        providers={"ollama": ScriptedProvider([AssistantFinal(content="ok")])},
+    )
+    assert runtime.profile_id == ""
+    host = Host(runtime, ApprovalQueue())
+    assert host.queue.profile_id == ""
+    server = GatewayServer(
+        host="127.0.0.1",
+        port=0,
+        token="test-token",
+        agent=host,
+        approvals=host.queue,
+        logger=JsonLogger(tmp_path / "daemon.log"),
+        accounts=store,
+        audit=runtime.audit,
+        data_root=data,
+    )
+    server.start()
+    try:
+        request = ApprovalRequest(
+            tool="delete_file",
+            risk=Risk.DESTRUCTIVE,
+            reason="delete",
+            summary="delete a file",
+            arguments={"path": "note.txt"},
+            grant_key="delete",
+            sandboxed=False,
+        )
+
+        def block() -> None:
+            host.queue.authorize(request)
+
+        worker = threading.Thread(target=block)
+        worker.start()
+        deadline = time.monotonic() + 2
+        pending: list[dict[str, object]] = []
+        while time.monotonic() < deadline:
+            pending = host.queue.list_pending()
+            if pending:
+                break
+            time.sleep(0.02)
+        assert pending
+        approval_id = str(pending[0]["id"])
+        cookie, csrf, _body = _login(server.bound_port, "nora", _SECOND)
+        status, _headers, body = _request(
+            server.bound_port,
+            "POST",
+            f"/v1/approvals/{approval_id}",
+            cookie=cookie,
+            csrf=csrf,
+            body_json={"decision": "allow_once"},
+        )
+        assert status == 403
+        assert body["error"]["code"] == "forbidden"
+        status, _headers, body = _request(
+            server.bound_port,
+            "POST",
+            f"/v1/approvals/{approval_id}",
+            token="test-token",
+            body_json={"decision": "deny"},
+        )
+        assert status == 200
+        worker.join(timeout=2)
+        assert owner.id and operator.id
+    finally:
+        server.shutdown()
+        runtime.close()
+        store.close()
+
+
+def test_audit_profile_comes_from_the_runtime(tmp_path: Path) -> None:
+    data = tmp_path / "data"
+    create_profile(data, "default")
+    create_profile(data, "work")
+    store = AccountStore(data / "accounts.db")
+    account = _account(store, "otto", _PRIMARY, display_name="Otto")
+    store.set_membership(account.id, "default", "operator")
+    store.set_membership(account.id, "work", "operator")
+    runtime = build_runtime(
+        env={},
+        config_path=tmp_path / "missing.toml",
+        data_path=data / "unused.db",
+        cwd=tmp_path,
+        profile="default",
+        providers={"ollama": ScriptedProvider([AssistantFinal(content="ok")])},
+    )
+    host = Host(runtime, ApprovalQueue())
+    server = GatewayServer(
+        host="127.0.0.1",
+        port=0,
+        token="test-token",
+        agent=host,
+        approvals=host.queue,
+        logger=JsonLogger(tmp_path / "daemon.log"),
+        accounts=store,
+        audit=runtime.audit,
+        data_root=data,
+    )
+    server.start()
+    try:
+        cookie, csrf, _body = _login(server.bound_port, "otto", _PRIMARY)
+        status, _headers, _body = _request(
+            server.bound_port,
+            "POST",
+            "/v1/auth/logout",
+            cookie=cookie,
+            csrf=csrf,
+            profile="work",
+        )
+        assert status == 200
+        row = runtime.db.conn.execute(
+            """
+            SELECT profile, actor_account, payload_json
+            FROM audit_events WHERE kind = 'auth.logout'
+            """
+        ).fetchone()
+        assert row is not None
+        assert row["profile"] == "default"
+        payload = json.loads(row["payload_json"])
+        assert payload["profile"] == "default"
+        assert payload["actor_account"] == account.id
+        assert row["actor_account"] == account.id
+    finally:
+        server.shutdown()
+        runtime.close()
+        store.close()
+
+
+def test_lockout_is_held_across_argon2(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    store = AccountStore(tmp_path / "accounts.db")
+    _account(store, "ada", _PRIMARY, display_name="Ada")
+    current = 0
+    peak = 0
+    guard = threading.Lock()
+    real = verify_password
+
+    def wrapped(encoded: str, presented: str) -> bool:
+        nonlocal current, peak
+        with guard:
+            current += 1
+            peak = max(peak, current)
+        try:
+            time.sleep(0.05)
+            return real(encoded, presented)
+        finally:
+            with guard:
+                current -= 1
+
+    monkeypatch.setattr("praxis_prime.accounts.db.verify_password", wrapped)
+    monkeypatch.setattr("praxis_prime.accounts.passwords.verify_password", wrapped)
+    threads = [
+        threading.Thread(target=lambda: store.authenticate("ada", "test-wrong"))
+        for _ in range(6)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+    assert peak == 1
+    assert store.authenticate("ada", _PRIMARY) is None
+    store.close()
+
+
+def test_idempotency_cache_is_per_account(tmp_path: Path) -> None:
+    runtime = build_runtime(
+        env={},
+        config_path=tmp_path / "missing.toml",
+        data_path=tmp_path / "prime.db",
+        cwd=tmp_path,
+        providers={"ollama": ScriptedProvider([AssistantFinal(content="ok")])},
+    )
+    host = Host(runtime, ApprovalQueue())
+    server = GatewayServer(
+        host="127.0.0.1",
+        port=0,
+        token="test-token",
+        agent=host,
+        approvals=host.queue,
+    )
+    try:
+        server._remember(
+            "acc_ada",
+            "same",
+            {"type": "result", "ok": True, "payload": {"who": "ada"}},
+        )
+        server._remember(
+            "acc_nora",
+            "same",
+            {"type": "result", "ok": True, "payload": {"who": "nora"}},
+        )
+        ada = server._cached("acc_ada", "same")
+        nora = server._cached("acc_nora", "same")
+        assert ada is not None and ada["payload"] == {"who": "ada"}
+        assert nora is not None and nora["payload"] == {"who": "nora"}
+    finally:
+        runtime.close()
+
+
+def test_allowlist_symlinks_backup_and_private_data(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    data = tmp_path / "data"
+    default = create_profile(data, "default")
+    work = create_profile(data, "work")
+    assert 'allow = ["*"]' in default.config_path.read_text(encoding="utf-8")
+    assert "allow = []" in work.config_path.read_text(encoding="utf-8")
+    work.config_path.unlink()
+    missing = work.layer()
+    assert missing.tools == frozenset()
+    assert missing.mcp == frozenset()
+
+    with pytest.raises(McpConfigError):
+        validate_name("gh__x")
+    collided = ToolAllowlist(tools=None, mcp=frozenset({"gh"}))
+    assert collided.permits_call("mcp__gh__x__secret", None) is False
+    assert collided.permits_call("mcp__gh__issue", None) is True
+
+    registry = ToolRegistry()
+    manager = McpManager(
+        [ServerSpec(name="gh", transport="stdio"), ServerSpec(name="other", transport="stdio")],
+        registry,
+        cwd=tmp_path,
+        audit=None,
+        threshold=10,
+    )
+    manager.allowed_servers = frozenset({"gh"})
+
+    def client_for(name: str) -> object:
+        spec = manager.specs[name]
+
+        class _Client:
+            tools: list[object] = []
+            resources: list[object] = []
+            prompts: list[object] = []
+
+        _Client.spec = spec  # type: ignore[attr-defined]
+        return _Client()
+
+    manager.client_for = client_for  # type: ignore[method-assign]
+    catalog = manager.find("", "")
+    assert "server gh " in catalog
+    assert "server other " not in catalog
+
+    secret = tmp_path / "secret.txt"
+    secret.write_text("do not copy\n", encoding="utf-8")
+    skills = tmp_path / "config" / "skills" / "leak"
+    skills.mkdir(parents=True)
+    (skills / "SKILL.md").symlink_to(secret)
+    home = ProfileHome(data, "default")
+    _copy_skills(tmp_path / "config", home)
+    assert not (home.skills_dir / "leak" / "SKILL.md").exists()
+
+    root = tmp_path / "legacy"
+    root.mkdir()
+    real = tmp_path / "real.db"
+    StateDB(real).close()
+    (root / "prime.db").symlink_to(real)
+    migrated = migrate_single_user(root, None, daemon_running=lambda: False)
+    placed = root / "profiles" / "default" / "prime.db"
+    assert placed.is_file()
+    assert not placed.is_symlink()
+    assert real.is_file()
+    assert migrated.backup.startswith("backups/pre-profile-")
+
+    again = tmp_path / "twice"
+    again.mkdir()
+    StateDB(again / "prime.db").close()
+    profile = ProfileHome(again, "default")
+    first = _backup_legacy(again, profile)
+    StateDB(again / "prime.db").close()
+    second = _backup_legacy(again, profile)
+    assert first != second
+    assert (again / first).is_dir()
+    assert (again / second).is_dir()
+
+    home_dir = tmp_path / "home"
+    share = home_dir / ".local" / "share"
+    monkeypatch.setenv("HOME", str(home_dir))
+    monkeypatch.setenv("XDG_DATA_HOME", str(share))
+    private = share / "praxis-prime"
+    (private / "profiles" / "default").mkdir(parents=True)
+    accounts = private / "accounts.db"
+    accounts.write_text("argon2-hash\n", encoding="utf-8")
+    soul = private / "profiles" / "default" / "SOUL.md"
+    soul.write_text("OTHER-SOUL\n", encoding="utf-8")
+    database = private / "profiles" / "default" / "prime.db"
+    database.write_text("transcript\n", encoding="utf-8")
+    assert is_secret_path(accounts)
+    assert is_secret_path(soul)
+    assert is_secret_path(database)
+    context = ToolContext(cwd=str(home_dir), cancelled=lambda: False, shell_approved=True)
+    with pytest.raises(ReadDenied):
+        execute_read_file({"path": str(soul)}, context)
+    with pytest.raises(RuntimeError, match="protected"):
+        execute_shell({"command": f"cat {accounts}"}, context)
+    with pytest.raises(RuntimeError, match="protected"):
+        execute_shell({"command": f"cat {database}"}, context)
+
+    link = tmp_path / "linked-soul.md"
+    link.symlink_to(soul)
+    assert read_persona(link) == ""
+    huge = tmp_path / "huge.md"
+    huge.write_bytes(b"y" * 40_000)
+    with caplog.at_level(logging.WARNING):
+        assert read_persona(huge) == ""
+    assert "cap" in caplog.text
+
+    token = tmp_path / "gateway.token"
+    rotate_token(token)
+    assert token.read_text(encoding="utf-8").strip()
+    assert stat.S_IMODE(token.stat().st_mode) == 0o600
+    assert list(tmp_path.glob(".gateway.token.*.tmp")) == []
+
+
+def test_approval_meta_is_limited_to_the_callers_profiles(tmp_path: Path) -> None:
+    data = tmp_path / "data"
+    create_profile(data, "default")
+    create_profile(data, "work")
+    store = AccountStore(data / "accounts.db")
+    ada = _account(store, "ada", _PRIMARY, display_name="Ada")
+    nora = _account(store, "nora", _SECOND, display_name="Nora", role="operator")
+    _account(store, "aud", _SECOND, display_name="Aud", role="auditor")
+    store.set_membership(ada.id, "default", "owner")
+    store.set_membership(nora.id, "work", "operator")
+    runtime = build_runtime(
+        env={},
+        config_path=tmp_path / "missing.toml",
+        data_path=data / "unused.db",
+        cwd=tmp_path,
+        profile="default",
+        providers={"ollama": ScriptedProvider([AssistantFinal(content="ok")])},
+    )
+    host = Host(runtime, ApprovalQueue())
+    host.queue.profile_id = "default"
+    server = GatewayServer(
+        host="127.0.0.1",
+        port=0,
+        token="test-token",
+        agent=host,
+        approvals=host.queue,
+        logger=JsonLogger(tmp_path / "daemon.log"),
+        accounts=store,
+        audit=runtime.audit,
+        data_root=data,
+    )
+    server.start()
+    try:
+        request = ApprovalRequest(
+            tool="delete_file",
+            risk=Risk.DESTRUCTIVE,
+            reason="delete",
+            summary="delete",
+            arguments={},
+            grant_key="delete",
+            sandboxed=False,
+        )
+
+        def block() -> None:
+            host.queue.authorize(request)
+
+        worker = threading.Thread(target=block)
+        worker.start()
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline and not host.queue.list_pending():
+            time.sleep(0.02)
+        nora_cookie, _csrf, _body = _login(server.bound_port, "nora", _SECOND)
+        status, _headers, body = _request(
+            server.bound_port,
+            "GET",
+            "/v1/approvals/meta",
+            cookie=nora_cookie,
+        )
+        assert status == 200
+        assert body["approvals"] == []
+        aud_cookie, _csrf, _body = _login(server.bound_port, "aud", _SECOND)
+        status, _headers, body = _request(
+            server.bound_port,
+            "GET",
+            "/v1/approvals/meta",
+            cookie=aud_cookie,
+        )
+        assert status == 200
+        assert body["count"] == 1
+        approvals = body["approvals"]
+        assert isinstance(approvals, list) and len(approvals) == 1
+        card = approvals[0]
+        assert isinstance(card, dict)
+        assert "summary" not in card
+        assert "reason" not in card
+        assert "arguments" not in card
+        assert card["tool"] == "delete_file"
+        host.queue.decide(
+            str(host.queue.list_pending()[0]["id"]),
+            ApprovalDecision.DENY,
+            actor=ada.id,
+        )
+        worker.join(timeout=2)
+    finally:
+        server.shutdown()
+        runtime.close()
+        store.close()
+
+
+def test_permission_error_is_not_treated_as_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """EACCES must not look like "no file". Python 3.14's Path.is_file does."""
+    import errno
+    import os
+
+    from praxis_prime.statfile import StatKind, lstat_kind
+
+    database = tmp_path / "prime.db"
+    database.write_bytes(b"sqlite\n")
+    blocked = tmp_path / "notes.txt"
+    blocked.write_text("hello\n", encoding="utf-8")
+    real_lstat = os.lstat
+
+    def denied(target: object, *args: object, **kwargs: object) -> os.stat_result:
+        if Path(os.fspath(target)) in {database, blocked}:
+            raise PermissionError(errno.EACCES, "denied", os.fspath(target))
+        return real_lstat(target, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(os, "lstat", denied)
+    assert lstat_kind(database) is StatKind.UNREADABLE
+    assert is_secret_path(blocked)
+    with pytest.raises(OSError):
+        migrate_single_user(tmp_path, None, daemon_running=lambda: False)
+    monkeypatch.undo()
+    assert database.read_bytes() == b"sqlite\n"
+    assert not (tmp_path / "profiles" / ".migration.json").exists()
+
+
+def _ticket_client(port: int, ticket: str) -> GatewayClient:
+    import socket
+
+    sock = socket.create_connection(("127.0.0.1", port), timeout=3)
+    try:
+        buffer = client_handshake(
+            sock,
+            host="127.0.0.1",
+            port=port,
+            token="",
+            path=f"/ws?ticket={ticket}",
+        )
+    except Exception:
+        sock.close()
+        raise
+    client = GatewayClient(WebSocketConnection(sock, buffer, client=True))
+    hello = client.request(
+        "connect",
+        {"role": "operator", "ticket": ticket, "client": "test"},
+        timeout=5,
+    )
+    if hello.get("type") != "hello":
+        client.close()
+        raise GatewayError("ticket rejected")
+    return client

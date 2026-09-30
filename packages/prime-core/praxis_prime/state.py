@@ -158,6 +158,16 @@ class StateDB:
             "profile",
             "profile TEXT NOT NULL DEFAULT ''",
         )
+        self._ensure_column(
+            "sessions",
+            "owner_account",
+            "owner_account TEXT NOT NULL DEFAULT ''",
+        )
+        self._ensure_column(
+            "sessions",
+            "owner_profile",
+            "owner_profile TEXT NOT NULL DEFAULT ''",
+        )
         self.conn.commit()
 
     def _ensure_column(self, table: str, column: str, declaration: str) -> None:

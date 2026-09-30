@@ -35,6 +35,8 @@ SESSION_TTL_SECONDS = 12 * 60 * 60
 TICKET_TTL_SECONDS = 30
 LOCK_AFTER_FAILURES = 5
 LOCK_SECONDS = 15 * 60
+# argon2id uses about 19 MiB per verify. This caps how many run at once.
+LOGIN_CONCURRENCY = 4
 _COOKIE = "pp_session"
 
 
@@ -85,6 +87,7 @@ class Ticket:
     username: str
     role: str
     profile_id: str
+    session_id: str = ""
 
 
 class AccountError(ValueError):
@@ -106,6 +109,9 @@ class AccountStore:
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA foreign_keys=ON")
         self._lock = threading.Lock()
+        self._login_slots = threading.BoundedSemaphore(LOGIN_CONCURRENCY)
+        self._name_locks: dict[str, threading.Lock] = {}
+        self._name_guard = threading.Lock()
         self._migrate()
         tighten_file(self.path)
 
@@ -181,6 +187,21 @@ class AccountStore:
                 """
             ).fetchall()
         return [_account(row) for row in rows]
+
+    def get_id(self, account_id: str) -> Account | None:
+        if not account_id.startswith("acc_"):
+            return None
+        with self._lock:
+            row = self.conn.execute(
+                """
+                SELECT id, username, display_name, email, role, status, created_at
+                FROM accounts WHERE id = ?
+                """,
+                (account_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return _account(row)
 
     def get_username(self, username_text: str) -> Account | None:
         name = username(username_text)
@@ -284,8 +305,73 @@ class AccountStore:
                 """,
                 (encoded, now, row["id"]),
             )
+            self._revoke_credentials(str(row["id"]))
             self.conn.commit()
             tighten_file(self.path)
+            fresh = self._account_row(name)
+        if fresh is None:
+            raise AccountError("no such account")
+        return _account(fresh)
+
+    def disable_account(self, username_text: str) -> Account:
+        """Disable an account and revoke its sessions and tickets.
+
+        The owner cannot be disabled. Transfer ownership first.
+        """
+        name = username(username_text)
+        if name is None:
+            raise AccountError("no such account")
+        now = _now()
+        with self._lock:
+            row = self._account_row(name)
+            if row is None:
+                raise AccountError("no such account")
+            if str(row["role"]) == "owner":
+                raise AccountError("the owner cannot be disabled; transfer ownership first")
+            self.conn.execute(
+                "UPDATE accounts SET status = 'disabled', updated_at = ? WHERE id = ?",
+                (now, row["id"]),
+            )
+            self._revoke_credentials(str(row["id"]))
+            self.conn.commit()
+            fresh = self._account_row(name)
+        if fresh is None:
+            raise AccountError("no such account")
+        return _account(fresh)
+
+    def set_server_role(self, username_text: str, role: str) -> Account:
+        """Change a server role. Revokes sessions and tickets.
+
+        Owner is only changed by ``transfer_owner``. Becoming an auditor
+        forces every membership to viewer.
+        """
+        name = username(username_text)
+        chosen = server_role(role)
+        if name is None:
+            raise AccountError("no such account")
+        if chosen is None or chosen == "owner":
+            raise AccountError("role must be admin, operator, viewer, or auditor")
+        now = _now()
+        with self._lock:
+            row = self._account_row(name)
+            if row is None:
+                raise AccountError("no such account")
+            if str(row["role"]) == "owner":
+                raise AccountError("use transfer-owner to change the owner")
+            self.conn.execute(
+                "UPDATE accounts SET role = ?, updated_at = ? WHERE id = ?",
+                (chosen, now, row["id"]),
+            )
+            if chosen == "auditor":
+                self.conn.execute(
+                    """
+                    UPDATE memberships SET profile_role = 'viewer'
+                    WHERE account_id = ?
+                    """,
+                    (row["id"],),
+                )
+            self._revoke_credentials(str(row["id"]))
+            self.conn.commit()
             fresh = self._account_row(name)
         if fresh is None:
             raise AccountError("no such account")
@@ -294,59 +380,54 @@ class AccountStore:
     def authenticate(self, username_text: str, password: str) -> Account | None:
         """Return the account, or None. Does not reveal which check failed.
 
-        The argon2 compare runs outside the database lock.
+        The lockout counter is held across argon2, so a burst of guesses
+        cannot all pass the "not locked" check. argon2 itself runs outside
+        the SQLite lock, under a process-wide concurrency cap.
         """
         name = username(username_text)
         presented = password if isinstance(password, str) else ""
         if name is None:
-            dummy_verify(presented)
+            self._verify_bounded("", presented)
             return None
-        with self._lock:
-            row = self._account_row(name)
-            if row is None:
-                encoded = ""
-                account: Account | None = None
-                locked = False
-                active = False
-                account_id = ""
-                failed = 0
-            else:
-                encoded = str(row["password_hash"])
-                account = _account(row)
-                locked = _is_locked(str(row["locked_until"]))
-                active = str(row["status"]) == "active"
-                account_id = str(row["id"])
-                failed = int(row["failed_logins"])
-        if account is None:
-            dummy_verify(presented)
-            return None
-        if locked:
-            dummy_verify(presented)
-            return None
-        if not active or not verify_password(encoded, presented):
-            if active:
+        with self._account_gate(name):
+            with self._lock:
+                row = self._account_row(name)
+                if row is None:
+                    encoded = ""
+                    account: Account | None = None
+                    locked = False
+                    active = False
+                    account_id = ""
+                else:
+                    encoded = str(row["password_hash"])
+                    account = _account(row)
+                    locked = _is_locked(str(row["locked_until"]))
+                    active = str(row["status"]) == "active"
+                    account_id = str(row["id"])
+            if account is None or locked or not active:
+                self._verify_bounded(encoded if account is not None else "", presented)
+                return None
+            if not self._verify_bounded(encoded, presented):
                 with self._lock:
                     fresh = self.conn.execute(
                         "SELECT failed_logins FROM accounts WHERE id = ?",
                         (account_id,),
                     ).fetchone()
-                    previous = int(fresh["failed_logins"]) if fresh is not None else failed
+                    previous = int(fresh["failed_logins"]) if fresh is not None else 0
                     self._record_failure(account_id, previous)
-            else:
-                verify_password(encoded, presented)
-            return None
-        with self._lock:
-            self.conn.execute(
-                """
-                UPDATE accounts
-                SET failed_logins = 0, locked_until = '', updated_at = ?
-                WHERE id = ?
-                """,
-                (_now(), account_id),
-            )
-            self.conn.commit()
-            tighten_file(self.path)
-        return account
+                return None
+            with self._lock:
+                self.conn.execute(
+                    """
+                    UPDATE accounts
+                    SET failed_logins = 0, locked_until = '', updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (_now(), account_id),
+                )
+                self.conn.commit()
+                tighten_file(self.path)
+            return account
 
     def set_membership(self, account_id: str, profile: str, role: str) -> None:
         if not account_id.startswith("acc_"):
@@ -377,6 +458,20 @@ class AccountStore:
                 (account_id, checked, chosen, now),
             )
             self.conn.commit()
+
+    def remove_membership(self, account_id: str, profile: str) -> bool:
+        if not account_id.startswith("acc_"):
+            raise AccountError("no such account")
+        checked = profile_id(profile)
+        if checked is None:
+            raise AccountError("invalid profile id")
+        with self._lock:
+            cursor = self.conn.execute(
+                "DELETE FROM memberships WHERE account_id = ? AND profile_id = ?",
+                (account_id, checked),
+            )
+            self.conn.commit()
+        return cursor.rowcount > 0
 
     def membership(self, account_id: str, profile: str) -> str | None:
         with self._lock:
@@ -468,6 +563,25 @@ class AccountStore:
             self.conn.commit()
         return cursor.rowcount > 0
 
+    def session_is_live(self, session_id: str) -> bool:
+        """True when this login session is unrevoked, unexpired, and active."""
+        if not session_id or len(session_id) > 80:
+            return False
+        now = _now()
+        with self._lock:
+            row = self.conn.execute(
+                """
+                SELECT s.revoked, s.expires_at, a.status
+                FROM sessions AS s
+                JOIN accounts AS a ON a.id = s.account_id
+                WHERE s.id = ?
+                """,
+                (session_id,),
+            ).fetchone()
+        if row is None or int(row["revoked"]) or str(row["status"]) != "active":
+            return False
+        return str(row["expires_at"]) > now
+
     def csrf_matches(self, session: Session, presented: str) -> bool:
         if not presented or len(presented) > 256 or not session.csrf_token:
             return False
@@ -478,6 +592,7 @@ class AccountStore:
         account: Account,
         *,
         profile: str = "",
+        session_id: str = "",
         ttl: int = TICKET_TTL_SECONDS,
     ) -> str:
         checked = ""
@@ -493,14 +608,16 @@ class AccountStore:
             self.conn.execute(
                 """
                 INSERT INTO ws_tickets (
-                    id, account_id, token_hash, profile_id, created_at, expires_at, used
-                ) VALUES (?, ?, ?, ?, ?, ?, 0)
+                    id, account_id, token_hash, profile_id, session_id,
+                    created_at, expires_at, used
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 0)
                 """,
                 (
                     _new_id("wst"),
                     account.id,
                     _hash(raw),
                     checked,
+                    session_id,
                     now.isoformat(timespec="seconds"),
                     expires,
                 ),
@@ -520,8 +637,8 @@ class AccountStore:
             try:
                 row = self.conn.execute(
                     """
-                    SELECT t.id, t.account_id, t.profile_id, t.expires_at, t.used,
-                           a.username, a.role, a.status
+                    SELECT t.id, t.account_id, t.profile_id, t.session_id,
+                           t.expires_at, t.used, a.username, a.role, a.status
                     FROM ws_tickets AS t
                     JOIN accounts AS a ON a.id = t.account_id
                     WHERE t.token_hash = ?
@@ -533,6 +650,14 @@ class AccountStore:
                     return None
                 if str(row["status"]) != "active":
                     self.conn.rollback()
+                    return None
+                bound = str(row["session_id"])
+                if bound and not self._session_row_live(bound, now):
+                    self.conn.execute(
+                        "UPDATE ws_tickets SET used = 1 WHERE id = ? AND used = 0",
+                        (row["id"],),
+                    )
+                    self.conn.commit()
                     return None
                 cursor = self.conn.execute(
                     "UPDATE ws_tickets SET used = 1 WHERE id = ? AND used = 0",
@@ -550,6 +675,7 @@ class AccountStore:
             username=str(row["username"]),
             role=str(row["role"]),
             profile_id=str(row["profile_id"]),
+            session_id=str(row["session_id"]),
         )
 
     def _migrate(self) -> None:
@@ -597,12 +723,14 @@ class AccountStore:
                 account_id TEXT NOT NULL REFERENCES accounts(id),
                 token_hash TEXT NOT NULL UNIQUE,
                 profile_id TEXT NOT NULL DEFAULT '',
+                session_id TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL,
                 expires_at TEXT NOT NULL,
                 used INTEGER NOT NULL DEFAULT 0
             );
             """
         )
+        self._ensure_column("ws_tickets", "session_id", "session_id TEXT NOT NULL DEFAULT ''")
         self.conn.commit()
         tighten_file(self.path)
 
@@ -632,6 +760,49 @@ class AccountStore:
             (failed, locked, _now(), account_id),
         )
         self.conn.commit()
+
+    def _ensure_column(self, table: str, column: str, declaration: str) -> None:
+        rows = self.conn.execute(f"PRAGMA table_info({table})").fetchall()
+        names = {str(row[1]) for row in rows}
+        if column not in names:
+            self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {declaration}")
+
+    def _account_gate(self, name: str) -> threading.Lock:
+        with self._name_guard:
+            lock = self._name_locks.get(name)
+            if lock is None:
+                lock = threading.Lock()
+                self._name_locks[name] = lock
+            return lock
+
+    def _verify_bounded(self, encoded: str, presented: str) -> bool:
+        with self._login_slots:
+            if not encoded:
+                dummy_verify(presented)
+                return False
+            return verify_password(encoded, presented)
+
+    def _revoke_credentials(self, account_id: str) -> None:
+        """Mark sessions revoked and unused tickets spent. Caller commits."""
+        self.conn.execute(
+            "UPDATE sessions SET revoked = 1 WHERE account_id = ? AND revoked = 0",
+            (account_id,),
+        )
+        self.conn.execute(
+            "UPDATE ws_tickets SET used = 1 WHERE account_id = ? AND used = 0",
+            (account_id,),
+        )
+
+    def _session_row_live(self, session_id: str, now: str) -> bool:
+        row = self.conn.execute(
+            """
+            SELECT revoked, expires_at FROM sessions WHERE id = ?
+            """,
+            (session_id,),
+        ).fetchone()
+        if row is None or int(row["revoked"]):
+            return False
+        return str(row["expires_at"]) > now
 
 
 def cookie_value(header: str, name: str = _COOKIE) -> str:

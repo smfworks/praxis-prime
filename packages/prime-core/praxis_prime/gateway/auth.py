@@ -64,10 +64,18 @@ def token_ok(presented: str, expected: str) -> bool:
 
 
 def _write_private(path: Path, text: str) -> None:
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
-    descriptor = os.open(path, flags, 0o600)
+    """Write the token by replacing a temp file, so readers never see a partial."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{secrets.token_hex(4)}.tmp")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    descriptor = os.open(temporary, flags, 0o600)
     try:
         os.write(descriptor, (text + "\n").encode("utf-8"))
-    finally:
+    except Exception:
         os.close(descriptor)
+        temporary.unlink(missing_ok=True)
+        raise
+    os.close(descriptor)
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, path)
     os.chmod(path, 0o600)

@@ -10,6 +10,12 @@ cannot be closed early by text inside the payload.
 
 from __future__ import annotations
 
+import logging
+import os
+import stat
+
+_log = logging.getLogger(__name__)
+
 SYSTEM_PROMPT = """\
 You are Praxis Prime, a local-first agent on the user's Linux machine.
 
@@ -60,18 +66,38 @@ def compose_system_prompt(persona: str) -> str:
 
 
 def read_persona(path: object, *, limit: int = 32_768) -> str:
-    """Read a SOUL file up to ``limit`` bytes. A larger file is ignored."""
+    """Read a SOUL file up to ``limit`` bytes. A larger file is ignored.
+
+    Symlinks are ignored. A file over the cap is ignored and logged.
+    """
     from pathlib import Path
 
     file = Path(str(path))
-    if not file.is_file():
+    try:
+        mode = os.lstat(file).st_mode
+    except FileNotFoundError:
+        return ""
+    except OSError:
+        _log.warning("persona file %s could not be classified; ignoring it", file)
+        return ""
+    if stat.S_ISLNK(mode):
+        _log.warning("persona file %s is a symlink; ignoring it", file)
+        return ""
+    if not stat.S_ISREG(mode):
         return ""
     try:
-        with file.open("rb") as handle:
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(file, flags)
+        with os.fdopen(descriptor, "rb") as handle:
             data = handle.read(limit + 1)
     except OSError:
         return ""
     if len(data) > limit:
+        _log.warning(
+            "persona file %s is over the %s byte cap; ignoring it",
+            file,
+            limit,
+        )
         return ""
     return data.decode("utf-8", errors="replace")
 

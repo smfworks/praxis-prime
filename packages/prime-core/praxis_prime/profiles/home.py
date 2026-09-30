@@ -8,6 +8,7 @@ docs/blueprint-addendum-2026-09.md §6.3.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,9 +22,9 @@ from praxis_prime.profiles.policy import (
     effective_allowlist,
     load_layer,
     render_policy_toml,
-    unrestricted,
 )
 from praxis_prime.state import StateDB
+from praxis_prime.statfile import StatKind, lstat_kind
 
 _DEFAULT_SOUL = """\
 # Persona
@@ -66,11 +67,17 @@ class ProfileHome:
         return self.path / "routines"
 
     def exists(self) -> bool:
-        return self.config_path.is_file()
+        """True when profile.toml is present, including an unreadable path.
+
+        A symlink is present so create will not replace it. ``layer`` does
+        not follow that link.
+        """
+        return lstat_kind(self.config_path) is not StatKind.MISSING
 
     def layer(self) -> LayerAllow:
-        if not self.config_path.is_file():
-            return unrestricted()
+        """The profile allowlist. A missing, unreadable, or linked file allows nothing."""
+        if lstat_kind(self.config_path) is not StatKind.FILE:
+            return LayerAllow(tools=frozenset(), mcp=frozenset(), dials={})
         return load_layer(self.config_path, table="profile")
 
 
@@ -93,21 +100,26 @@ def create_profile(data_root: Path, name: str, *, display_name: str = "") -> Pro
     if checked is None:
         raise ValueError("profile id must be 1 to 64 characters: a-z, 0-9, hyphen")
     home = ProfileHome(Path(data_root), checked)
-    if home.exists() or home.db_path.exists():
+    if home.exists() or lstat_kind(home.db_path) is not StatKind.MISSING:
         raise ValueError(f"profile {checked} already exists")
     home.path.mkdir(parents=True, exist_ok=True)
     tighten_dir(home.path)
     home.skills_dir.mkdir(parents=True, exist_ok=True)
     home.routines_dir.mkdir(parents=True, exist_ok=True)
     label = display_name.strip() or checked
+    # Only the migrated default profile starts unrestricted. Every other
+    # new profile starts with an empty allowlist.
+    opened = None if checked == "default" else frozenset()
     text = render_policy_toml(
         table="profile",
         schema="praxis.profile/v1",
         profile=checked,
         name=label,
+        tools=opened,
+        mcp=opened,
     )
     _write(home.config_path, text)
-    if not home.soul_path.exists():
+    if lstat_kind(home.soul_path) is StatKind.MISSING:
         _write(home.soul_path, _DEFAULT_SOUL)
     db = StateDB(home.db_path)
     db.close()
@@ -117,15 +129,19 @@ def create_profile(data_root: Path, name: str, *, display_name: str = "") -> Pro
 
 def list_profiles(data_root: Path) -> list[str]:
     root = Path(data_root) / "profiles"
-    if not root.is_dir():
+    if lstat_kind(root) is not StatKind.DIR:
         return []
     found: list[str] = []
-    for child in root.iterdir():
-        if not child.is_dir():
+    try:
+        children = list(root.iterdir())
+    except OSError:
+        return []
+    for child in children:
+        if lstat_kind(child) is not StatKind.DIR:
             continue
         if profile_id(child.name) is None:
             continue
-        if (child / "profile.toml").is_file() or (child / "prime.db").is_file():
+        if _regular(child / "profile.toml") or _regular(child / "prime.db"):
             found.append(child.name)
     return sorted(found)
 
@@ -164,7 +180,7 @@ def resolve_runtime_layout(
             raise ValueError("invalid profile id")
         root = data_file.parent if data_file is not None else data_dir(env)
         home = ProfileHome(root, checked)
-        if not home.exists() and not home.db_path.is_file():
+        if lstat_kind(home.config_path) is StatKind.MISSING and not _regular(home.db_path):
             raise ValueError(f"no profile {checked}")
         return _scoped(root, home.db_path, checked, home)
     if data_file is not None:
@@ -172,9 +188,14 @@ def resolve_runtime_layout(
     root = data_dir(env)
     marker = migration_marker(root)
     default_db = root / "profiles" / "default" / "prime.db"
-    if marker.is_file() and default_db.is_file():
+    if _regular(marker) and _regular(default_db):
         return _scoped(root, default_db, "default", ProfileHome(root, "default"))
     return RuntimeLayout(root / "prime.db", "", None, None, {}, {}, None)
+
+
+def _regular(path: Path) -> bool:
+    """True only for a real file. Symlinks and unreadable paths are not."""
+    return lstat_kind(path) is StatKind.FILE
 
 
 def _scoped(root: Path, db_path: Path, name: str, home: ProfileHome) -> RuntimeLayout:
@@ -192,6 +213,12 @@ def _scoped(root: Path, db_path: Path, name: str, home: ProfileHome) -> RuntimeL
 
 
 def _write(path: Path, text: str) -> None:
+    """Create a regular file. Do not follow a symlink at ``path``."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags, 0o600)
+    try:
+        os.write(descriptor, text.encode())
+    finally:
+        os.close(descriptor)
     tighten_file(path)

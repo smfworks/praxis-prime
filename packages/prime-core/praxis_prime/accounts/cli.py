@@ -18,8 +18,9 @@ from praxis_prime.accounts.db import Account, AccountError, AccountStore
 from praxis_prime.accounts.roles import SERVER_ROLES
 from praxis_prime.audit.log import AuditLog
 from praxis_prime.paths import config_dir, data_dir
-from praxis_prime.profiles.migrate import migrate_single_user
+from praxis_prime.profiles.migrate import MigrationBusy, daemon_is_running, migrate_single_user
 from praxis_prime.state import StateDB
+from praxis_prime.statfile import StatKind, lstat_kind
 
 
 def add_account_parser(commands: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -48,6 +49,17 @@ def add_account_parser(commands: argparse._SubParsersAction[argparse.ArgumentPar
     )
     transfer.add_argument("username")
     _add_dirs(transfer)
+    disable = sub.add_parser("disable", help="Disable an account and revoke its sessions.")
+    disable.add_argument("username")
+    _add_dirs(disable)
+    role = sub.add_parser("role", help="Change a server role and revoke that account's sessions.")
+    role.add_argument("username")
+    role.add_argument(
+        "--role",
+        required=True,
+        choices=tuple(item for item in SERVER_ROLES if item != "owner"),
+    )
+    _add_dirs(role)
 
 
 def account_command(args: argparse.Namespace) -> int:
@@ -60,7 +72,14 @@ def account_command(args: argparse.Namespace) -> int:
         return _passwd(args)
     if command == "transfer-owner":
         return _transfer_owner(args)
-    print("usage: praxis-prime account {create|list|passwd|transfer-owner}", file=sys.stderr)
+    if command == "disable":
+        return _disable(args)
+    if command == "role":
+        return _set_role(args)
+    print(
+        "usage: praxis-prime account {create|list|passwd|transfer-owner|disable|role}",
+        file=sys.stderr,
+    )
     return 2
 
 
@@ -71,6 +90,12 @@ def _create(args: argparse.Namespace) -> int:
     store = _store(args)
     try:
         if not store.has_accounts():
+            if daemon_is_running():
+                print(
+                    "praxis-prime account: stop praxis-primed before the first account",
+                    file=sys.stderr,
+                )
+                return 2
             account = store.create_account(
                 username_text=args.username,
                 password=password,
@@ -96,6 +121,9 @@ def _create(args: argparse.Namespace) -> int:
             role=args.role,
             email=args.email,
         )
+    except MigrationBusy as exc:
+        print(f"praxis-prime account: {exc}", file=sys.stderr)
+        return 2
     except AccountError as exc:
         print(f"praxis-prime account: {exc}", file=sys.stderr)
         return 2
@@ -126,6 +154,26 @@ def _passwd(args: argparse.Namespace) -> int:
     return 0
 
 
+def _disable(args: argparse.Namespace) -> int:
+    try:
+        account = _store(args).disable_account(args.username)
+    except AccountError as exc:
+        print(f"praxis-prime account: {exc}", file=sys.stderr)
+        return 2
+    print(f"disabled {account.username}")
+    return 0
+
+
+def _set_role(args: argparse.Namespace) -> int:
+    try:
+        account = _store(args).set_server_role(args.username, args.role)
+    except AccountError as exc:
+        print(f"praxis-prime account: {exc}", file=sys.stderr)
+        return 2
+    print(f"{account.username} is now {account.role}")
+    return 0
+
+
 def _transfer_owner(args: argparse.Namespace) -> int:
     store = _store(args)
     try:
@@ -144,12 +192,26 @@ def _transfer_owner(args: argparse.Namespace) -> int:
 def _audit_transfer(root: Path, former: Account, current: Account) -> None:
     """Append one hash-chained event. No password or token is included."""
     profile_db = root / "profiles" / "default" / "prime.db"
-    if profile_db.is_file():
+    kind = lstat_kind(profile_db)
+    if kind in {StatKind.SYMLINK, StatKind.UNREADABLE}:
+        print(
+            "praxis-prime account: profile database cannot be opened for the audit event",
+            file=sys.stderr,
+        )
+        return
+    if kind is StatKind.FILE:
         path = profile_db
         profile = "default"
     else:
         path = root / "prime.db"
         profile = ""
+        legacy = lstat_kind(path)
+        if legacy in {StatKind.SYMLINK, StatKind.UNREADABLE}:
+            print(
+                "praxis-prime account: state database cannot be opened for the audit event",
+                file=sys.stderr,
+            )
+            return
     db = StateDB(path)
     try:
         AuditLog(db).append(

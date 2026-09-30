@@ -84,7 +84,9 @@ praxis-prime profile assign work --account ada --role operator
 
 `transfer-owner` hands the owner role to an existing admin and makes the previous owner an admin. It writes an `auth.owner_transfer` audit event.
 
-That first `account create` moves an existing single-user `prime.db` into `profiles/default/` and keeps a copy under `data/backups/`. Later runs see the migration marker and do not copy again. The migrated profile, and any profile created without an explicit list, is written with `allow = ["*"]` so the same tools stay available. An empty `allow` list allows nothing. A profile can only tighten the org tool list and dial floor. Persona text is appended after the fixed safety rules and cannot auto-approve. The gateway stays on `127.0.0.1`. Cookie sessions need the `x-csrf-token` header on changes. A viewer cannot approve. An auditor gets 403 on `GET /v1/approvals` and can read `GET /v1/approvals/meta` (id, tool, risk, time, decision; no arguments or text). See [SECURITY.md](SECURITY.md).
+Stop the daemon before that first `account create`. It moves an existing single-user `prime.db` into `profiles/default/` and keeps a copy under `data/backups/`. The command refuses while `praxis-primed` is running. Later runs see the migration marker and do not copy again. The migrated `default` profile is written with `allow = ["*"]` so the same tools stay available. A profile you create after that starts with an empty allow list, and a missing `profile.toml` allows nothing. An empty `allow` list allows nothing. A profile can only tighten the org tool list and dial floor. Persona text is appended after the fixed safety rules and cannot auto-approve. The gateway stays on `127.0.0.1`. Cookie sessions need the `x-csrf-token` header on changes. `httpx` and `urllib` drop the `Secure` cookie on `http://127.0.0.1`; send the `Cookie` header yourself or use the bearer token. A viewer cannot approve. An auditor gets 403 on `GET /v1/approvals` and can read `GET /v1/approvals/meta` (id, tool, risk, time, decision; no arguments or text) for every profile. Other accounts see meta only for their own profiles. See [SECURITY.md](SECURITY.md).
+
+`account disable USER` disables an account. `account role USER --role admin` changes a server role. Both revoke sessions and tickets. `profile unassign NAME --account USER` removes a membership. The owner is changed only with `account transfer-owner`.
 
 ## Models
 
@@ -121,7 +123,7 @@ Keys, only in the environment:
 
 ## Daemon
 
-`praxis-primed` hosts the kernel and the gateway on `127.0.0.1:18790`. It refuses any other bind address. HTTP `GET /health` is open. `GET /status` and the approval routes need the bearer token. The token is created at `$XDG_RUNTIME_DIR/praxis-prime/gateway.token` (mode 0600) and is not written to `config.toml` or `gateway.json`. Once an account exists, that token is an owner-equivalent credential. Rotate it with `praxis-prime daemon rotate-token`, then restart the daemon. Set `gateway.bearer = false` and restart to refuse the token after an account exists. Cookie sessions still work. Logs are JSON lines at `$XDG_STATE_HOME/praxis-prime/daemon.log` (or `~/.local/state/praxis-prime/daemon.log`).
+`praxis-primed` hosts the kernel and the gateway on `127.0.0.1:18790`. It refuses any other bind address. HTTP `GET /health` is open. `GET /status` and the approval routes need the bearer token. The token is created at `$XDG_RUNTIME_DIR/praxis-prime/gateway.token` (mode 0600) and is not written to `config.toml` or `gateway.json`. Once an account exists, that token is an owner-equivalent credential. Rotate it with `praxis-prime daemon rotate-token` (the file is replaced atomically), then restart the daemon. Set `gateway.bearer = false` and restart to refuse the token after an account exists. Cookie sessions still work. Logs are JSON lines at `$XDG_STATE_HOME/praxis-prime/daemon.log` (or `~/.local/state/praxis-prime/daemon.log`).
 
 ```bash
 praxis-prime daemon start
