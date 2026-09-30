@@ -48,7 +48,7 @@ Do not add a `prime` console script. That name collides with other tools.
 
 - Do not vendor large upstream trees. Copy a specific module only when a task asks for it, with the upstream copyright header left in place.
 - If the file is Apache-2.0, keep its LICENSE and NOTICE beside it and add a row to THIRD_PARTY.md. Known cases are listed in that file (Hermes `plugins/security-guidance/patterns.py`, OpenClaw `skills/skill-creator`, TypeSafe WorkflowEvals).
-- Do not copy the private Praxis commercial packs. They are not in this workspace. `packs/regulated/` stays a placeholder until those licenses are confirmed (ARCHITECTURE §32).
+- Do not vendor the six public MIT vertical packs (`smfworks/smf-praxis-*`). `praxis-prime packs install` loads them as data (`docs/PACKS-LEGACY.md`). `packs/regulated/` stays empty of their code. Do not copy any additional private pack tree (ARCHITECTURE §32).
 - Do not call TypeSafe's hosted API. The Decision Engine is local. Jev is a reference for the response shape, not a dependency.
 - SMF Works does not own Hermes, OpenClaw, or Omarchy. Do not write copy that implies those authors ship or endorse Praxis Prime.
 - Do not bundle openWakeWord's pre-trained models. Their weights are non-commercial. See THIRD_PARTY.md.

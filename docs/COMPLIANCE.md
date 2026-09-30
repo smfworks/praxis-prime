@@ -34,7 +34,7 @@ Decision Engine tier 0 reads the same detectors. It may add a data class. It can
 
 ## Packs
 
-Bundled TOML lives in `packs/compliance`. The same pack id in `~/.config/praxis-prime/packs` or `<project>/.prime/packs` replaces the bundled file. Each pack carries detectors, rules, a retention window, required audit events, and legal citations in its metadata.
+Bundled TOML lives in `packs/compliance` and is shipped inside the wheel. The same pack id in `~/.config/praxis-prime/packs` or `<project>/.prime/packs` replaces the bundled file. Each pack carries detectors, rules, a retention window, required audit events, and legal citations in its metadata.
 
 | Pack | Dial | What enforce does |
 |---|---|---|
@@ -82,9 +82,11 @@ Enforce redacts on memory write using the pack's style. HIPAA masks. North Carol
 
 The retention sweep deletes rows whose `expires_at` has passed. Enforce dials contribute their pack window. The shortest window wins. Profile and semantic rows expire only when an enforce dial sets one. A sweep that removes rows while an enforce dial is on writes a `retention` audit event.
 
-## Private Praxis packs
+## Vertical packs
 
-TODO: the private Praxis regulated verticals (legal, medical, behavioral health, school system, homeschool, forensic) are not in this repository. Do not copy them from a private tree that is not licensed for this repo. When the license is confirmed, drop their TOML into `packs/compliance` or a user packs directory. The engine already loads that directory. `packs/regulated/` stays a placeholder. North Carolina professional overlays that SOURCE-NOTES §11 marks S or U are not encoded as rules.
+The six public MIT packs (homeschool, education, forensic, legal, medical, behavioral health) are not copied into this repository. `praxis-prime packs install` reads their `pack.json` and `knowledge.md` as data. It ignores hard-coded model pins and does not load their dashboard JavaScript or Python. See [PACKS-LEGACY.md](PACKS-LEGACY.md).
+
+`packs/compliance/*.toml` ships inside the wheel. A file with the same pack id in `~/.config/praxis-prime/packs` or `<project>/.prime/packs` replaces the bundled pack. North Carolina professional overlays that SOURCE-NOTES §11 marks S or U are not encoded as rules.
 
 ## Audit
 

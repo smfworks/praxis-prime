@@ -84,20 +84,27 @@ file is later copied:
 ## SMF Praxis regulated packs
 
 SMF Works owns SMF Praxis. Release 0.29.0 (2026-07-19) moved regulated
-verticals (legal, medical, behavioral health, school, homeschool, forensic)
-out of the public wheel into private repositories. Those repositories are not
-in this tree, and their current LICENSE files were not available when this
-notice was written.
+verticals out of the public `praxis-agent` wheel. Six of those verticals are
+public MIT repositories. Praxis Prime does not vendor them. `praxis-prime
+packs install` reads `pack.json` and `knowledge.md` at install time and does
+not copy their Python or dashboard JavaScript into this tree.
 
-- `packs/regulated/` is a reserved directory. See its README.
+| Repository | Distribution | License |
+|---|---|---|
+| `smfworks/smf-praxis-homeschool` | `praxis-homeschool` | MIT |
+| `smfworks/smf-praxis-education` | `praxis-education` | MIT |
+| `smfworks/smf-praxis-forensic` | `praxis-forensic` | MIT |
+| `smfworks/smf-praxis-legal` | `praxis-legal` | MIT |
+| `smfworks/smf-praxis-medical` | `praxis-medical` | MIT |
+| `smfworks/smf-praxis-mbh` | `praxis-mbh` | MIT |
+
+- `packs/regulated/` stays empty of their code. See its README and `docs/PACKS-LEGACY.md`.
 - Code released under MIT before 0.29.0, including `hybridagent/vertical_templates.py`
   and `hybridagent/jurisdictions/` in the public Praxis repo, stays MIT for
-  recipients of those versions. A later license can cover only new or modified
-  pack versions.
-- Confirm each private repo's license, and that contributors assigned rights
-  to SMF Works, before importing (ARCHITECTURE §32).
-- Quoted statutes and other third-party text inside a future pack keep their
-  own terms.
+  recipients of those versions.
+- Any additional private pack repository is still out of this tree until its
+  license is confirmed (ARCHITECTURE §32).
+- Quoted statutes and other third-party text inside a pack keep their own terms.
 
 `smf-swarm-2.0-fe` is a private commercial vertical and is not used.
 

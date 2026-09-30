@@ -24,7 +24,7 @@ classifiers = [
 dependencies = []
 
 [project.optional-dependencies]
-dev = ["pytest>=8.3", "ruff>=0.8"]
+dev = ["pytest>=8.3", "ruff>=0.8", "hatchling>=1.26"]
 browser = ["playwright>=1.48"]
 
 [project.urls]
@@ -43,6 +43,15 @@ path = "packages/prime-core/praxis_prime/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["packages/prime-core/praxis_prime"]
+
+# Repo-root TOML is outside the import package. Force it into the wheel so
+# importlib.resources can read it after a normal install. The sdist keeps the
+# same files at packs/compliance so a wheel built from the sdist still works.
+[tool.hatch.build.targets.wheel.force-include]
+"packs/compliance" = "praxis_prime/_data/packs/compliance"
+
+[tool.hatch.build.targets.sdist.force-include]
+"packs/compliance" = "packs/compliance"
 
 [tool.uv]
 package = true

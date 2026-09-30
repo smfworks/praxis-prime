@@ -1,19 +1,22 @@
 """Load compliance packs from TOML.
 
-Bundled packs live in ``packs/compliance``. A file in
-``~/.config/praxis-prime/packs`` or ``.prime/packs`` with the same pack id
-replaces the bundled one. Packs are starter policy, not legal advice.
+Bundled packs ship inside the wheel at
+``praxis_prime/_data/packs/compliance`` and are read with
+``importlib.resources``. A source checkout that has not been packaged still
+loads ``packs/compliance`` by walking up from this file.
 
-TODO: ARCHITECTURE §17 and §32. Private Praxis regulated verticals
-(legal, medical, behavioral health, school, homeschool, forensic) are not
-in this tree. Drop their TOML into a packs directory when the license is
-confirmed. Do not copy those private repos from memory.
+A file in ``~/.config/praxis-prime/packs`` or ``.prime/packs`` with the same
+pack id replaces the bundled one. Packs are starter policy, not legal advice.
+
+TODO: ARCHITECTURE §17 and §32. Vertical packs in the old ``pack.json``
+format load through ``praxis_prime.packs`` and are not copied into this tree.
 """
 
 from __future__ import annotations
 
 import tomllib
 from dataclasses import dataclass
+from importlib.resources import files
 from pathlib import Path
 
 from praxis_prime.compliance.detectors import DetectorSpec
@@ -56,7 +59,11 @@ class PolicyPack:
 
 
 def bundled_pack_dir() -> Path:
-    """Find ``packs/compliance`` by walking up from this file."""
+    """Find a source-tree ``packs/compliance`` directory.
+
+    Installed wheels do not have that directory. They use
+    :func:`_resource_pack_texts` instead.
+    """
     here = Path(__file__).resolve()
     for parent in here.parents:
         candidate = parent / "packs" / "compliance"
@@ -68,8 +75,33 @@ def bundled_pack_dir() -> Path:
 def bundled_packs() -> tuple[PolicyPack, ...]:
     global _BUNDLED
     if _BUNDLED is None:
-        _BUNDLED = _read_dir(bundled_pack_dir())
+        texts = _resource_pack_texts()
+        if texts:
+            loaded: list[PolicyPack] = []
+            for label, text in texts:
+                loaded.extend(parse_pack_text(text, label))
+            _BUNDLED = tuple(loaded)
+        else:
+            _BUNDLED = _read_dir(bundled_pack_dir())
     return _BUNDLED
+
+
+def _resource_pack_texts() -> tuple[tuple[str, str], ...]:
+    """TOML shipped inside the installed package, if this install has any."""
+    root = files("praxis_prime").joinpath("_data", "packs", "compliance")
+    try:
+        if not root.is_dir():
+            return ()
+        entries = list(root.iterdir())
+    except (FileNotFoundError, NotADirectoryError, OSError):
+        return ()
+    texts: list[tuple[str, str]] = []
+    for item in sorted(entries, key=lambda entry: entry.name):
+        if not item.name.endswith(".toml"):
+            continue
+        label = f"praxis_prime/_data/packs/compliance/{item.name}"
+        texts.append((label, item.read_text(encoding="utf-8")))
+    return tuple(texts)
 
 
 def load_packs(
@@ -103,12 +135,18 @@ def packs_for_dials(
 
 
 def parse_pack_file(path: Path) -> tuple[PolicyPack, ...]:
-    loaded = tomllib.loads(path.read_text(encoding="utf-8"))
+    return parse_pack_text(path.read_text(encoding="utf-8"), str(path))
+
+
+def parse_pack_text(text: str, source: str) -> tuple[PolicyPack, ...]:
+    loaded = tomllib.loads(text)
     if not isinstance(loaded, dict):
-        raise ValueError(f"{path} is not a TOML document")
+        raise ValueError(f"{source} is not a TOML document")
     raw_pack = loaded.get("pack")
     if isinstance(raw_pack, list):
-        return tuple(_one_pack(item, path) for item in raw_pack if isinstance(item, dict))
+        return tuple(
+            _one_pack(item, source) for item in raw_pack if isinstance(item, dict)
+        )
     if isinstance(raw_pack, dict):
         body = dict(raw_pack)
         body.setdefault("detectors", loaded.get("detectors", []))
@@ -116,8 +154,8 @@ def parse_pack_file(path: Path) -> tuple[PolicyPack, ...]:
         for key in ("meta", "retention", "audit", "breach", "gdpr"):
             if key in loaded and key not in body:
                 body[key] = loaded[key]
-        return (_one_pack(body, path),)
-    raise ValueError(f"{path} needs a [pack] table or [[pack]] entries")
+        return (_one_pack(body, source),)
+    raise ValueError(f"{source} needs a [pack] table or [[pack]] entries")
 
 
 def _read_dir(directory: Path) -> tuple[PolicyPack, ...]:
@@ -129,13 +167,13 @@ def _read_dir(directory: Path) -> tuple[PolicyPack, ...]:
     return tuple(packs)
 
 
-def _one_pack(raw: dict[str, object], path: Path) -> PolicyPack:
+def _one_pack(raw: dict[str, object], source: str) -> PolicyPack:
     meta = _table(raw.get("meta"))
     retention = _table(raw.get("retention"))
     audit = _table(raw.get("audit"))
     breach = _table(raw.get("breach"))
     gdpr = _table(raw.get("gdpr"))
-    pack_id = _text(raw.get("id")) or path.stem
+    pack_id = _text(raw.get("id")) or Path(source).stem
     dial = _text(raw.get("dial")) or pack_id
     days = retention.get("days", raw.get("retention_days"))
     retention_days = int(days) if isinstance(days, int) and days > 0 else None
@@ -159,7 +197,7 @@ def _one_pack(raw: dict[str, object], path: Path) -> PolicyPack:
         breach_sla_is_legal_deadline=bool(breach.get("sla_is_legal_deadline", False)),
         lawful_basis_note=_text(gdpr.get("lawful_basis_note")),
         starter=bool(meta.get("starter", raw.get("starter", True))),
-        source=str(path),
+        source=source,
     )
 
 
