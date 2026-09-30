@@ -879,13 +879,10 @@ def _flatpak_keyring_dirs(home: Path) -> list[Path] | _CapHit:
         return []
     for child in children:
         candidate = child / "data" / "keyrings"
-        try:
-            if not candidate.is_dir():
-                continue
-        except OSError as exc:
-            hit = _listing_failure(exc, str(candidate))
-            if hit is not None:
-                return hit
+        followed = _follow_stat(candidate)
+        if isinstance(followed, _CapHit):
+            return followed
+        if isinstance(followed, _Unfollowed) or not stat.S_ISDIR(followed.st_mode):
             continue
         found.append(candidate)
         if len(found) >= limit:
@@ -1000,7 +997,10 @@ def _prune_scan_dirs(
         child = directory / name
         if direct_kube and name.lower() in _KUBE_SKIP_DIRS:
             continue
-        if child.is_symlink() and not _contains(root, child):
+        mode = _lstat_mode(child)
+        if isinstance(mode, _CapHit):
+            return mode
+        if mode is not None and stat.S_ISLNK(mode) and not _contains(root, child):
             continue
         if skip_browser_caches and name.lower() in _BROWSER_CACHE_DIRS:
             hit = _record_cache_secret_inodes(child, found, tally)
@@ -1021,9 +1021,13 @@ def _record_cache_secret_inodes(
 
     Directory entries are counted only toward ``tally``, not the scan root's
     entry budget. Symlinks that leave the cache directory are not followed.
-    ENOENT and ENOTDIR mean the directory vanished during the scan. The
-    parent is re-listed once so a rename is not skipped. Any other listing
-    or stat failure, including EACCES and EPERM, fails the scan closed.
+    A symlink loop (ELOOP) is a file, not a directory to descend into.
+    ENOENT and ENOTDIR on a proper descendant mean that entry vanished. The
+    parent is re-listed once so a rename is not skipped. The cache root
+    itself, and any vanished path that is not under it, fail the scan closed:
+    re-listing the parent would walk a directory the cache skip does not own.
+    Any other listing or stat failure, including EACCES and EPERM, fails the
+    scan closed.
     """
     seen_dirs: set[tuple[int, int]] = set()
     pending = [cache_root]
@@ -1031,17 +1035,21 @@ def _record_cache_secret_inodes(
     examined_at_start = tally.examined
     while pending:
         current = pending.pop()
-        inode = _dir_inode(current)
-        if isinstance(inode, _CapHit):
-            return inode
-        if inode is None or inode in seen_dirs:
-            if inode is None and not retried:
-                hit = _retry_parent(current, pending, seen_dirs)
-                if isinstance(hit, _CapHit):
-                    return hit
-                if hit:
-                    retried = True
-                    tally.examined = examined_at_start
+        followed = _follow_stat(current)
+        if isinstance(followed, _CapHit):
+            return followed
+        if isinstance(followed, _Unfollowed):
+            if followed.loop:
+                continue
+            hit = _cache_vanish(current, cache_root, pending, seen_dirs, retried)
+            if isinstance(hit, _CapHit):
+                return hit
+            if hit:
+                retried = True
+                tally.examined = examined_at_start
+            continue
+        inode = (followed.st_dev, followed.st_ino)
+        if not stat.S_ISDIR(followed.st_mode) or inode in seen_dirs:
             continue
         if not _contains(cache_root, current):
             continue
@@ -1052,9 +1060,7 @@ def _record_cache_secret_inodes(
             hit = _listing_failure(exc, _error_filename(exc) or str(current))
             if hit is not None:
                 return hit
-            if retried:
-                continue
-            queued = _retry_parent(current, pending, seen_dirs)
+            queued = _cache_vanish(current, cache_root, pending, seen_dirs, retried)
             if isinstance(queued, _CapHit):
                 return queued
             if queued:
@@ -1066,19 +1072,21 @@ def _record_cache_secret_inodes(
             return _CapHit(_MAX_CACHE_NAME_ENTRIES, "cache-name")
         for child in children:
             path = Path(child.path)
-            try:
-                if child.is_symlink():
-                    if child.is_dir(follow_symlinks=True):
-                        if _contains(cache_root, path):
-                            pending.append(path)
-                        continue
-                elif child.is_dir(follow_symlinks=False):
-                    pending.append(path)
+            mode = _lstat_mode(path)
+            if isinstance(mode, _CapHit):
+                return mode
+            if mode is None:
+                continue
+            if stat.S_ISLNK(mode):
+                nested = _follow_stat(path)
+                if isinstance(nested, _CapHit):
+                    return nested
+                if not isinstance(nested, _Unfollowed) and stat.S_ISDIR(nested.st_mode):
+                    if _contains(cache_root, path):
+                        pending.append(path)
                     continue
-            except OSError as exc:
-                hit = _listing_failure(exc, str(path))
-                if hit is not None:
-                    return hit
+            elif stat.S_ISDIR(mode):
+                pending.append(path)
                 continue
             if _inode_file_is_secret(child.name, current):
                 added = _add_inode(path, found, 0)
@@ -1103,6 +1111,35 @@ def _retry_parent(
     seen_dirs.clear()
     pending.extend(current.parent / name for name in names)
     return True
+
+
+def _is_proper_descendant(root: Path, path: Path) -> bool:
+    """True when ``path`` is strictly inside ``root`` by lexical absolute path."""
+    try:
+        relative = Path(os.path.abspath(path)).relative_to(os.path.abspath(root))
+    except ValueError:
+        return False
+    return bool(relative.parts)
+
+
+def _cache_vanish(
+    current: Path,
+    cache_root: Path,
+    pending: list[Path],
+    seen_dirs: set[tuple[int, int]],
+    retried: bool,
+) -> _CapHit | bool:
+    """Re-list a vanished descendant, or fail closed for the cache root itself.
+
+    A rename of ``Cache/x`` is recovered by listing ``Cache`` again. A rename
+    of ``Cache`` is not: the parent is the profile directory, and walking it
+    from the cache pass would miss a secret that left the skipped name.
+    """
+    if not _is_proper_descendant(cache_root, current):
+        return _CapHit(0, "unreadable-directory", str(current))
+    if retried:
+        return False
+    return _retry_parent(current, pending, seen_dirs)
 
 
 def _same_dir(left: Path, right: Path) -> bool:
@@ -1150,6 +1187,68 @@ def _listing_failure(exc: OSError, path: str) -> _CapHit | None:
     return _CapHit(0, "unreadable-directory", path)
 
 
+@dataclass(frozen=True, slots=True)
+class _Unfollowed:
+    """A followed stat that is not a directory to walk.
+
+    ``loop`` is ELOOP on a symlink. That entry is a file. ``loop`` false is
+    ENOENT or ENOTDIR: the path vanished during the scan.
+    """
+
+    loop: bool
+
+
+# File-shaped scan roots. A failure to stat one says "could not stat".
+# A directory the walk could not list still says "could not list".
+_FILE_ROOT_NAMES = frozenset(
+    {
+        ".netrc",
+        ".boto",
+        ".git-credentials",
+        "config.json",
+        "gateway.token",
+        "secrets.env",
+        "secrets.env.age",
+        "shadow",
+    }
+)
+
+
+def _lstat_mode(path: Path) -> int | _CapHit | None:
+    """``os.lstat`` mode, a closed-scan hit, or None when the path vanished.
+
+    ``Path.is_symlink`` on Python 3.14 returns False for every ``OSError``,
+    including EACCES on a mode 000 parent. ``os.lstat`` still raises, so the
+    scan can fail closed. The final symlink is not followed.
+    """
+    try:
+        return os.lstat(path).st_mode
+    except OSError as exc:
+        hit = _listing_failure(exc, str(path))
+        if hit is not None:
+            return hit
+        return None
+
+
+def _follow_stat(path: Path) -> os.stat_result | _CapHit | _Unfollowed:
+    """Followed ``os.stat``, a closed-scan hit, or an unfollowed outcome.
+
+    ELOOP means the entry is a symlink loop. It is not a directory and it
+    does not fail the scan. ENOENT and ENOTDIR mean the path vanished.
+    EACCES and EPERM fail closed. ``Path.is_dir`` and ``Path.is_file`` on
+    Python 3.14 hide those errors by returning False.
+    """
+    try:
+        return os.stat(path, follow_symlinks=True)
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            return _Unfollowed(loop=True)
+        hit = _listing_failure(exc, str(path))
+        if hit is not None:
+            return hit
+        return _Unfollowed(loop=False)
+
+
 def _error_filename(exc: OSError) -> str | None:
     filename = exc.filename
     if isinstance(filename, bytes):
@@ -1170,18 +1269,61 @@ def _home_relative(path: str) -> str:
     return path
 
 
+def _under_home_tree(path: str, relative: str) -> bool:
+    """True when ``path`` is ``~/<relative>`` or a descendant of it.
+
+    The check is the home directory's own tree, not any path segment with
+    the same name. A symlinked ``~/.gnupg`` still matches after the walk
+    reports the link target.
+    """
+    anchor = Path.home().joinpath(*relative.split("/"))
+    try:
+        Path(path).relative_to(anchor)
+        return True
+    except ValueError:
+        pass
+    try:
+        real_anchor = os.path.realpath(anchor)
+    except OSError:
+        return False
+    try:
+        real_here = os.path.realpath(path)
+    except OSError:
+        parent = os.path.dirname(path)
+        try:
+            real_here = os.path.join(os.path.realpath(parent), os.path.basename(path))
+        except OSError:
+            return False
+    return real_here == real_anchor or real_here.startswith(real_anchor + os.sep)
+
+
 def _under_gnupg(path: str | None) -> bool:
-    return path is not None and ".gnupg" in Path(path).parts
+    return path is not None and _under_home_tree(path, ".gnupg")
+
+
+def _ownership_hint(path: str | None) -> str | None:
+    if _under_gnupg(path):
+        return "(a root-owned dir, e.g. from `sudo gpg`, in ~/.gnupg; fix ownership)"
+    if path is not None and _under_home_tree(path, ".docker"):
+        return "(a root-owned dir, e.g. from `sudo docker`, in ~/.docker; fix ownership)"
+    if path is not None and _under_home_tree(path, ".config/praxis-prime"):
+        return (
+            "(a root-owned dir, e.g. from `sudo praxis-prime`, "
+            "in ~/.config/praxis-prime; fix ownership)"
+        )
+    return None
 
 
 def _refuse_capped_inode_scan(limit: int, kind: str, path: str | None = None) -> None:
     if kind == "unbounded-root":
         detail = "secret inode scan refused an unbounded root"
     elif kind == "unreadable-directory":
+        verb = "stat" if path is not None and Path(path).name in _FILE_ROOT_NAMES else "list"
         shown = repr(_home_relative(path)) if path else repr("a directory")
-        detail = f"secret inode scan could not list {shown}"
-        if _under_gnupg(path):
-            detail += " (a root-owned dir, e.g. from `sudo gpg`, in ~/.gnupg; fix ownership)"
+        detail = f"secret inode scan could not {verb} {shown}"
+        hint = _ownership_hint(path)
+        if hint is not None:
+            detail += " " + hint
     else:
         detail = f"secret inode scan hit the {limit} {kind} cap"
     message = f"{detail}; denying the read because a secret file could have been missed"
@@ -1208,19 +1350,16 @@ def _inside_home(path: Path, home: Path) -> bool:
 def _dir_inode(path: Path) -> tuple[int, int] | _CapHit | None:
     """Directory inode, a closed-scan hit, or None when the path is not a dir.
 
-    ENOENT and ENOTDIR return None. EACCES, EPERM, and other stat failures
-    fail the scan closed. Mode 0400 lists names but cannot stat children.
+    ENOENT, ENOTDIR, and ELOOP return None. ELOOP is a symlink loop, not a
+    directory to descend into. EACCES, EPERM, and other stat failures fail
+    the scan closed. Mode 0400 lists names but cannot stat children.
     """
-    try:
-        st = os.stat(path, follow_symlinks=True)
-    except OSError as exc:
-        hit = _listing_failure(exc, str(path))
-        if hit is not None:
-            return hit
+    followed = _follow_stat(path)
+    if isinstance(followed, _CapHit):
+        return followed
+    if isinstance(followed, _Unfollowed) or not stat.S_ISDIR(followed.st_mode):
         return None
-    if not stat.S_ISDIR(st.st_mode):
-        return None
-    return st.st_dev, st.st_ino
+    return followed.st_dev, followed.st_ino
 
 
 def _is_unbounded_scan_root(path: Path) -> bool:
@@ -1301,8 +1440,13 @@ def _resolve_scan_root(path: Path) -> tuple[Path, bool] | _CapHit | None:
     every read closed.
     """
     try:
+        mode = _lstat_mode(path)
+        if isinstance(mode, _CapHit):
+            return mode
+        if mode is None:
+            return None
         browser = _is_browser_scan_root(path)
-        if not path.is_symlink():
+        if not stat.S_ISLNK(mode):
             return path, browser
         resolved = path.resolve(strict=False)
         if _is_unbounded_scan_root(resolved):
@@ -1388,18 +1532,17 @@ def _collect_inodes(
     # ``~/.config/google-chrome`` is still that browser root. ``~/.ssh`` is not.
     skip_browser_caches = _is_lexical_browser_root(path, include_gcloud=False)
     tally = _NameTally()
-    try:
-        if root.is_file():
-            added = _add_inode(root, found, 0)
-            if isinstance(added, _CapHit):
-                return added
-            return None
-        if not root.is_dir():
-            return None
-    except OSError as exc:
-        hit = _listing_failure(exc, str(root))
-        if hit is not None:
-            return hit
+    followed = _follow_stat(root)
+    if isinstance(followed, _CapHit):
+        return followed
+    if isinstance(followed, _Unfollowed):
+        return None
+    if stat.S_ISREG(followed.st_mode):
+        added = _add_inode(root, found, 0)
+        if isinstance(added, _CapHit):
+            return added
+        return None
+    if not stat.S_ISDIR(followed.st_mode):
         return None
     # Listing errors are handled here. os.walk is a generator, so a
     # try/except around the call itself never sees scandir failures.
@@ -1501,14 +1644,14 @@ def _list_dir(
         filenames: list[str] = []
         for name in names:
             child = directory / name
-            try:
-                is_dir = child.is_dir()
-            except OSError as exc:
-                hit = _listing_failure(exc, str(child))
-                if hit is not None:
-                    return hit
+            followed = _follow_stat(child)
+            if isinstance(followed, _CapHit):
+                return followed
+            if isinstance(followed, _Unfollowed):
+                if followed.loop:
+                    filenames.append(name)
                 continue
-            if is_dir:
+            if stat.S_ISDIR(followed.st_mode):
                 dirnames.append(name)
             else:
                 filenames.append(name)
@@ -1523,14 +1666,14 @@ def _list_dir(
     dirnames = []
     filenames = []
     for entry in entries:
-        try:
-            is_dir = entry.is_dir(follow_symlinks=True)
-        except OSError as exc:
-            hit = _listing_failure(exc, entry.path)
-            if hit is not None:
-                return hit
+        followed = _follow_stat(Path(entry.path))
+        if isinstance(followed, _CapHit):
+            return followed
+        if isinstance(followed, _Unfollowed):
+            if followed.loop:
+                filenames.append(entry.name)
             continue
-        if is_dir:
+        if stat.S_ISDIR(followed.st_mode):
             dirnames.append(entry.name)
         else:
             filenames.append(entry.name)
@@ -1539,10 +1682,13 @@ def _list_dir(
 
 def _add_inode(path: Path, found: set[tuple[int, int]], count: int) -> int | _CapHit:
     try:
-        st = path.stat(follow_symlinks=True)
+        st = os.stat(path, follow_symlinks=True)
     except OSError as exc:
         # Mode 0400 can list the name and still refuse the stat. That hides
         # a hard link unless the scan fails closed. A vanished file does not.
+        # ELOOP is a symlink loop: there is no file to record.
+        if exc.errno == errno.ELOOP:
+            return count
         hit = _listing_failure(exc, str(path))
         if hit is not None:
             return hit

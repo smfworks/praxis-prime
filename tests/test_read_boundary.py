@@ -1066,6 +1066,189 @@ def test_renamed_ssh_directory_is_seen_on_one_rescan(tmp_path: Path, monkeypatch
     assert denial.code == "secret_path"
 
 
+def test_pathlib_oserror_false_still_fails_closed_on_a_hidden_root(
+    tmp_path: Path, monkeypatch
+):
+    """Python 3.14 Path.is_* returns False on EACCES. The scan must still stop."""
+    home = tmp_path / "home"
+    key = home / ".config" / "google-chrome" / "Default" / "Login Data"
+    key.parent.mkdir(parents=True)
+    key.write_text(SECRET, encoding="utf-8")
+    root = tmp_path / "ws"
+    root.mkdir()
+    (root / "hello.txt").write_text("hello\n", encoding="utf-8")
+    os.link(key, root / "notes.txt")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+
+    def swallow(real):
+        def wrapped(self, *args, **kwargs):
+            try:
+                return real(self, *args, **kwargs)
+            except OSError:
+                return False
+
+        return wrapped
+
+    monkeypatch.setattr(Path, "is_dir", swallow(Path.is_dir))
+    monkeypatch.setattr(Path, "is_file", swallow(Path.is_file))
+    monkeypatch.setattr(Path, "is_symlink", swallow(Path.is_symlink))
+    blocked = home / ".config"
+    os.chmod(blocked, 0)
+    try:
+        denial = _denied(execute_read_file, {"path": "hello.txt"}, _ctx(root))
+        assert denial.code == "inode_scan_capped"
+        assert SECRET not in str(denial)
+    finally:
+        os.chmod(blocked, 0o700)
+
+
+def test_renamed_cache_root_fails_closed(tmp_path: Path, monkeypatch):
+    """Renaming the cache directory itself is not recovered by listing its parent."""
+    home = tmp_path / "home"
+    cache = home / ".config" / "google-chrome" / "Default" / "Cache"
+    nested = cache / "x"
+    nested.mkdir(parents=True)
+    login = nested / "Login Data"
+    login.write_text(SECRET, encoding="utf-8")
+    root = tmp_path / "ws"
+    root.mkdir()
+    (root / "hello.txt").write_text("hello\n", encoding="utf-8")
+    os.link(login, root / "notes.txt")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    real_scandir = os.scandir
+
+    def wrapped(target, *args, **kwargs):
+        if os.fspath(target) == str(cache) and cache.exists():
+            os.rename(cache, cache.parent / "Cache.gone")
+        return real_scandir(target, *args, **kwargs)
+
+    monkeypatch.setattr(os, "scandir", wrapped)
+    scan = InodeScanCache()
+    ctx = replace(_ctx(root), inode_cache=scan)
+    denial = _denied(execute_read_file, {"path": "hello.txt"}, ctx)
+    assert denial.code == "inode_scan_capped"
+    assert str(cache) not in str(denial)
+    notes = _denied(execute_read_file, {"path": "notes.txt"}, ctx)
+    assert notes is scan.error
+    assert notes.code == "inode_scan_capped"
+    assert SECRET not in str(notes)
+
+
+def test_cache_vanish_retries_only_a_proper_descendant(tmp_path: Path):
+    cache = tmp_path / "Cache"
+    cache.mkdir()
+    child = cache / "x"
+    child.mkdir()
+    outside = tmp_path / "outside"
+    root_hit = boundary_mod._cache_vanish(cache, cache, [], set(), False)
+    assert isinstance(root_hit, boundary_mod._CapHit)
+    assert root_hit.kind == "unreadable-directory"
+    assert root_hit.path == str(cache)
+    outside_hit = boundary_mod._cache_vanish(outside, cache, [], set(), False)
+    assert isinstance(outside_hit, boundary_mod._CapHit)
+    assert outside_hit.kind == "unreadable-directory"
+    pending: list[Path] = []
+    assert boundary_mod._cache_vanish(child, cache, pending, set(), False) is True
+    assert child in pending
+    assert boundary_mod._cache_vanish(child, cache, [], set(), True) is False
+
+
+def test_symlink_loop_does_not_fail_the_scan(tmp_path: Path, monkeypatch):
+    home = tmp_path / "home"
+    ssh = home / ".ssh"
+    ssh.mkdir(parents=True)
+    (ssh / "a").symlink_to(ssh / "b")
+    (ssh / "b").symlink_to(ssh / "a")
+    (ssh / "self").symlink_to(ssh / "self")
+    key = ssh / "id_ed25519"
+    key.write_text(SECRET, encoding="utf-8")
+    cache = home / ".config" / "google-chrome" / "Default" / "Cache"
+    cache.mkdir(parents=True)
+    (cache / "loop").symlink_to(cache / "loop")
+    login = home / ".config" / "google-chrome" / "Default" / "Login Data"
+    login.write_text(SECRET, encoding="utf-8")
+    root = tmp_path / "ws"
+    root.mkdir()
+    (root / "hello.txt").write_text("hello\n", encoding="utf-8")
+    os.link(key, root / "notes.txt")
+    os.link(login, root / "cached.txt")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    ctx = _ctx(root)
+    assert execute_read_file({"path": "hello.txt"}, ctx) == "hello\n"
+    for name in ("notes.txt", "cached.txt"):
+        denial = _denied(execute_read_file, {"path": name}, ctx)
+        assert denial.code == "secret_path", name
+
+
+def test_ownership_hints_follow_home_trees(tmp_path: Path, monkeypatch):
+    home = tmp_path / "home"
+    docker = home / ".docker"
+    docker.mkdir(parents=True)
+    (docker / "config.json").write_text("{}", encoding="utf-8")
+    prime = home / ".config" / "praxis-prime"
+    prime.mkdir(parents=True)
+    nested_name = home / ".config" / "google-chrome" / ".gnupg"
+    nested_name.mkdir(parents=True)
+    root = tmp_path / "ws"
+    root.mkdir()
+    (root / "hello.txt").write_text("hello\n", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    os.chmod(docker, 0)
+    try:
+        denial = _denied(execute_read_file, {"path": "hello.txt"}, _ctx(root))
+        assert denial.code == "inode_scan_capped"
+        assert "could not stat" in str(denial)
+        assert "'~/.docker/config.json'" in str(denial)
+        assert "sudo docker" in str(denial)
+        assert "could not list" not in str(denial)
+    finally:
+        os.chmod(docker, 0o700)
+    os.chmod(prime, 0)
+    try:
+        denial = _denied(execute_read_file, {"path": "hello.txt"}, _ctx(root))
+        assert denial.code == "inode_scan_capped"
+        assert "could not stat" in str(denial)
+        assert "sudo praxis-prime" in str(denial)
+        assert "~/.config/praxis-prime" in str(denial)
+    finally:
+        os.chmod(prime, 0o700)
+    os.chmod(nested_name, 0)
+    try:
+        denial = _denied(execute_read_file, {"path": "hello.txt"}, _ctx(root))
+        assert denial.code == "inode_scan_capped"
+        assert "could not list" in str(denial)
+        assert "sudo gpg" not in str(denial)
+    finally:
+        os.chmod(nested_name, 0o700)
+
+
+def test_symlinked_gnupg_keeps_the_ownership_hint(tmp_path: Path, monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    vault = tmp_path / "vault" / "gnupg"
+    private = vault / "private-keys-v1.d"
+    private.mkdir(parents=True)
+    (home / ".gnupg").symlink_to(vault, target_is_directory=True)
+    root = tmp_path / "ws"
+    root.mkdir()
+    (root / "hello.txt").write_text("hello\n", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    os.chmod(private, 0)
+    try:
+        denial = _denied(execute_read_file, {"path": "hello.txt"}, _ctx(root))
+        assert denial.code == "inode_scan_capped"
+        assert "could not list" in str(denial)
+        assert "sudo gpg" in str(denial)
+        assert "fix ownership" in str(denial)
+    finally:
+        os.chmod(private, 0o700)
+
+
 def test_renamed_cache_directory_is_seen_on_parent_relist(tmp_path: Path, monkeypatch):
     home = tmp_path / "home"
     nested = home / ".config" / "google-chrome" / "Default" / "Cache" / "x"
