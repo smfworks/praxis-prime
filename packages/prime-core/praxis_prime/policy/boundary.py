@@ -488,8 +488,19 @@ def assert_readable(
     requested: Path | None = None,
     cache: InodeScanCache | None = None,
 ) -> None:
-    """Refuse secret names and hard links. The message names the file only."""
+    """Refuse secret names and hard links. The message names the file only.
+
+    An account-data tree that cannot be scanned does not make every other
+    file a secret. A path inside that tree gets its own error.
+    """
     target = requested if requested is not None else path
+    reason = _data_scan_problem(target) or _data_scan_problem(path)
+    if reason:
+        raise ReadDenied(
+            f"could not scan the account data directory: {reason}",
+            "data_dir_unscanned",
+            name=target.name,
+        )
     if is_secret_path(target) or is_secret_path(path) or inode_is_secret(path, cache=cache):
         raise ReadDenied(
             f"refusing to read secret file {target.name}",
@@ -782,9 +793,11 @@ def _is_private_data(path: Path) -> bool:
         return True
     if _private_path(resolved, root):
         return True
-    inodes = _private_inodes(root)
-    if inodes is None:
-        return True
+    inodes, problem = _cached_private_inodes(root)
+    if problem:
+        # The tree was not fully scanned. Path rules above still apply.
+        # Other files stay readable; a hard link past the cap can be missed.
+        return False
     return _inode_in(resolved, inodes)
 
 
@@ -813,58 +826,162 @@ def _private_path(resolved: Path, root: Path) -> bool:
 _PRIVATE_INODE_CAP = 20_000
 
 
-def _private_inodes(root: Path) -> set[tuple[int, int]] | None:
-    """Regular-file inodes under ``profiles/`` and ``backups/``.
+@dataclass
+class _InodeSnapshot:
+    root: str
+    stamp: tuple[tuple[str, int], ...]
+    inodes: set[tuple[int, int]]
+    problem: str
 
-    ``None`` means the walk could not finish, so the caller fails closed.
-    Symlinks are not followed. Hard links share the inode of the original.
-    """
+
+_data_inode_snapshot: _InodeSnapshot | None = None
+_data_inode_lock = threading.Lock()
+_data_inode_scans = 0
+
+
+def clear_data_inode_cache() -> None:
+    """Drop the cached data-directory inode set. Tests use this."""
+    global _data_inode_snapshot
+    with _data_inode_lock:
+        _data_inode_snapshot = None
+
+
+def data_inode_scans() -> int:
+    """How many times the data-directory tree was walked."""
+    with _data_inode_lock:
+        return _data_inode_scans
+
+
+def _data_scan_problem(path: Path) -> str:
+    """Why ``path`` cannot be classified, or empty when it is not in that tree."""
+    root = _data_root()
+    if root is None:
+        return ""
+    _inodes, problem = _cached_private_inodes(root)
+    if not problem:
+        return ""
+    try:
+        resolved = Path(os.path.realpath(path, strict=False))
+    except (OSError, RuntimeError, ValueError):
+        return problem
+    if not _private_path(resolved, root):
+        return ""
+    return problem
+
+
+def _cached_private_inodes(root: Path) -> tuple[set[tuple[int, int]], str]:
+    """Inodes under profiles and backups, reused while directory mtimes match."""
+    global _data_inode_scans, _data_inode_snapshot
+    key = str(root)
+    with _data_inode_lock:
+        cached = _data_inode_snapshot
+        if (
+            cached is not None
+            and cached.root == key
+            and cached.stamp
+            and _stamp_matches(cached.stamp)
+        ):
+            return cached.inodes, cached.problem
+        _data_inode_scans += 1
+        inodes, problem, stamp = _scan_private_inodes(root)
+        _data_inode_snapshot = _InodeSnapshot(key, stamp, inodes, problem)
+        return inodes, problem
+
+
+def _stamp_matches(stamp: tuple[tuple[str, int], ...]) -> bool:
+    for path, mtime in stamp:
+        try:
+            st = os.lstat(path)
+        except OSError:
+            return False
+        if not stat.S_ISDIR(st.st_mode) or st.st_mtime_ns != mtime:
+            return False
+    return True
+
+
+def _scan_private_inodes(
+    root: Path,
+) -> tuple[set[tuple[int, int]], str, tuple[tuple[str, int], ...]]:
     found: set[tuple[int, int]] = set()
+    dirs: list[tuple[str, int]] = []
+    root_stamp = _dir_mtime(root)
+    if root_stamp is not None:
+        dirs.append(root_stamp)
+    problem = ""
     for folder in (root / "profiles", root / "backups"):
-        if not _collect_tree_inodes(folder, found):
-            return None
-    database = root / "accounts.db"
-    kind = lstat_kind(database)
-    if kind is StatKind.UNREADABLE:
-        return None
-    if kind is StatKind.FILE and not _add_regular_inode(database, found):
-        return None
-    return found
+        reason = _collect_tree_inodes(folder, found, dirs)
+        if reason:
+            problem = reason
+            break
+    if not problem:
+        database = root / "accounts.db"
+        kind = lstat_kind(database)
+        if kind is StatKind.UNREADABLE:
+            problem = "unreadable accounts.db"
+        elif kind is StatKind.FILE and not _add_regular_inode(database, found):
+            problem = f"more than {_PRIVATE_INODE_CAP} files under the account data directory"
+    return found, problem, tuple(dirs)
 
 
-def _collect_tree_inodes(folder: Path, found: set[tuple[int, int]]) -> bool:
+def _dir_mtime(path: Path) -> tuple[str, int] | None:
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return None
+    if not stat.S_ISDIR(st.st_mode):
+        return None
+    return str(path), st.st_mtime_ns
+
+
+def _collect_tree_inodes(
+    folder: Path,
+    found: set[tuple[int, int]],
+    dirs: list[tuple[str, int]],
+) -> str:
+    """Empty string when the walk finished. Otherwise why it stopped.
+
+    Symlinks are not followed. Hard links share the inode of the original.
+    Each directory's mtime is recorded so a later check can reuse ``found``.
+    """
     kind = lstat_kind(folder)
     if kind is StatKind.MISSING:
-        return True
+        return ""
     if kind is StatKind.UNREADABLE:
-        return False
+        return f"unreadable directory {folder}"
     if kind is StatKind.FILE:
-        return _add_regular_inode(folder, found)
+        if not _add_regular_inode(folder, found):
+            return f"more than {_PRIVATE_INODE_CAP} files under the account data directory"
+        return ""
     if kind is not StatKind.DIR:
-        return True
+        return ""
     stack = [folder]
     while stack:
         directory = stack.pop()
+        stamp = _dir_mtime(directory)
+        if stamp is not None:
+            dirs.append(stamp)
         try:
             entries = list(os.scandir(directory))
         except FileNotFoundError:
             continue
         except OSError:
-            return False
+            return f"unreadable directory {directory}"
         for entry in entries:
             if len(found) > _PRIVATE_INODE_CAP:
-                return False
+                return (
+                    f"more than {_PRIVATE_INODE_CAP} files under the account data directory"
+                )
             try:
                 st = entry.stat(follow_symlinks=False)
             except OSError:
-                return False
+                return f"unreadable directory {directory}"
             if stat.S_ISLNK(st.st_mode):
                 continue
             if stat.S_ISREG(st.st_mode):
                 found.add((st.st_dev, st.st_ino))
             elif stat.S_ISDIR(st.st_mode):
                 stack.append(Path(entry.path))
-    return True
+    return ""
 
 
 def _add_regular_inode(path: Path, found: set[tuple[int, int]]) -> bool:

@@ -13,6 +13,7 @@ docs/blueprint-addendum-2026-09.md §4.3 and §6.2.
 from __future__ import annotations
 
 import json
+import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -211,15 +212,17 @@ def login(
         return 400, _error("bad_request", "username and password must be strings"), []
     account = store.authenticate(username_text, password)
     if account is None:
-        _audit(
+        if not _audit_or_unavailable(
             audit,
             "auth.fail",
             "login failed",
             {"username": _safe_name(username_text), "ip": _safe_ip(peer)},
-        )
+        ):
+            return 503, _error("unavailable", "audit log is busy"), []
         return 401, _error("unauthorized", "invalid username or password"), []
-    issued = store.open_session(account)
-    _audit(
+    # Write the audit row before the session exists. A locked prime.db then
+    # returns 503 and does not leave an orphan session.
+    if not _audit_or_unavailable(
         audit,
         "auth.login",
         "login",
@@ -229,7 +232,9 @@ def login(
             "role": account.role,
             "method": "password",
         },
-    )
+    ):
+        return 503, _error("unavailable", "audit log is busy; login was not completed"), []
+    issued = store.open_session(account)
     payload: dict[str, object] = {
         "ok": True,
         "account": account.public(),
@@ -317,6 +322,20 @@ def _audit(audit: AuditLog | None, kind: str, summary: str, payload: dict[str, o
     if audit is None:
         return
     audit.append(session_id=None, kind=kind, summary=summary, payload=payload)
+
+
+def _audit_or_unavailable(
+    audit: AuditLog | None,
+    kind: str,
+    summary: str,
+    payload: dict[str, object],
+) -> bool:
+    """False when ``prime.db`` stays locked past the audit busy timeout."""
+    try:
+        _audit(audit, kind, summary, payload)
+    except sqlite3.OperationalError:
+        return False
+    return True
 
 
 def _error(code: str, message: str) -> dict[str, object]:
