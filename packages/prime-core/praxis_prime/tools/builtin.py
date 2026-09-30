@@ -128,10 +128,16 @@ def execute_read_file(arguments: Mapping[str, object], context: ToolContext) -> 
     access = _access(context)
     requested = Path(raw)
     path = confine_path(raw, cwd=context.cwd, access=access)
-    assert_readable(path, requested=requested)
+    assert_readable(path, requested=requested, cache=context.inode_cache)
     if not path.is_file():
         raise ValueError(f"not a file: {path}")
-    data = read_confined_bytes(path, cwd=context.cwd, access=access, limit=_MAX_READ)
+    data = read_confined_bytes(
+        path,
+        cwd=context.cwd,
+        access=access,
+        limit=_MAX_READ,
+        cache=context.inode_cache,
+    )
     if b"\x00" in data[:1024]:
         raise ValueError(f"refusing to read binary file {path.name}")
     text = data.decode("utf-8", errors="replace")
@@ -146,7 +152,7 @@ def execute_list_dir(arguments: Mapping[str, object], context: ToolContext) -> s
         raw = "."
     access = _access(context)
     path = confine_path(raw, cwd=context.cwd, access=access)
-    assert_readable(path, requested=Path(raw))
+    assert_readable(path, requested=Path(raw), cache=context.inode_cache)
     if not path.is_dir():
         raise ValueError(f"not a directory: {path}")
     names = []

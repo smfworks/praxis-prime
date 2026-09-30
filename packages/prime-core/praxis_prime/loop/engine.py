@@ -13,6 +13,7 @@ import asyncio
 import re
 from collections.abc import AsyncIterator, Callable, Iterator, Mapping
 from pathlib import Path
+from urllib.parse import urlparse, urlunparse
 
 from praxis_prime.approvals.gate import (
     ApprovalDecision,
@@ -28,7 +29,7 @@ from praxis_prime.loop.events import LoopEvent, StatusEvent, TurnEnded
 from praxis_prime.loop.hooks import HookDecision, HookResult, LoopHooks
 from praxis_prime.loop.prompt import FENCE_END, SYSTEM_PROMPT, fence_untrusted
 from praxis_prime.memory.store import SessionStore
-from praxis_prime.policy.boundary import ReadAccess, ReadDenied
+from praxis_prime.policy.boundary import InodeScanCache, ReadAccess, ReadDenied
 from praxis_prime.policy.engine import HookPoint, PolicyContext, PolicyEngine
 from praxis_prime.router.router import ModelRouter
 from praxis_prime.router.types import (
@@ -90,6 +91,7 @@ class AgentLoop:
         self.recall_for = recall_for
         self.on_turn_end = on_turn_end
         self.read_access = read_access or ReadAccess()
+        self.inode_cache = InodeScanCache()
         self._turn_user = ""
 
     def run_turn(
@@ -98,6 +100,14 @@ class AgentLoop:
         control: TurnControl | None = None,
     ) -> Iterator[LoopEvent]:
         """Run one user turn, yielding text and timeline events as they happen."""
+        self.inode_cache.clear()
+        yield from self._run_turn(user_text, control)
+
+    def _run_turn(
+        self,
+        user_text: str,
+        control: TurnControl | None = None,
+    ) -> Iterator[LoopEvent]:
         control = control or TurnControl()
         self._turn_user = user_text
         self.policy.session_id = self.session_id
@@ -311,7 +321,9 @@ class AgentLoop:
             extra_roots=self.read_access.extra_roots,
             allow_paths=self.read_access.allow_paths,
             fetch_allow=tuple(sorted(self.read_access.fetch_allow)),
+            inode_cache=self.inode_cache,
         )
+        self.inode_cache.clear()
         verdict = self.policy.evaluate(ctx)
         if self.screener is not None:
             verdict = self.screener.apply(verdict, ctx)
@@ -386,6 +398,7 @@ class AgentLoop:
             host_shell_approved=host_approved,
             session_id=self.session_id,
             read_access=self.read_access,
+            inode_cache=self.inode_cache,
         )
         try:
             raw = tool.execute(dict(call.arguments), tool_ctx)
@@ -635,5 +648,15 @@ def _redact(arguments: Mapping[str, object]) -> dict[str, str]:
         if _SECRET_KEY.search(name):
             cleaned[name] = "[redacted]"
         else:
-            cleaned[name] = _short(str(value), 180)
+            cleaned[name] = _redact_text(str(value))
     return cleaned
+
+
+def _redact_text(text: str) -> str:
+    """Drop query strings and fragments so a fetched token is not audited."""
+    stripped = text.strip()
+    parsed = urlparse(stripped)
+    if parsed.scheme in {"http", "https"} and (parsed.query or parsed.fragment):
+        query = "[redacted]" if parsed.query else ""
+        stripped = urlunparse(parsed._replace(query=query, fragment=""))
+    return _short(stripped, 180)

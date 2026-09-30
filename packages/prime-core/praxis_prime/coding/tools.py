@@ -20,6 +20,7 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from praxis_prime.policy.boundary import (
+    InodeScanCache,
     ReadAccess,
     ReadDenied,
     assert_readable,
@@ -242,8 +243,14 @@ def execute_grep(arguments: Mapping[str, object], context: ToolContext) -> str:
         raw_path = "."
     access = _read_access(context)
     base = confine_path(raw_path, cwd=context.cwd, access=access)
-    assert_readable(base, requested=Path(raw_path))
-    return _python_grep(pattern, base, cwd=context.cwd, access=access)
+    assert_readable(base, requested=Path(raw_path), cache=context.inode_cache)
+    return _python_grep(
+        pattern,
+        base,
+        cwd=context.cwd,
+        access=access,
+        cache=context.inode_cache,
+    )
 
 
 def execute_glob(arguments: Mapping[str, object], context: ToolContext) -> str:
@@ -255,10 +262,10 @@ def execute_glob(arguments: Mapping[str, object], context: ToolContext) -> str:
         raw_path = "."
     access = _read_access(context)
     base = confine_path(raw_path, cwd=context.cwd, access=access)
-    assert_readable(base, requested=Path(raw_path))
+    assert_readable(base, requested=Path(raw_path), cache=context.inode_cache)
     if not base.is_dir():
         raise ValueError(f"not a directory: {base}")
-    inodes = secret_inode_set()
+    inodes = secret_inode_set(context.inode_cache)
     matches: list[str] = []
     for path in sorted(base.glob(pattern)):
         if _skipped(path) or is_secret_path(path):
@@ -555,16 +562,29 @@ def _skipped(path: Path) -> bool:
     return any(part in {".git", "node_modules", ".venv", "__pycache__"} for part in path.parts)
 
 
-def _python_grep(pattern: str, base: Path, *, cwd: str, access: ReadAccess) -> str:
+def _python_grep(
+    pattern: str,
+    base: Path,
+    *,
+    cwd: str,
+    access: ReadAccess,
+    cache: InodeScanCache | None = None,
+) -> str:
     try:
         compiled = re.compile(pattern)
     except re.error as exc:
         raise ValueError(f"invalid grep pattern: {exc}") from exc
     lines: list[str] = []
-    inodes = secret_inode_set()
+    inodes = secret_inode_set(cache)
     for path in _search_files(base, cwd=cwd, access=access, inodes=inodes):
         try:
-            data = read_confined_bytes(path, cwd=cwd, access=access, limit=_MAX_GREP_FILE)
+            data = read_confined_bytes(
+                path,
+                cwd=cwd,
+                access=access,
+                limit=_MAX_GREP_FILE,
+                cache=cache,
+            )
         except (OSError, ReadDenied):
             continue
         if b"\x00" in data[:1024]:

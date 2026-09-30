@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import http.client
 import ipaddress
+import logging
 import os
 import re
 import socket
@@ -27,9 +28,15 @@ from urllib.parse import urljoin, urlparse
 
 from praxis_prime.paths import config_dir, runtime_dir
 
+_log = logging.getLogger(__name__)
+
 MAX_REDIRECTS = 5
 _MAX_INODE_FILES = 500
+_MAX_CREDENTIAL_FILES = 5_000
+_MAX_SCAN_ENTRIES = 20_000
+_SYSTEM_SCAN_ROOTS = ("/usr", "/etc", "/proc", "/sys", "/dev")
 _FETCH_ALLOW = frozenset({"loopback", "private", "link_local", "metadata"})
+_BROWSER_FETCH_ALLOW = frozenset({"loopback", "private", "link_local"})
 _REDIRECT_STATUS = frozenset({300, 301, 302, 303, 307, 308})
 _METADATA_HOSTS = frozenset({"metadata.google.internal", "metadata.goog"})
 _METADATA_V4 = ipaddress.ip_address("169.254.169.254")
@@ -53,7 +60,17 @@ _EXACT_NAMES = frozenset(
         ".git-credentials",
         "git-credentials",
         "gateway.token",
+        ".envrc",
+        "service_account.json",
+        "service-account.json",
+        ".boto",
     }
+)
+_SERVICE_ACCOUNT_SUFFIXES = (
+    "-service-account.json",
+    "-service_account.json",
+    "_service-account.json",
+    "_service_account.json",
 )
 _KEY_PREFIXES = ("id_rsa", "id_ed25519", "id_ecdsa", "id_dsa")
 _SOURCE_SUFFIXES = frozenset({".py", ".pyi", ".md", ".rst", ".js", ".ts", ".tsx", ".go", ".rs"})
@@ -68,6 +85,35 @@ _BROWSER_CONFIG = frozenset(
         "opera",
     }
 )
+# Browser and gcloud trees contribute these filenames, plus the denylist
+# patterns. Credential directories count every file instead.
+_PROFILE_SECRET_NAMES = frozenset(
+    {
+        "login data",
+        "cookies",
+        "web data",
+        "local state",
+        "key4.db",
+        "key3.db",
+        "logins.json",
+        "logins-backup.json",
+        "cookies.sqlite",
+        "cert9.db",
+        "signons.sqlite",
+        "extension cookies",
+        "account web data",
+        "login data for account",
+        "safe browsing cookies",
+    }
+)
+_GCLOUD_SECRET_NAMES = frozenset(
+    {
+        "credentials.db",
+        "access_tokens.db",
+        "application_default_credentials.json",
+    }
+)
+_PROFILE_SIDECAR_SUFFIXES = ("-journal", "-wal", "-shm")
 _SKIP_WALK = frozenset({".git", "node_modules", ".venv", "__pycache__"})
 
 Resolver = Callable[..., list[tuple[object, ...]]]
@@ -97,6 +143,7 @@ class FetchResult:
     url: str
     content_type: str
     body: bytes
+    status: int = 200
 
 
 def absolute_config_paths(value: object) -> tuple[str, ...]:
@@ -128,6 +175,15 @@ def parse_fetch_allow(value: object) -> frozenset[str]:
     )
 
 
+def browser_fetch_allow(fetch_allow: Collection[str]) -> frozenset[str]:
+    """Classes the browser may use. Metadata is omitted."""
+    return frozenset(
+        str(item).strip().lower()
+        for item in fetch_allow
+        if str(item).strip().lower() in _BROWSER_FETCH_ALLOW
+    )
+
+
 def read_access_from_document(data: Mapping[str, object]) -> ReadAccess:
     tools = data.get("tools")
     table = tools if isinstance(tools, Mapping) else {}
@@ -144,13 +200,20 @@ def assess_read(
     *,
     workspace_root: str,
     access: ReadAccess,
+    cache: InodeScanCache | None = None,
 ) -> ReadDenied | None:
     """Return a denial for a concrete read that must not run.
 
     A missing path is left to the tool. Any unexpected error denies the read.
     """
     try:
-        return _assess_read(tool, arguments, workspace_root=workspace_root, access=access)
+        return _assess_read(
+            tool,
+            arguments,
+            workspace_root=workspace_root,
+            access=access,
+            cache=cache,
+        )
     except ReadDenied as exc:
         return exc
     except Exception:
@@ -197,7 +260,11 @@ def is_secret_path(path: Path) -> bool:
         return True
 
 
-def inode_is_secret(path: Path, inodes: set[tuple[int, int]] | None = None) -> bool:
+def inode_is_secret(
+    path: Path,
+    inodes: set[tuple[int, int]] | None = None,
+    cache: InodeScanCache | None = None,
+) -> bool:
     """True when ``path`` is a hard link to a known secret file."""
     try:
         st = path.stat(follow_symlinks=True)
@@ -205,25 +272,71 @@ def inode_is_secret(path: Path, inodes: set[tuple[int, int]] | None = None) -> b
         return False
     if not stat.S_ISREG(st.st_mode):
         return False
-    known = secret_inode_set() if inodes is None else inodes
+    known = secret_inode_set(cache) if inodes is None else inodes
     return (st.st_dev, st.st_ino) in known
 
 
-def secret_inode_set() -> set[tuple[int, int]]:
-    """Inodes of well-known secret files, so a hard link can be recognized."""
-    found: set[tuple[int, int]] = set()
-    count = 0
-    for path in _inode_candidates():
-        if count >= _MAX_INODE_FILES:
-            break
-        count = _collect_inodes(path, found, count)
+class InodeScanCache:
+    """One loop's inode scan. The loop owns it and passes it into policy."""
+
+    def __init__(self) -> None:
+        self.ready = False
+        self.found: set[tuple[int, int]] | None = None
+        self.error: ReadDenied | None = None
+
+    def clear(self) -> None:
+        self.ready = False
+        self.found = None
+        self.error = None
+
+
+def secret_inode_set(cache: InodeScanCache | None = None) -> set[tuple[int, int]]:
+    """Inodes of well-known secret files, so a hard link can be recognized.
+
+    Credential directories contribute every file except ``.kube/cache`` and
+    ``.kube/http-cache`` directly under ``.kube``. Browser and gcloud trees
+    contribute secret-named files. A root that cannot be finished denies the
+    read. ``cache`` reuses one scan until the loop clears it. ``found`` is
+    published before ``ready``.
+    """
+    if cache is not None and cache.ready:
+        if cache.error is not None:
+            raise cache.error
+        if cache.found is None:
+            return set()
+        return cache.found
+    try:
+        found = _scan_secret_inodes()
+    except ReadDenied as exc:
+        if cache is not None:
+            cache.error = exc
+            cache.ready = True
+        raise
+    if cache is not None:
+        cache.found = found
+        cache.ready = True
     return found
 
 
-def assert_readable(path: Path, *, requested: Path | None = None) -> None:
+def _scan_secret_inodes() -> set[tuple[int, int]]:
+    found: set[tuple[int, int]] = set()
+    for path in _inode_candidates():
+        hit = _collect_inodes(path, found)
+        if hit is not None:
+            limit, kind = hit
+            _refuse_capped_inode_scan(limit, kind)
+    return found
+
+
+def assert_readable(
+    path: Path,
+    *,
+    requested: Path | None = None,
+    cache: InodeScanCache | None = None,
+) -> None:
     """Refuse secret names and hard links. The message names the file only."""
     target = requested if requested is not None else path
-    if is_secret_path(target) or is_secret_path(path) or inode_is_secret(path):
+    if is_secret_path(target) or is_secret_path(path) or inode_is_secret(path, cache=cache):
         raise ReadDenied(
             f"refusing to read secret file {target.name}",
             "secret_path",
@@ -231,7 +344,14 @@ def assert_readable(path: Path, *, requested: Path | None = None) -> None:
         )
 
 
-def read_confined_bytes(path: Path, *, cwd: str, access: ReadAccess, limit: int) -> bytes:
+def read_confined_bytes(
+    path: Path,
+    *,
+    cwd: str,
+    access: ReadAccess,
+    limit: int,
+    cache: InodeScanCache | None = None,
+) -> bytes:
     """Open a confined regular file and read at most ``limit`` + 1 bytes."""
     roots = workspace_roots(cwd, access)
     flags = os.O_RDONLY | os.O_CLOEXEC
@@ -245,7 +365,7 @@ def read_confined_bytes(path: Path, *, cwd: str, access: ReadAccess, limit: int)
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):
             raise ReadDenied("refusing to read a non-regular file", "outside_workspace")
-        if (st.st_dev, st.st_ino) in secret_inode_set():
+        if (st.st_dev, st.st_ino) in secret_inode_set(cache):
             raise ReadDenied(
                 f"refusing to read secret file {path.name}",
                 "secret_path",
@@ -350,6 +470,7 @@ def fetch_public(
     resolve: Resolver | None = None,
     exchange: Exchange | None = None,
     max_redirects: int = MAX_REDIRECTS,
+    raise_for_status: bool = True,
 ) -> FetchResult:
     """GET ``url``, re-checking scheme, address class, and DNS on every hop."""
     current = url.strip()
@@ -372,11 +493,16 @@ def fetch_public(
                 raise ReadDenied("web_fetch redirect is missing a location", "fetch_redirect")
             current = urljoin(current, location)
             continue
-        if status >= 400:
+        if status >= 400 and raise_for_status:
             detail = body[:500].decode("utf-8", errors="replace")
             raise RuntimeError(f"HTTP {status} for {current}: {detail[:200]}")
         content_type = str(headers.get("content-type", ""))
-        return FetchResult(url=current, content_type=content_type, body=body)
+        return FetchResult(
+            url=current,
+            content_type=content_type,
+            body=body,
+            status=status,
+        )
 
 
 def _assess_read(
@@ -385,6 +511,7 @@ def _assess_read(
     *,
     workspace_root: str,
     access: ReadAccess,
+    cache: InodeScanCache | None = None,
 ) -> ReadDenied | None:
     if tool == "web_fetch":
         if not arguments or "url" not in arguments:
@@ -400,7 +527,7 @@ def _assess_read(
         raw = arguments.get("url")
         if not isinstance(raw, str) or not raw.strip():
             return None
-        classify_url(raw, access.fetch_allow)
+        classify_url(raw, browser_fetch_allow(access.fetch_allow))
         return None
     if tool not in {"read_file", "list_dir", "grep", "glob"}:
         return None
@@ -418,7 +545,11 @@ def _assess_read(
         return ReadDenied("no workspace root configured", "outside_workspace")
     requested = Path(raw_path)
     resolved = confine_path(raw_path, cwd=workspace_root or ".", access=access)
-    assert_readable(resolved, requested=requested if requested.name else resolved)
+    assert_readable(
+        resolved,
+        requested=requested if requested.name else resolved,
+        cache=cache,
+    )
     return None
 
 
@@ -442,7 +573,9 @@ def _name_is_secret(name: str) -> bool:
     lower = name.lower()
     if lower in _EXACT_NAMES or lower.startswith(".env."):
         return True
-    if lower.endswith((".pem", ".key", ".keyring")):
+    if lower.endswith(_SERVICE_ACCOUNT_SUFFIXES):
+        return True
+    if lower.endswith((".pem", ".key", ".keyring", ".p12", ".pfx")):
         return True
     if lower.startswith(_KEY_PREFIXES):
         return True
@@ -475,19 +608,29 @@ def _special_file(path: Path) -> bool:
 
 def _inode_candidates() -> list[Path]:
     home = Path.home()
+    config = home / ".config"
     paths = [
         home / ".ssh",
         home / ".aws",
-        home / ".config" / "gcloud",
+        config / "gcloud",
         home / ".kube",
         home / ".gnupg",
         home / ".local" / "share" / "keyrings",
         home / ".mozilla",
-        home / ".config" / "google-chrome",
-        home / ".config" / "chromium",
-        home / ".config" / "BraveSoftware",
-        home / ".config" / "microsoft-edge",
+        config / "google-chrome",
+        config / "google-chrome-beta",
+        config / "chromium",
+        config / "BraveSoftware",
+        config / "microsoft-edge",
+        config / "vivaldi",
+        config / "opera",
+        home / "snap" / "chromium" / "common" / "chromium",
+        home / "snap" / "firefox" / "common" / ".mozilla",
+        home / ".var" / "app" / "com.google.Chrome" / "config" / "google-chrome",
+        home / ".var" / "app" / "org.chromium.Chromium" / "config" / "chromium",
+        home / ".var" / "app" / "org.mozilla.firefox" / ".mozilla",
         home / ".netrc",
+        home / ".boto",
         home / ".git-credentials",
         home / ".docker" / "config.json",
         Path("/etc/shadow"),
@@ -501,34 +644,156 @@ def _inode_candidates() -> list[Path]:
     return paths
 
 
-def _collect_inodes(path: Path, found: set[tuple[int, int]], count: int) -> int:
+def _profile_file_is_secret(name: str) -> bool:
+    """True for denylist names and known browser credential files."""
+    if _name_is_secret(name):
+        return True
+    lower = name.lower()
+    if lower in _PROFILE_SECRET_NAMES or lower.startswith("sessionstore"):
+        return True
+    for suffix in _PROFILE_SIDECAR_SUFFIXES:
+        if lower.endswith(suffix) and lower[: -len(suffix)] in _PROFILE_SECRET_NAMES:
+            return True
+    return False
+
+
+_CREDENTIAL_ROOTS = frozenset({".ssh", ".aws", ".gnupg", ".kube", "keyrings"})
+_KUBE_SKIP_DIRS = frozenset({"cache", "http-cache"})
+
+
+def _inode_file_is_secret(name: str, directory: Path) -> bool:
+    """True when this filename is a secret candidate under a named root."""
+    if _profile_file_is_secret(name):
+        return True
+    lower = name.lower()
+    if lower in _GCLOUD_SECRET_NAMES:
+        return True
+    parts = tuple(part.lower() for part in directory.parts)
+    return "legacy_credentials" in parts
+
+
+def _scan_mode(path: Path) -> str:
+    """Credential dirs count every file. Browser and gcloud roots match names."""
+    if path.name.lower() in _CREDENTIAL_ROOTS:
+        return "all"
+    return "named"
+
+
+def _prune_scan_dirs(
+    dirnames: list[str],
+    directory: Path,
+    kube_root: Path | None,
+) -> None:
+    """Skip symlink children. Skip kube cache dirs only as direct children."""
+    direct_kube = kube_root is not None and _same_dir(directory, kube_root)
+    kept: list[str] = []
+    for name in dirnames:
+        child = directory / name
+        if child.is_symlink():
+            continue
+        if direct_kube and name.lower() in _KUBE_SKIP_DIRS:
+            continue
+        kept.append(name)
+    dirnames[:] = kept
+
+
+def _same_dir(left: Path, right: Path) -> bool:
+    return os.path.normcase(os.path.abspath(left)) == os.path.normcase(os.path.abspath(right))
+
+
+def _refuse_capped_inode_scan(limit: int, kind: str) -> None:
+    message = (
+        f"secret inode scan hit the {limit} {kind} cap; "
+        "denying the read because a secret file could have been missed"
+    )
+    _log.warning(message)
+    raise ReadDenied(message, "inode_scan_capped")
+
+
+def _inside_home(path: Path, home: Path) -> bool:
     try:
-        if path.is_symlink() and path.is_dir():
-            return count
-        if path.is_file():
-            return _add_inode(path, found, count)
-        if not path.is_dir():
-            return count
-    except OSError:
-        return count
+        path.resolve(strict=False).relative_to(home.resolve(strict=False))
+    except (OSError, RuntimeError, ValueError):
+        return False
+    return True
+
+
+def _is_system_scan_root(path: Path) -> bool:
+    """True for ``/`` and the other system trees a symlink must not walk."""
     try:
-        walker = os.walk(path, followlinks=False)
+        posix = path.resolve(strict=False).as_posix()
+    except (OSError, RuntimeError, ValueError):
+        return True
+    if posix == "/":
+        return True
+    return any(posix == root or posix.startswith(root + "/") for root in _SYSTEM_SCAN_ROOTS)
+
+
+def _resolve_scan_root(path: Path) -> tuple[Path, bool] | None:
+    """Return the path to scan, and whether the walk has an entry budget.
+
+    A top-level symlink is followed in the same mode as the link name.
+    ``/``, ``/usr``, ``/etc``, ``/proc``, ``/sys``, and ``/dev`` are skipped
+    so a profile link to ``/`` cannot trip the cap. Any other symlink that
+    resolves outside ``$HOME`` is walked with ``_MAX_SCAN_ENTRIES``.
+    """
+    try:
+        if not path.is_symlink():
+            return path, False
+        resolved = path.resolve(strict=False)
+        if _is_system_scan_root(resolved):
+            return None
+        return resolved, not _inside_home(resolved, Path.home())
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
+def _file_counts(name: str, directory: Path, mode: str) -> bool:
+    if mode == "all":
+        return True
+    return _inode_file_is_secret(name, directory)
+
+
+def _collect_inodes(
+    path: Path, found: set[tuple[int, int]]
+) -> tuple[int, str] | None:
+    """Scan one candidate. Return ``(limit, kind)`` when a candidate was skipped."""
+    mode = _scan_mode(path)
+    cap = _MAX_CREDENTIAL_FILES if mode == "all" else _MAX_INODE_FILES
+    resolved = _resolve_scan_root(path)
+    if resolved is None:
+        return None
+    root, budget_entries = resolved
+    kube_root = root if path.name.lower() == ".kube" else None
+    try:
+        if root.is_file():
+            _add_inode(root, found, 0)
+            return None
+        if not root.is_dir():
+            return None
     except OSError:
-        return count
+        return None
+    try:
+        walker = os.walk(root, followlinks=False)
+    except OSError:
+        return None
+    count = 0
+    entries = 0
+    budget = _MAX_SCAN_ENTRIES if budget_entries else None
     for dirpath, dirnames, filenames in walker:
-        if count >= _MAX_INODE_FILES:
-            break
-        kept: list[str] = []
-        for name in dirnames:
-            child = Path(dirpath) / name
-            if not child.is_symlink():
-                kept.append(name)
-        dirnames[:] = kept
+        directory = Path(dirpath)
+        _prune_scan_dirs(dirnames, directory, kube_root)
+        if budget is not None:
+            entries += len(dirnames) + len(filenames)
+            if entries > budget:
+                return budget, "directory-entry"
         for name in filenames:
-            if count >= _MAX_INODE_FILES:
-                break
-            count = _add_inode(Path(dirpath) / name, found, count)
-    return count
+            if not _file_counts(name, directory, mode):
+                continue
+            if count >= cap:
+                return cap, "secret-file"
+            count = _add_inode(directory / name, found, count)
+    return None
 
 
 def _add_inode(path: Path, found: set[tuple[int, int]], count: int) -> int:

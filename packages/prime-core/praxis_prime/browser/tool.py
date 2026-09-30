@@ -2,6 +2,9 @@
 
 A missing Playwright install degrades read actions to ``web_fetch``. Click,
 type, screenshot, and download report that the browser is unavailable.
+When Playwright is installed, each request, redirect, and subresource is
+checked with the same address and DNS rules as ``web_fetch``. Metadata
+addresses stay blocked.
 Page content is untrusted and is fenced by the agent loop.
 
 The profile is disposable unless ``browser.profile`` is ``persistent``.
@@ -25,7 +28,7 @@ from praxis_prime.browser.driver import (
 )
 from praxis_prime.browser.policy import BrowserPolicy, classify_browser
 from praxis_prime.paths import data_dir
-from praxis_prime.policy.boundary import parse_fetch_allow
+from praxis_prime.policy.boundary import browser_fetch_allow, parse_fetch_allow
 from praxis_prime.tools.builtin import execute_web_fetch
 from praxis_prime.tools.registry import Risk, Tool, ToolContext, ToolRegistry
 
@@ -94,10 +97,20 @@ class BrowserSession:
         profile, disposable = make_profile_dir(self.policy.persistent, self.data_root)
         self._profile = profile
         self._disposable = disposable
+        driver: BrowserDriver | None = None
         try:
-            self._driver = self._factory(profile)
+            driver = self._factory(profile)
+            arm = getattr(driver, "arm", None)
+            if callable(arm):
+                arm(self.policy.fetch_allow)
+            self._driver = driver
         except Exception as exc:
             self.launch_error = str(exc)[:200]
+            if driver is not None:
+                try:
+                    driver.close()
+                except Exception:
+                    pass
             self._driver = None
         return self._driver
 
@@ -167,7 +180,7 @@ class BrowserSession:
         body = execute_web_fetch(
             {"url": url},
             context,
-            fetch_allow=self.policy.fetch_allow,
+            fetch_allow=browser_fetch_allow(self.policy.fetch_allow),
         )
         self.page_url = url
         text = _html_to_text(body) if action in {"snapshot", "extract"} else body

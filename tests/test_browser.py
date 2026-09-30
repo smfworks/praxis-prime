@@ -7,6 +7,7 @@ need a browser.
 from __future__ import annotations
 
 import importlib.util
+import socket
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Thread
@@ -14,8 +15,10 @@ from threading import Thread
 import pytest
 
 from praxis_prime.browser.driver import make_profile_dir, playwright_available, remove_profile
+from praxis_prime.browser.guard import BrowserFetchGuard
 from praxis_prime.browser.policy import BrowserPolicy, classify_browser
 from praxis_prime.browser.tool import BrowserSession
+from praxis_prime.policy.boundary import ReadAccess, ReadDenied, assess_read
 from praxis_prime.tools.registry import Risk, ToolContext
 
 
@@ -101,6 +104,47 @@ def test_domain_lists_and_always_ask_actions():
     )
     assert plain.risk is Risk.DRAFT
     assert plain.force_approval is False
+
+
+def test_browser_precheck_strips_metadata_from_fetch_allow():
+    access = ReadAccess(fetch_allow=frozenset({"metadata", "loopback", "private", "link_local"}))
+    denial = assess_read(
+        "browser",
+        {"action": "navigate", "url": "http://169.254.169.254/latest"},
+        workspace_root=".",
+        access=access,
+    )
+    assert denial is not None
+    assert denial.code == "fetch_metadata"
+    named = assess_read(
+        "browser",
+        {"url": "http://metadata.google.internal/computeMetadata/v1/"},
+        workspace_root=".",
+        access=access,
+    )
+    assert named is not None
+    assert named.code == "fetch_metadata"
+    assert (
+        assess_read(
+            "browser",
+            {"url": "http://127.0.0.1/"},
+            workspace_root=".",
+            access=access,
+        )
+        is None
+    )
+
+
+def test_metadata_stays_blocked_when_fetch_allow_lists_it():
+    policy = BrowserPolicy(fetch_allow=frozenset({"metadata", "loopback", "private", "link_local"}))
+    with pytest.raises(ReadDenied) as caught:
+        classify_browser(
+            {"action": "navigate", "url": "http://169.254.169.254/latest"},
+            policy,
+        )
+    assert caught.value.code == "fetch_metadata"
+    allowed = classify_browser({"action": "navigate", "url": "http://127.0.0.1/"}, policy)
+    assert allowed.risk is Risk.READ
 
 
 def test_fake_driver_skips_denied_hosts_and_runs_allowed_ones(tmp_path: Path):
@@ -296,3 +340,155 @@ class _FakeDriver:
 
     def current_url(self) -> str:
         return self.url
+
+
+def test_session_arms_the_driver_with_fetch_allow(tmp_path: Path):
+    seen: dict[str, set[str]] = {}
+
+    class _Armed(_FakeDriver):
+        def arm(self, fetch_allow):
+            seen["allow"] = set(fetch_allow)
+
+    session = BrowserSession(
+        BrowserPolicy(fetch_allow=frozenset({"loopback"})),
+        cwd=tmp_path,
+        data_root=tmp_path,
+        driver_factory=lambda _path: _Armed(),
+        playwright_ok=lambda: True,
+    )
+    context = ToolContext(cwd=str(tmp_path), cancelled=lambda: False)
+    try:
+        session.execute({"action": "navigate", "url": "https://www.example.com/a"}, context)
+    finally:
+        session.close()
+    assert seen["allow"] == {"loopback"}
+
+
+def test_browser_guard_checks_redirects_subresources_and_metadata():
+    calls: list[str] = []
+
+    def resolve(host, port, *args, **kwargs):
+        del args, kwargs
+        addresses = {
+            "public.test": "1.1.1.1",
+            "rebind.test": "169.254.169.254",
+            "cdn.test": "10.0.0.8",
+        }
+        ip = addresses[host]
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, port or 80))]
+
+    def exchange(url, pinned, timeout, user_agent, max_bytes):
+        del timeout, user_agent, max_bytes
+        calls.append(pinned)
+        if url.startswith("http://public.test/page"):
+            assert pinned == "1.1.1.1"
+            return 302, {"location": "http://rebind.test/latest"}, b""
+        if url.startswith("http://public.test/ok"):
+            return 200, {"content-type": "text/html"}, b"<p>ok</p>"
+        if url.startswith("http://10.0.0.1/"):
+            return 200, {"content-type": "text/plain"}, b"priv"
+        raise AssertionError(f"unexpected fetch {url} via {pinned}")
+
+    guard = BrowserFetchGuard(frozenset(), resolve=resolve, exchange=exchange)
+
+    redirected = _Route("http://public.test/page")
+    guard.handle_route(redirected)
+    assert redirected.aborted == "blockedbyclient"
+    assert redirected.fulfilled is None
+    assert calls == ["1.1.1.1"]
+    assert guard.denied[-1][1] == "fetch_metadata"
+    denial = guard.take_denial()
+    assert isinstance(denial, ReadDenied)
+    assert denial.code == "fetch_metadata"
+    assert "rebind.test" not in str(denial)
+
+    subresource = _Route("http://cdn.test/app.js")
+    guard.handle_route(subresource)
+    assert subresource.aborted == "blockedbyclient"
+    assert guard.denied[-1][1] == "fetch_private"
+    assert calls == ["1.1.1.1"]
+
+    loopback = _Route("http://127.0.0.1/latest")
+    guard.handle_route(loopback)
+    assert loopback.aborted == "blockedbyclient"
+    assert guard.denied[-1][1] == "fetch_loopback"
+
+    link_local = _Route("http://169.254.1.1/")
+    guard.handle_route(link_local)
+    assert guard.denied[-1][1] == "fetch_link_local"
+
+    opened = _Route("http://public.test/ok")
+    guard.handle_route(opened)
+    assert opened.aborted is None
+    assert opened.fulfilled is not None
+    assert opened.fulfilled["body"] == b"<p>ok</p>"
+
+    internal = _Route("about:blank")
+    guard.handle_route(internal)
+    assert internal.continued is True
+    assert internal.aborted is None
+
+    local_file = _Route("file:///etc/passwd")
+    guard.handle_route(local_file)
+    assert local_file.aborted == "blockedbyclient"
+    assert guard.denied[-1][1] == "fetch_scheme"
+    assert "passwd" not in str(guard.take_denial())
+
+    loose = BrowserFetchGuard(
+        frozenset({"loopback", "private", "link_local"}),
+        resolve=resolve,
+        exchange=exchange,
+    )
+    metadata = _Route("http://169.254.169.254/latest/meta-data")
+    loose.handle_route(metadata)
+    assert metadata.aborted == "blockedbyclient"
+    assert loose.denied[-1][1] == "fetch_metadata"
+    named = _Route("http://metadata.google.internal/computeMetadata/v1/")
+    loose.handle_route(named)
+    assert named.aborted == "blockedbyclient"
+    assert loose.denied[-1][1] == "fetch_metadata"
+
+    allowed_private = _Route("http://10.0.0.1/a")
+    loose.handle_route(allowed_private)
+    assert allowed_private.aborted is None
+    assert allowed_private.fulfilled is not None
+    assert allowed_private.fulfilled["body"] == b"priv"
+
+    posted = _Route("http://10.0.0.1/submit", method="POST")
+    guard.handle_route(posted)
+    assert posted.aborted == "blockedbyclient"
+    assert posted.continued is False
+
+    listed = BrowserFetchGuard(
+        frozenset({"metadata", "loopback", "private", "link_local"}),
+        exchange=exchange,
+    )
+    still_blocked = _Route("http://169.254.169.254/latest")
+    listed.handle_route(still_blocked)
+    assert still_blocked.aborted == "blockedbyclient"
+    assert still_blocked.fulfilled is None
+    assert listed.denied[-1][1] == "fetch_metadata"
+    assert listed.fetch_allow == frozenset({"loopback", "private", "link_local"})
+
+
+class _Route:
+    def __init__(self, url: str, method: str = "GET") -> None:
+        self.request = _Request(url, method)
+        self.aborted: str | None = None
+        self.continued = False
+        self.fulfilled: dict[str, object] | None = None
+
+    def abort(self, error: str) -> None:
+        self.aborted = error
+
+    def continue_(self) -> None:
+        self.continued = True
+
+    def fulfill(self, **kwargs: object) -> None:
+        self.fulfilled = kwargs
+
+
+class _Request:
+    def __init__(self, url: str, method: str) -> None:
+        self.url = url
+        self.method = method
