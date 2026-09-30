@@ -7,7 +7,7 @@ needs a human. ``shlex`` parses each simple command; a parse error needs
 approval too.
 
 The allowlist is small on purpose: ``ls``, ``cat`` / ``head`` / ``tail`` of
-concrete paths inside the workspace, ``git status``, ``git diff`` of named
+concrete paths inside the workspace, ``git status``, ``git diff`` of existing
 non-secret files (or ``--stat`` / ``--name-only`` / ``--name-status``),
 ``git log`` without ``-p``, and ``pytest --collect-only`` (check mode,
 including ``python -m pytest``). Secret filenames use
@@ -424,7 +424,6 @@ def _git(tokens: list[str], workspace: Path | None) -> bool:
         return False
     allowed = {"status": _GIT_STATUS, "diff": _GIT_DIFF, "log": _GIT_LOG}[sub]
     summary = False
-    saw_directory = False
     pathspecs: list[str] = []
     while index < len(tokens):
         arg = tokens[index]
@@ -435,9 +434,7 @@ def _git(tokens: list[str], workspace: Path | None) -> bool:
                 if not _safe_git_operand(operand, workspace):
                     return False
                 if sub == "diff":
-                    if _is_directory_operand(operand, workspace):
-                        saw_directory = True
-                    elif not _is_explicit_safe_file(operand, workspace):
+                    if not _is_explicit_safe_file(operand, workspace):
                         return False
                     pathspecs.append(operand)
                 index += 1
@@ -493,20 +490,14 @@ def _git(tokens: list[str], workspace: Path | None) -> bool:
             return False
         if not _safe_git_operand(arg, workspace):
             return False
-        if sub == "diff":
-            if _is_directory_operand(arg, workspace):
-                saw_directory = True
-                pathspecs.append(arg)
-            elif _is_explicit_safe_file(arg, workspace):
-                pathspecs.append(arg)
+        if sub == "diff" and _is_explicit_safe_file(arg, workspace):
+            pathspecs.append(arg)
         index += 1
     if sub != "diff":
         return True
-    if pathspecs and saw_directory:
+    if not pathspecs:
         return summary
-    if pathspecs:
-        return all(_is_explicit_safe_file(item, workspace) for item in pathspecs)
-    return summary
+    return all(_is_explicit_safe_file(item, workspace) for item in pathspecs)
 
 
 def _pytest(args: list[str], workspace: Path | None) -> bool:
@@ -591,7 +582,11 @@ def _single_safe_magic(token: str) -> bool:
 
 
 def _is_explicit_safe_file(arg: str, workspace: Path | None) -> bool:
-    """True when ``arg`` is one non-secret file, not a revision or directory."""
+    """True only when ``arg`` is an existing regular file in the worktree.
+
+    A missing name is a revision (``v1.0``, ``origin/main``) or a path that
+    git can still expand from the index. Neither is an allowlisted file.
+    """
     if workspace is None or not _safe_git_operand(arg, workspace):
         return False
     body = _concrete_path(arg)
@@ -602,28 +597,7 @@ def _is_explicit_safe_file(arg: str, workspace: Path | None) -> bool:
         return False
     candidate = path if path.is_absolute() else workspace / path
     try:
-        if candidate.is_dir():
-            return False
-        if candidate.is_file():
-            return True
-    except OSError:
-        return False
-    name = path.name
-    return (not path.is_absolute()) and ("/" in body or "." in name)
-
-
-def _is_directory_operand(arg: str, workspace: Path | None) -> bool:
-    if workspace is None:
-        return False
-    body = _concrete_path(arg)
-    if body is None:
-        return False
-    if body in {".", "..", "./"} or body.endswith("/"):
-        return True
-    path = Path(body)
-    candidate = path if path.is_absolute() else workspace / path
-    try:
-        return candidate.is_dir()
+        return candidate.is_file()
     except OSError:
         return False
 

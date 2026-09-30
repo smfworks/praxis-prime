@@ -234,6 +234,32 @@ def test_globs_rev_paths_and_patch_dumps_require_approval(tmp_path: Path):
         assert classify_shell(command, workspace=tmp_path).allowlisted is True, command
 
 
+def test_revision_names_and_deleted_dirs_are_not_safe_files(tmp_path: Path):
+    (tmp_path / "note.txt").write_text("alpha\n", encoding="utf-8")
+    blocked = (
+        "git diff origin/main",
+        "git diff feature/x",
+        "git diff v1.0",
+        "git diff v1.0 v2.0",
+        "git diff v1.0..v2.0",
+        "git diff main..feature/x",
+        "git diff --word-diff v1.0",
+        "git diff --color v1.0 v2.0",
+        "git diff -U5 origin/main",
+        "git diff -- cfg.d",
+        "git diff HEAD -- cfg.d",
+        "git diff HEAD -- sub/old",
+    )
+    for command in blocked:
+        prepared = classify_command(command, sandbox_ready=True, workspace=tmp_path)
+        assert prepared.force_approval is True, command
+        assert classify_shell(command, workspace=tmp_path).allowlisted is False, command
+    stat = classify_command("git diff --stat origin/main", sandbox_ready=True, workspace=tmp_path)
+    assert stat.force_approval is False
+    named = classify_command("git diff note.txt", sandbox_ready=True, workspace=tmp_path)
+    assert named.force_approval is False
+
+
 def test_unapproved_delete_does_not_run_and_ro_bind_blocks_the_write(tmp_path: Path):
     target = tmp_path / "note.txt"
     target.write_text("safe\n", encoding="utf-8")
