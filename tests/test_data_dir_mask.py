@@ -245,6 +245,10 @@ def test_bind_inside_the_data_dir_is_refused(
             project,
             ro_binds=[(str(private / "profiles"), "/opt/profiles")],
         )
+    worktree = private / "worktrees" / "repo" / "task"
+    worktree.mkdir(parents=True)
+    argv = build_bwrap_argv("echo hi", worktree)
+    assert "/workspace" in argv
 
 
 def test_inode_alias_of_home_is_masked(

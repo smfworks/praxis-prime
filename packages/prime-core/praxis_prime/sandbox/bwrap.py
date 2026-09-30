@@ -178,10 +178,7 @@ def _data_dir_mask(mounts: list[tuple[Path, str]]) -> list[str]:
     masked: list[str] = []
     seen: set[str] = set()
     for src, dest in mounts:
-        if _bind_is_inside_data(src, data):
-            raise SandboxError(
-                "refusing to bind a directory inside the account data directory"
-            )
+        _refuse_bind_inside_data(src, data)
         relative = _data_relative_to_mount(src, data)
         if relative is None:
             continue
@@ -233,25 +230,49 @@ def _data_relative_to_mount(mount: Path, data: Path) -> Path | None:
     return relative
 
 
-def _bind_is_inside_data(mount: Path, data: Path) -> bool:
-    """True when ``mount`` is the data directory or a path inside it."""
-    data_id = _file_id(data)
-    current = mount
-    while True:
+def _refuse_bind_inside_data(mount: Path, data: Path) -> None:
+    """Refuse a bind of the data directory or a path inside it.
+
+    ``data/worktrees`` is where coding tasks run. That tree does not contain
+    ``profiles/``, ``backups/``, or ``accounts.db``, and bubblewrap does not
+    mount the parent, so the bind stays. Every other path inside the data
+    directory is refused: a tmpfs cannot hide a directory from a mount that
+    is already inside it.
+    """
+    relative = _path_inside(mount, data)
+    if relative is None:
+        return
+    if relative.parts and relative.parts[0] == "worktrees":
+        return
+    raise SandboxError("refusing to bind a directory inside the account data directory")
+
+
+def _path_inside(child: Path, parent: Path) -> Path | None:
+    """Relative path of ``child`` under ``parent``, or ``.`` when they are the same file.
+
+    None when ``child`` is not inside ``parent``. Device and inode are checked
+    first so a bind-mount alias matches, then the real path.
+    """
+    parent_id = _file_id(parent)
+    current = child
+    parts: list[str] = []
+    while parent_id is not None:
         ident = _file_id(current)
-        if data_id is not None and ident is not None and ident == data_id:
-            return True
-        parent = current.parent
-        if parent == current:
+        if ident is not None and ident == parent_id:
+            if not parts:
+                return Path(".")
+            return Path(*reversed(parts))
+        nxt = current.parent
+        if nxt == current:
             break
-        current = parent
+        parts.append(current.name)
+        current = nxt
     try:
-        mount_real = Path(os.path.realpath(mount, strict=False))
-        data_real = Path(os.path.realpath(data, strict=False))
-        mount_real.relative_to(data_real)
+        child_real = Path(os.path.realpath(child, strict=False))
+        parent_real = Path(os.path.realpath(parent, strict=False))
+        return child_real.relative_to(parent_real)
     except (OSError, ValueError):
-        return False
-    return True
+        return None
 
 
 def run_bwrap(
