@@ -23,7 +23,14 @@ from pathlib import Path
 
 from praxis_prime.audit.log import AuditLog
 from praxis_prime.packs.catalog import PublicPack, known_names, resolve_public
-from praxis_prime.packs.legacy import PackError, find_manifests, load_legacy_pack, skill_markdown
+from praxis_prime.packs.legacy import (
+    PackError,
+    assert_pack_file,
+    find_manifests,
+    find_pack_file,
+    load_legacy_pack,
+    skill_markdown,
+)
 from praxis_prime.packs.model import LegacyPack, PackWarning, Provenance
 
 GitRunner = Callable[[list[str]], None]
@@ -82,11 +89,16 @@ def install_pack(
                 loaded,
                 provenance=replace(loaded.provenance, license="unknown"),
             )
-        # Reject the name before rmtree, mkdir, or skill writes.
+        # Reject the name, and a symlink already sitting at that name, before
+        # rmtree or mkdir. rmtree follows a directory symlink and would delete
+        # the link target (another pack).
         destination = contained_child(root, loaded.name, pack_dir=True)
-        if destination.exists():
-            shutil.rmtree(destination)
-        destination.mkdir(parents=True)
+        lexical = root.resolve() / loaded.name
+        if lexical.is_symlink() or destination.is_symlink() or destination.name != loaded.name:
+            raise PackError(f"refusing symlink pack directory {loaded.name!r}")
+        if lexical.exists():
+            shutil.rmtree(lexical)
+        lexical.mkdir(parents=True)
         _copy_data(staged, destination, loaded)
         _write_skills(destination, loaded)
         _write_provenance(destination, loaded)
@@ -264,57 +276,78 @@ def _find_distribution(public: PublicPack) -> object | None:
 
 def _copy_data(source: Path, dest: Path, pack: LegacyPack) -> None:
     manifest = _manifest_file(source, pack)
-    shutil.copy2(manifest, contained_child(dest, "pack.json"))
+    _copy_pack_file(source, manifest, contained_child(dest, "pack.json"))
     pack_dir = manifest.parent
     for record in pack.knowledge:
         relative = Path(record.filename)
         if not record.filename or relative.is_absolute() or ".." in relative.parts:
             raise PackError(f"refusing knowledge path {record.filename!r}")
-        origin = (pack_dir / relative).resolve()
+        origin = pack_dir / relative
+        stage = Path(source).resolve()
         try:
-            origin.relative_to(pack_dir.resolve())
+            chain = origin.relative_to(stage)
         except ValueError as exc:
             raise PackError(f"refusing knowledge path {record.filename!r}") from exc
+        current = stage
+        for part in chain.parts:
+            current = current / part
+            if current.is_symlink():
+                raise PackError(f"refusing symlink {part}")
         if not origin.is_file():
             continue
         target = contained_child(dest, *relative.parts)
         target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(origin, target)
-    license_file = _find_named(source, pack_dir, ("LICENSE", "LICENSE.txt", "LICENSE.md"))
+        _copy_pack_file(source, origin, target)
+    license_file = find_pack_file(source, pack_dir, ("LICENSE", "LICENSE.txt", "LICENSE.md"))
     if license_file is not None:
-        shutil.copy2(license_file, contained_child(dest, license_file.name))
-    notice = _find_named(source, pack_dir, ("NOTICE", "NOTICE.md"))
+        _copy_pack_file(source, license_file, contained_child(dest, license_file.name))
+    notice = find_pack_file(source, pack_dir, ("NOTICE", "NOTICE.md"))
     if notice is not None:
-        shutil.copy2(notice, contained_child(dest, notice.name))
+        _copy_pack_file(source, notice, contained_child(dest, notice.name))
+
+
+def _copy_pack_file(root: Path, source: Path, dest: Path) -> None:
+    """Copy one regular file. Refuse symlinks and paths outside ``root``."""
+    assert_pack_file(root, source)
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        src_fd = os.open(source, flags)
+    except OSError as exc:
+        raise PackError(f"refusing to read {Path(source).name}") from exc
+    try:
+        with os.fdopen(src_fd, "rb") as src:
+            blob = src.read()
+    except OSError as exc:
+        raise PackError(f"refusing to read {Path(source).name}") from exc
+    out_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        out_flags |= os.O_NOFOLLOW
+    try:
+        out_fd = os.open(dest, out_flags, 0o644)
+    except FileExistsError as exc:
+        raise PackError(f"refusing to write {dest.name}") from exc
+    except OSError as exc:
+        raise PackError(f"refusing to write {dest.name}") from exc
+    with os.fdopen(out_fd, "wb") as out:
+        out.write(blob)
 
 
 def _manifest_file(source: Path, pack: LegacyPack) -> Path:
     candidate = source / pack.manifest_path
-    if candidate.is_file():
+    if candidate.is_symlink() or candidate.is_file():
+        assert_pack_file(source, candidate)
         return candidate
     matches = [path for path in find_manifests(source) if path.parent.name == pack.name]
     if matches:
+        assert_pack_file(source, matches[0])
         return matches[0]
     found = find_manifests(source)
     if len(found) == 1:
+        assert_pack_file(source, found[0])
         return found[0]
     raise PackError(f"installed manifest for {pack.name} was not found")
-
-
-def _find_named(root: Path, pack_dir: Path, names: tuple[str, ...]) -> Path | None:
-    current = pack_dir.resolve()
-    stop = root.resolve()
-    while True:
-        for name in names:
-            path = current / name
-            if path.is_file():
-                return path
-        if current == stop:
-            return None
-        parent = current.parent
-        if parent == current:
-            return None
-        current = parent
 
 
 def _write_skills(dest: Path, pack: LegacyPack) -> None:
@@ -410,8 +443,15 @@ def _extract_zip(path: Path, dest: Path) -> None:
     """Extract members one by one under ``dest``. Refuse escapes and symlinks."""
     root = dest.resolve()
     root.mkdir(parents=True, exist_ok=True)
-    with zipfile.ZipFile(path) as archive:
-        infos = archive.infolist()
+    try:
+        archive = zipfile.ZipFile(path)
+    except zipfile.BadZipFile as exc:
+        raise PackError("pack archive is not a valid zip") from exc
+    with archive:
+        try:
+            infos = archive.infolist()
+        except zipfile.BadZipFile as exc:
+            raise PackError("pack archive is not a valid zip") from exc
         if len(infos) > _MAX_ZIP_FILES:
             raise PackError("pack archive has too many files")
         planned: list[tuple[zipfile.ZipInfo, Path]] = []
@@ -428,7 +468,12 @@ def _extract_zip(path: Path, dest: Path) -> None:
                 target.mkdir(parents=True, exist_ok=True)
                 continue
             target.parent.mkdir(parents=True, exist_ok=True)
-            _write_zip_member(archive, info, target)
+            try:
+                _write_zip_member(archive, info, target)
+            except FileExistsError as exc:
+                raise PackError("pack archive has a duplicate member") from exc
+            except zipfile.BadZipFile as exc:
+                raise PackError("pack archive is not a valid zip") from exc
 
 
 def _reject_zip_member(info: zipfile.ZipInfo) -> None:
@@ -481,8 +526,14 @@ def contained_child(root: Path, *parts: str, pack_dir: bool = False) -> Path:
     for part in parts:
         _reject_segment(part)
     base = Path(root).resolve()
-    candidate = base.joinpath(*parts).resolve()
-    if candidate == base or base not in candidate.parents:
+    lexical = base.joinpath(*parts)
+    current = base
+    for part in parts:
+        current = current / part
+        if current.is_symlink():
+            raise PackError(f"refusing symlink {part!r}")
+    candidate = lexical.resolve()
+    if candidate == base or base not in candidate.parents or candidate.name != parts[-1]:
         raise PackError("refusing pack path outside the install directory")
     return candidate
 

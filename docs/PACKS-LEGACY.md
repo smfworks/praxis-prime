@@ -23,7 +23,7 @@ praxis-prime packs install https://github.com/smfworks/smf-praxis-legal.git
 praxis-prime packs info law_firm
 ```
 
-`install` accepts a catalog name, a directory, a `.zip`, or a git URL. Git clones use `git clone --depth 1` and do not run pack scripts. Files land in `$XDG_DATA_HOME/praxis-prime/vertical-packs/<name>/` (or `--data-dir`). Each install appends an audit event `pack.install` with the repo, version, commit, and license.
+`install` accepts a catalog name, a directory, a `.zip`, or a git URL. Git clones use `git clone --depth 1` and do not run pack scripts. A git install has no size limit. Zip archives are capped at 200 members and 15 MiB uncompressed. Files land in `$XDG_DATA_HOME/praxis-prime/vertical-packs/<name>/` (or `--data-dir`). Each install appends an audit event `pack.install` with the repo, version, commit, and license.
 
 ## What is loaded
 
@@ -43,7 +43,8 @@ praxis-prime packs info law_firm
 - A pack cannot select an LLM or send data to a provider. Hard-coded `model` and `provider` fields are ignored and a warning is logged.
 - JavaScript, WASM, and `web/` dashboard CSS or HTML are not copied, loaded, or served. A warning is logged for each file.
 - Pack Python is not imported. Declared `praxis.verticals` entry points are recorded and skipped. The allowlist `ALLOWLISTED_ENTRY_POINTS` in `praxis_prime.packs.legacy` is empty, so nothing on that list runs today. If that allowlist is ever non-empty, the import must run inside the sandbox, not in the daemon process.
-- The install directory name must be a single segment matching `^[a-z0-9][a-z0-9._-]{0,63}$` (no leading dot). Absolute names, `..`, and `/` or `\\` are refused before anything is created or deleted. Zip members are extracted one by one under that same containment check. Symlink members are refused.
+- The install directory name must be a single segment matching `^[a-z0-9][a-z0-9._-]{0,63}$` (no leading dot). Absolute names, `..`, and `/` or `\\` are refused before anything is created or deleted. If `vertical-packs/<name>` is already a symlink, install refuses it and does not delete the link target. Zip members are extracted one by one under that same containment check. Symlink members are refused.
+- `pack.json`, `LICENSE`, `NOTICE`, knowledge files, and other files read or copied from the staged pack must be regular files. A symlink is refused, and the resolved path must stay inside the staged tree. The link target is not read or copied.
 - Git URLs that use a remote helper (`ext::` and similar) are refused.
 
 ## Compliance TOML packs

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import stat
 import subprocess
 import sys
@@ -14,7 +15,12 @@ import pytest
 
 from praxis_prime.audit.log import AuditLog
 from praxis_prime.cli import main
-from praxis_prime.packs.install import _extract_zip, install_pack, load_installed
+from praxis_prime.packs.install import (
+    _MAX_ZIP_FILES,
+    _extract_zip,
+    install_pack,
+    load_installed,
+)
 from praxis_prime.packs.legacy import PackError, load_legacy_pack
 from praxis_prime.skills.format import parse_skill
 from praxis_prime.state import StateDB
@@ -295,7 +301,7 @@ def test_cli_packs_list_install_and_info(tmp_path: Path, capsys: pytest.CaptureF
 
 
 _EVIL_NAMES = (
-    "/tmp/praxis-prime-pack-escape-59f9",
+    "absolute",
     "../decoy",
     "../...",
     "a/b",
@@ -304,6 +310,16 @@ _EVIL_NAMES = (
     ".",
     "..",
 )
+
+
+def _escape_path(tmp_path: Path) -> Path:
+    return tmp_path / "escape-target"
+
+
+def _pack_name(tmp_path: Path, name: str) -> str:
+    if name == "absolute":
+        return str(_escape_path(tmp_path))
+    return name
 
 
 def _outside_markers(tmp_path: Path, data: Path) -> tuple[Path, Path]:
@@ -316,11 +332,11 @@ def _outside_markers(tmp_path: Path, data: Path) -> tuple[Path, Path]:
     return outside, marker
 
 
-def _assert_contained(data: Path, outside: Path, marker: Path) -> None:
+def _assert_contained(data: Path, outside: Path, marker: Path, escape: Path) -> None:
     assert outside.read_text(encoding="utf-8") == "keep"
     assert marker.is_file()
     assert marker.read_text(encoding="utf-8") == "keep"
-    assert not Path("/tmp/praxis-prime-pack-escape-59f9").exists()
+    assert not escape.exists()
     packs = data / "vertical-packs"
     if not packs.exists():
         return
@@ -332,17 +348,18 @@ def _assert_contained(data: Path, outside: Path, marker: Path) -> None:
 @pytest.mark.parametrize("name", _EVIL_NAMES)
 def test_local_install_refuses_a_path_escape(tmp_path: Path, name: str):
     source = tmp_path / "source"
-    _write_pack(source, name=name, javascript=False, python=False)
+    _write_pack(source, name=_pack_name(tmp_path, name), javascript=False, python=False)
     data = tmp_path / "data"
     outside, marker = _outside_markers(tmp_path, data)
     with pytest.raises(PackError, match="refusing"):
         install_pack(str(source), data)
-    _assert_contained(data, outside, marker)
+    _assert_contained(data, outside, marker, _escape_path(tmp_path))
 
 
 def test_zip_and_git_install_refuse_a_path_escape(tmp_path: Path):
     data = tmp_path / "data"
     outside, marker = _outside_markers(tmp_path, data)
+    escape = _escape_path(tmp_path)
     staged = tmp_path / "staged"
     _write_pack(staged, name="../decoy", javascript=False, python=False)
     archive_path = tmp_path / "evil.zip"
@@ -352,13 +369,13 @@ def test_zip_and_git_install_refuse_a_path_escape(tmp_path: Path):
                 archive.write(path, path.relative_to(staged).as_posix())
     with pytest.raises(PackError, match="refusing"):
         install_pack(str(archive_path), data)
-    _assert_contained(data, outside, marker)
+    _assert_contained(data, outside, marker, escape)
 
     def runner(argv: list[str]) -> None:
         target = Path(argv[-1])
         _write_pack(
             target,
-            name="/tmp/praxis-prime-pack-escape-59f9",
+            name=str(escape),
             javascript=False,
             python=False,
         )
@@ -369,7 +386,7 @@ def test_zip_and_git_install_refuse_a_path_escape(tmp_path: Path):
             data,
             git_runner=runner,
         )
-    _assert_contained(data, outside, marker)
+    _assert_contained(data, outside, marker, escape)
 
 
 def test_zip_members_cannot_escape_or_symlink(tmp_path: Path):
@@ -413,3 +430,116 @@ def test_safe_zip_install_stays_under_vertical_packs(tmp_path: Path):
     assert installed.path.resolve().is_relative_to(root)
     assert installed.path.name == "demo_pack"
     assert (installed.path / "pack.json").is_file()
+
+
+_SECRET = "AKIASECRET-MARKER-not-for-pack"
+
+
+def _guard_secret(monkeypatch: pytest.MonkeyPatch, secret: Path) -> None:
+    """Fail the test if install opens the symlink target."""
+    real_open = os.open
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+
+    def guarded(file: int | str | Path, flags: int, *args: object, **kwargs: object) -> int:
+        opened = Path(file)
+        try:
+            points_at_secret = opened.resolve() == secret.resolve()
+        except OSError:
+            points_at_secret = False
+        follows = not opened.is_symlink() or not bool(flags & nofollow)
+        if points_at_secret and follows:
+            raise AssertionError(f"secret file was read: {file}")
+        return real_open(file, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", guarded)
+
+
+def _assert_secret_stays(data: Path, secret: Path, exc: BaseException) -> None:
+    assert _SECRET not in str(exc)
+    assert secret.read_text(encoding="utf-8") == _SECRET
+    root = data / "vertical-packs"
+    if not root.exists():
+        return
+    for path in root.rglob("*"):
+        if path.is_symlink() or not path.is_file():
+            continue
+        text = path.read_text(encoding="utf-8", errors="replace")
+        assert _SECRET not in text
+
+
+@pytest.mark.parametrize("kind", ["LICENSE", "NOTICE", "pack.json"])
+def test_symlinked_pack_file_is_not_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+):
+    secret = tmp_path / "secret"
+    secret.write_text(_SECRET, encoding="utf-8")
+    source = tmp_path / "source"
+    _write_pack(source, javascript=False, python=False)
+    link = source / kind
+    if link.is_symlink() or link.exists():
+        link.unlink()
+    link.symlink_to(secret)
+    data = tmp_path / "data"
+    _guard_secret(monkeypatch, secret)
+    with pytest.raises(PackError, match="symlink") as caught:
+        install_pack(str(source), data)
+    monkeypatch.undo()
+    _assert_secret_stays(data, secret, caught.value)
+
+
+def test_symlink_install_directory_does_not_delete_its_target(tmp_path: Path):
+    source = tmp_path / "source"
+    _write_pack(source, name="demo_pack", javascript=False, python=False)
+    data = tmp_path / "data"
+    packs = data / "vertical-packs"
+    other = packs / "other"
+    other.mkdir(parents=True)
+    keep = other / "keep.txt"
+    keep.write_text("keep", encoding="utf-8")
+    (packs / "demo_pack").symlink_to(other, target_is_directory=True)
+    with pytest.raises(PackError, match="symlink"):
+        install_pack(str(source), data)
+    assert keep.is_file()
+    assert keep.read_text(encoding="utf-8") == "keep"
+    assert not (other / "pack.json").exists()
+    assert (packs / "demo_pack").is_symlink()
+
+
+@pytest.mark.parametrize("member", ["a\\b", "C:secret", "..\\outside.txt"])
+def test_windows_style_zip_members_are_refused(tmp_path: Path, member: str):
+    archive_path = tmp_path / "win.zip"
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        archive.writestr(member, "pwned")
+    with pytest.raises(PackError, match="archive"):
+        _extract_zip(archive_path, tmp_path / "out")
+
+
+def test_zip_member_count_and_size_limits(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    many = tmp_path / "many.zip"
+    with zipfile.ZipFile(many, "w") as archive:
+        for index in range(_MAX_ZIP_FILES + 1):
+            archive.writestr(f"f{index}.txt", "x")
+    with pytest.raises(PackError, match="too many"):
+        _extract_zip(many, tmp_path / "many-out")
+
+    monkeypatch.setattr("praxis_prime.packs.install._MAX_ZIP_BYTES", 8)
+    big = tmp_path / "big.zip"
+    with zipfile.ZipFile(big, "w") as archive:
+        archive.writestr("pack.json", "0123456789")
+    with pytest.raises(PackError, match="too large"):
+        _extract_zip(big, tmp_path / "big-out")
+
+
+def test_bad_zip_and_duplicate_members_are_pack_errors(tmp_path: Path):
+    bad = tmp_path / "bad.zip"
+    bad.write_bytes(b"not a zip")
+    with pytest.raises(PackError, match="valid zip"):
+        _extract_zip(bad, tmp_path / "bad-out")
+    duplicate = tmp_path / "dup.zip"
+    with zipfile.ZipFile(duplicate, "w") as archive:
+        archive.writestr("pack.json", "{}")
+        archive.writestr("pack.json", "{}")
+    with pytest.raises(PackError, match="duplicate"):
+        _extract_zip(duplicate, tmp_path / "dup-out")

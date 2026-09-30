@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import re
+import stat
 import subprocess
 import sys
 import tomllib
@@ -82,6 +83,99 @@ class PackError(ValueError):
     """The pack could not be read."""
 
 
+def _is_symlink(path: Path) -> bool:
+    try:
+        return stat.S_ISLNK(path.lstat().st_mode)
+    except OSError:
+        return False
+
+
+def assert_pack_file(root: Path, path: Path) -> None:
+    """Refuse a symlink or a file that resolves outside ``root``.
+
+    ``lstat`` checks every component. Callers then open the file with
+    ``O_NOFOLLOW`` so the target of a swapped-in symlink is not read.
+    """
+    base = Path(root).resolve()
+    candidate = Path(path)
+    try:
+        relative = candidate.relative_to(base)
+    except ValueError as exc:
+        raise PackError(f"refusing path outside the pack: {candidate.name}") from exc
+    if not relative.parts or any(part in {".", ".."} for part in relative.parts):
+        raise PackError(f"refusing path outside the pack: {candidate.name}")
+    current = base
+    for part in relative.parts:
+        if "/" in part or "\\" in part or "\x00" in part:
+            raise PackError(f"refusing path segment {part!r}")
+        current = current / part
+        if _is_symlink(current):
+            raise PackError(f"refusing symlink {part}")
+    try:
+        info = candidate.lstat()
+    except OSError as exc:
+        raise PackError(f"refusing missing pack file {candidate.name}") from exc
+    if not stat.S_ISREG(info.st_mode):
+        raise PackError(f"refusing non-file {candidate.name}")
+    resolved = candidate.resolve()
+    if resolved == base or base not in resolved.parents:
+        raise PackError(f"refusing path outside the pack: {candidate.name}")
+
+
+def read_pack_file(
+    root: Path,
+    path: Path,
+    *,
+    errors: str = "strict",
+    limit: int | None = None,
+) -> str:
+    """Read a regular file under ``root`` without following symlinks."""
+    assert_pack_file(root, path)
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise PackError(f"refusing to read {Path(path).name}") from exc
+    try:
+        with os.fdopen(descriptor, "rb") as handle:
+            blob = handle.read() if limit is None else handle.read(limit)
+    except OSError as exc:
+        raise PackError(f"refusing to read {Path(path).name}") from exc
+    try:
+        return blob.decode("utf-8", errors=errors)
+    except UnicodeError as exc:
+        raise PackError(f"could not read {Path(path).name}") from exc
+
+
+def find_pack_file(root: Path, start: Path, names: tuple[str, ...]) -> Path | None:
+    """Return the nearest regular file named in ``names``, walking up to ``root``."""
+    base = Path(root).resolve()
+    current = Path(start)
+    if _is_symlink(current):
+        raise PackError(f"refusing symlink {current.name}")
+    while True:
+        try:
+            current.relative_to(base)
+        except ValueError:
+            return None
+        for name in names:
+            path = current / name
+            if _is_symlink(path):
+                raise PackError(f"refusing symlink {name}")
+            if not path.is_file():
+                continue
+            assert_pack_file(base, path)
+            return path
+        if current == base:
+            return None
+        parent = current.parent
+        if parent == current:
+            return None
+        current = parent
+
+
 def load_legacy_pack(
     root: Path,
     *,
@@ -95,7 +189,7 @@ def load_legacy_pack(
     if not base.is_dir():
         raise PackError(f"pack path is not a directory: {root}")
     manifest_path = _choose_manifest(base, wanted_name)
-    raw = _read_manifest(manifest_path)
+    raw = _read_manifest(manifest_path, base)
     warnings: list[PackWarning] = []
     pack_dir = manifest_path.parent
     # An explicit empty name stays empty so install can reject it. A missing
@@ -118,7 +212,7 @@ def load_legacy_pack(
         warnings,
     )
     theme = _theme(raw.get("theme"), name, warnings)
-    knowledge = _knowledge(pack_dir, raw.get("knowledge"), warnings)
+    knowledge = _knowledge(base, pack_dir, raw.get("knowledge"), warnings)
     suggested = tuple((dial, SUGGESTED_POSITION) for dial in SUGGESTED_DIALS.get(name, ()))
     if _text(raw.get("complianceMode")):
         warnings.append(
@@ -138,7 +232,7 @@ def load_legacy_pack(
         source=source or str(base),
     )
     try:
-        relative_manifest = manifest_path.resolve().relative_to(base).as_posix()
+        relative_manifest = manifest_path.relative_to(base).as_posix()
     except ValueError:
         relative_manifest = manifest_path.name
     return LegacyPack(
@@ -209,7 +303,7 @@ def _choose_manifest(root: Path, wanted_name: str) -> Path:
         matches: list[Path] = []
         for path in files:
             try:
-                data = _read_manifest(path)
+                data = _read_manifest(path, root)
             except PackError:
                 continue
             if _text(data.get("name")) == wanted_name or path.parent.name == wanted_name:
@@ -226,13 +320,15 @@ def _choose_manifest(root: Path, wanted_name: str) -> Path:
     raise PackError(f"multiple pack.json files: {listed}")
 
 
-def _read_manifest(path: Path) -> dict[str, object]:
+def _read_manifest(path: Path, root: Path) -> dict[str, object]:
     try:
-        loaded = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise PackError(f"could not read {path}: {exc}") from exc
+        loaded = json.loads(read_pack_file(root, path))
+    except PackError:
+        raise
+    except json.JSONDecodeError as exc:
+        raise PackError(f"could not read {path.name}: {exc}") from exc
     if not isinstance(loaded, dict):
-        raise PackError(f"{path} is not a JSON object")
+        raise PackError(f"{path.name} is not a JSON object")
     return loaded
 
 
@@ -286,6 +382,8 @@ def _scan_tree(root: Path) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str,
         current = Path(dirpath)
         for name in filenames:
             path = current / name
+            if _is_symlink(path):
+                continue
             try:
                 relative = path.resolve().relative_to(root.resolve()).as_posix()
             except ValueError:
@@ -331,8 +429,10 @@ def _declared_entry_points(root: Path) -> tuple[str, ...]:
     if path is None:
         return ()
     try:
-        loaded = tomllib.loads(path.read_text(encoding="utf-8"))
-    except (OSError, tomllib.TOMLDecodeError):
+        loaded = tomllib.loads(read_pack_file(root, path))
+    except PackError:
+        raise
+    except tomllib.TOMLDecodeError:
         return ()
     project = loaded.get("project")
     if not isinstance(project, dict):
@@ -353,6 +453,8 @@ def _declared_entry_points(root: Path) -> tuple[str, ...]:
 
 def _find_pyproject(root: Path) -> Path | None:
     direct = root / "pyproject.toml"
+    if _is_symlink(direct):
+        raise PackError("refusing symlink pyproject.toml")
     if direct.is_file():
         return direct
     matches = [
@@ -360,6 +462,9 @@ def _find_pyproject(root: Path) -> Path | None:
         for path in root.glob("*/pyproject.toml")
         if ".git" not in path.parts
     ]
+    for path in matches:
+        if _is_symlink(path):
+            raise PackError("refusing symlink pyproject.toml")
     if len(matches) == 1:
         return matches[0]
     return None
@@ -590,6 +695,7 @@ def _theme(raw: object, pack_name: str, warnings: list[PackWarning]) -> ThemeHin
 
 
 def _knowledge(
+    stage: Path,
     pack_dir: Path,
     raw: object,
     warnings: list[PackWarning],
@@ -601,14 +707,34 @@ def _knowledge(
         names.extend(item.strip() for item in raw if isinstance(item, str) and item.strip())
     records: list[PackKnowledge] = []
     for name in names:
-        path = _safe_child(pack_dir, name)
-        if path is None or not path.is_file():
+        relative = Path(name)
+        if not name or relative.is_absolute() or ".." in relative.parts:
             warnings.append(PackWarning("knowledge_missing", f"Missing knowledge file {name}"))
             continue
-        records.append(
-            PackKnowledge(name, path.read_text(encoding="utf-8"), True)
-        )
+        lexical = pack_dir / relative
+        if _chain_has_symlink(stage, lexical):
+            raise PackError(f"refusing symlink {name}")
+        path = _safe_child(pack_dir, name)
+        if path is None or not lexical.is_file():
+            warnings.append(PackWarning("knowledge_missing", f"Missing knowledge file {name}"))
+            continue
+        records.append(PackKnowledge(name, read_pack_file(stage, lexical), True))
     return tuple(records)
+
+
+def _chain_has_symlink(root: Path, path: Path) -> bool:
+    base = Path(root).resolve()
+    candidate = Path(path)
+    try:
+        relative = candidate.relative_to(base)
+    except ValueError:
+        return False
+    current = base
+    for part in relative.parts:
+        current = current / part
+        if _is_symlink(current):
+            return True
+    return False
 
 
 def _safe_child(root: Path, relative: str) -> Path | None:
@@ -626,27 +752,10 @@ def _safe_child(root: Path, relative: str) -> Path | None:
 
 
 def _license(root: Path, pack_dir: Path) -> str:
-    current = pack_dir.resolve()
-    stop = root.resolve()
-    while True:
-        for name in ("LICENSE", "LICENSE.txt", "LICENSE.md"):
-            path = current / name
-            if path.is_file():
-                return _classify_license(path)
-        if current == stop:
-            break
-        parent = current.parent
-        if parent == current or stop not in current.parents and current != stop:
-            break
-        current = parent
-    return "unknown"
-
-
-def _classify_license(path: Path) -> str:
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")[:4000]
-    except OSError:
+    found = find_pack_file(root, pack_dir, ("LICENSE", "LICENSE.txt", "LICENSE.md"))
+    if found is None:
         return "unknown"
+    text = read_pack_file(root, found, errors="replace", limit=4000)
     if "MIT License" in text or "Permission is hereby granted, free of charge" in text:
         return "MIT"
     return "unknown"
