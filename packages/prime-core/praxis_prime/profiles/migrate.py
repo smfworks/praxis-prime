@@ -49,6 +49,131 @@ def daemon_is_running() -> bool:
     return discover() is not None
 
 
+def migration_lock_path(data_root: Path) -> Path:
+    """Held for the whole move. The daemon refuses to start while it exists."""
+    return Path(data_root) / ".migration.lock"
+
+
+def migration_in_progress(data_root: Path) -> bool:
+    """True when a lock file is present, including a stale one.
+
+    A dead pid still means the move may be half done. ``profile migrate``
+    is what clears that lock, after it finishes the move.
+    """
+    return lstat_kind(migration_lock_path(data_root)) is not StatKind.MISSING
+
+
+def acquire_migration_lock(data_root: Path) -> Path:
+    """Create the lock, replacing one whose process is gone."""
+    root = Path(data_root)
+    root.mkdir(parents=True, exist_ok=True)
+    path = migration_lock_path(root)
+    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0)
+    for _attempt in range(2):
+        try:
+            fd = os.open(path, flags, 0o600)
+        except FileExistsError:
+            if not _lock_is_stale(path):
+                raise MigrationBusy("a profile migration is already in progress") from None
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                continue
+            continue
+        try:
+            os.write(fd, f"{os.getpid()}\n".encode())
+        finally:
+            os.close(fd)
+        return path
+    raise MigrationBusy("a profile migration is already in progress")
+
+
+def release_migration_lock(path: Path) -> None:
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        return
+    except OSError:
+        return
+
+
+def migrate_under_lock(
+    data_root: Path,
+    config_dir: Path | None = None,
+    *,
+    owner_account: str = "",
+    daemon_running: Callable[[], bool] | None = None,
+) -> MigrationResult:
+    """Migrate while holding the lock the daemon checks at startup.
+
+    The running check happens again after the lock exists. A daemon that
+    appears between the two checks makes this raise ``MigrationBusy``
+    before any account row has to exist. The lock stays if the move fails
+    after it has started and the marker was not written.
+    """
+    running = daemon_is_running if daemon_running is None else daemon_running
+    if running():
+        raise MigrationBusy(
+            "stop praxis-primed before creating the first account; "
+            "it still has prime.db open"
+        )
+    root = Path(data_root)
+    lock = acquire_migration_lock(root)
+    keep = False
+    try:
+        if running():
+            raise MigrationBusy(
+                "stop praxis-primed before creating the first account; "
+                "it still has prime.db open"
+            )
+        return migrate_single_user(
+            root,
+            config_dir,
+            owner_account=owner_account,
+            daemon_running=lambda: False,
+        )
+    except MigrationBusy:
+        raise
+    except Exception:
+        if _kind(migration_marker(root)) is not StatKind.FILE:
+            keep = True
+        raise
+    finally:
+        if not keep:
+            release_migration_lock(lock)
+
+
+def _lock_is_stale(path: Path) -> bool:
+    if lstat_kind(path) is not StatKind.FILE:
+        return False
+    pid = _read_lock_pid(path)
+    if pid is None:
+        return False
+    return not _pid_alive(pid)
+
+
+def _read_lock_pid(path: Path) -> int | None:
+    try:
+        text = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    if not text.isdigit():
+        return None
+    return int(text)
+
+
+def _pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+    return True
+
+
 def migrate_single_user(
     data_root: Path,
     config_dir: Path | None = None,

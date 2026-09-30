@@ -18,7 +18,7 @@ from praxis_prime.accounts.db import Account, AccountError, AccountStore
 from praxis_prime.accounts.roles import SERVER_ROLES
 from praxis_prime.audit.log import AuditLog
 from praxis_prime.paths import config_dir, data_dir
-from praxis_prime.profiles.migrate import MigrationBusy, daemon_is_running, migrate_single_user
+from praxis_prime.profiles.migrate import MigrationBusy, migrate_single_user, migrate_under_lock
 from praxis_prime.state import StateDB
 from praxis_prime.statfile import StatKind, lstat_kind
 
@@ -90,30 +90,7 @@ def _create(args: argparse.Namespace) -> int:
     store = _store(args)
     try:
         if not store.has_accounts():
-            if daemon_is_running():
-                print(
-                    "praxis-prime account: stop praxis-primed before the first account",
-                    file=sys.stderr,
-                )
-                return 2
-            account = store.create_account(
-                username_text=args.username,
-                password=password,
-                display_name=args.display_name or args.username,
-                role="owner",
-                email=args.email,
-            )
-            result = migrate_single_user(
-                _data(args),
-                _config(args),
-                owner_account=account.id,
-            )
-            store.set_membership(account.id, result.profile_id, "owner")
-            print(f"created owner {account.username} ({account.id})")
-            print(f"profile {result.profile_id}")
-            if result.backup:
-                print(f"backup {result.backup}")
-            return 0
+            return _create_owner(args, store, password)
         account = store.create_account(
             username_text=args.username,
             password=password,
@@ -121,13 +98,47 @@ def _create(args: argparse.Namespace) -> int:
             role=args.role,
             email=args.email,
         )
-    except MigrationBusy as exc:
-        print(f"praxis-prime account: {exc}", file=sys.stderr)
-        return 2
     except AccountError as exc:
         print(f"praxis-prime account: {exc}", file=sys.stderr)
         return 2
     print(f"created {account.role} {account.username} ({account.id})")
+    return 0
+
+
+def _create_owner(args: argparse.Namespace, store: AccountStore, password: str) -> int:
+    """Migrate first. A failure before the marker does not leave an owner behind."""
+    account: Account | None = None
+    try:
+        result = migrate_under_lock(_data(args), _config(args), owner_account="")
+        account = store.create_account(
+            username_text=args.username,
+            password=password,
+            display_name=args.display_name or args.username,
+            role="owner",
+            email=args.email,
+        )
+        result = migrate_single_user(
+            _data(args),
+            _config(args),
+            owner_account=account.id,
+            daemon_running=lambda: False,
+        )
+        store.set_membership(account.id, result.profile_id, "owner")
+    except MigrationBusy as exc:
+        print(f"praxis-prime account: {exc}", file=sys.stderr)
+        return 2
+    except (AccountError, OSError) as exc:
+        if account is not None:
+            try:
+                store.discard_account(account.id)
+            except AccountError:
+                pass
+        print(f"praxis-prime account: {exc}", file=sys.stderr)
+        return 2
+    print(f"created owner {account.username} ({account.id})")
+    print(f"profile {result.profile_id}")
+    if result.backup:
+        print(f"backup {result.backup}")
     return 0
 
 

@@ -14,6 +14,7 @@ import re
 import socket
 import threading
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import parse_qs
 
@@ -98,7 +99,7 @@ class GatewayServer:
         self._threads: list[threading.Thread] = []
         self._conns: set[socket.socket] = set()
         self._conn_lock = threading.Lock()
-        self._subs: list[queue.Queue[dict[str, object] | None]] = []
+        self._subs: list[_Subscriber] = []
         self._sub_lock = threading.Lock()
         self._idem: dict[tuple[str, str], dict[str, object]] = {}
         self._inflight: set[tuple[str, str]] = set()
@@ -153,10 +154,35 @@ class GatewayServer:
                 pass
 
     def publish(self, frame: dict[str, object]) -> None:
+        """Fan out one event. Each socket is filtered by the principal it connected as.
+
+        Unauthenticated sockets are not in this list. A disabled or revoked
+        account is removed so a later event cannot reach it.
+        """
         with self._sub_lock:
             subscribers = list(self._subs)
+        drop: list[_Subscriber] = []
         for subscriber in subscribers:
-            subscriber.put(frame)
+            refreshed = self._recheck(subscriber.principal)
+            if isinstance(refreshed, Denial):
+                drop.append(subscriber)
+                continue
+            subscriber.principal = refreshed
+            filtered = self._filter_broadcast(frame, refreshed)
+            if filtered is not None:
+                subscriber.outgoing.put(filtered)
+        if not drop:
+            return
+        with self._sub_lock:
+            for subscriber in drop:
+                if subscriber in self._subs:
+                    self._subs.remove(subscriber)
+        for subscriber in drop:
+            subscriber.outgoing.put(None)
+            try:
+                subscriber.conn.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
 
     def _start_unix(self) -> None:
         if not self.socket_path:
@@ -227,7 +253,7 @@ class GatewayServer:
             length = _content_length(headers)
             body = buffer.read_exact(length) if length else b""
             extras: list[tuple[str, str]] = []
-            status, payload = self._http(method, path, headers, body, extras)
+            status, payload = self._http(method, path, headers, body, extras, _peer_host(conn))
             _write_http(conn, status, payload, extras)
         except (ConnectionError, OSError, ValueError, WebSocketError):
             if self.logger is not None:
@@ -247,6 +273,7 @@ class GatewayServer:
         headers: dict[str, str],
         body: bytes,
         extras: list[tuple[str, str]],
+        peer: str = "",
     ) -> tuple[int, dict[str, object]]:
         route = path.split("?", 1)[0]
         if method == "GET" and route == "/health":
@@ -254,7 +281,7 @@ class GatewayServer:
         if method == "POST" and route == "/v1/auth/login":
             if self.accounts is None:
                 return 503, _error("unavailable", "accounts are not configured")
-            status, payload, cookies = login(self.accounts, body, self.audit)
+            status, payload, cookies = login(self.accounts, body, self.audit, peer=peer)
             extras.extend(cookies)
             if status != 200 and self.logger is not None:
                 self.logger.warning("auth_fail")
@@ -422,17 +449,19 @@ class GatewayServer:
         conn.sendall(server_upgrade_response(key))
         ws = WebSocketConnection(conn, buffer, client=False)
         outgoing: queue.Queue[dict[str, object] | None] = queue.Queue()
-        with self._sub_lock:
-            self._subs.append(outgoing)
         writer = threading.Thread(target=_write_frames, args=(ws, outgoing), daemon=True)
         writer.start()
         role: str | None = None
+        subscriber: _Subscriber | None = None
         try:
             first = _read_json(ws)
             connected = self._connect(first, header_token, outgoing, path, headers)
             if connected is None:
                 return
             role, principal = connected
+            subscriber = _Subscriber(outgoing, principal, conn)
+            with self._sub_lock:
+                self._subs.append(subscriber)
             while not self._stopped.is_set():
                 frame = _read_json(ws)
                 if frame is None:
@@ -443,6 +472,7 @@ class GatewayServer:
                     outgoing.put(_frame_error(frame_id, refreshed.code, refreshed.message))
                     return
                 principal = refreshed
+                subscriber.principal = principal
                 claimed = claim_protocol_role(principal, role)
                 if isinstance(claimed, Denial):
                     outgoing.put(_frame_error(frame_id, claimed.code, claimed.message))
@@ -451,8 +481,8 @@ class GatewayServer:
                 self._dispatch(frame, role, principal, outgoing)
         finally:
             with self._sub_lock:
-                if outgoing in self._subs:
-                    self._subs.remove(outgoing)
+                if subscriber is not None and subscriber in self._subs:
+                    self._subs.remove(subscriber)
             outgoing.put(None)
             writer.join(timeout=1)
 
@@ -771,6 +801,76 @@ class GatewayServer:
             names = [name for name in names if name in allowed]
         return {"ok": True, "profiles": [{"id": name} for name in names]}
 
+    def _filter_broadcast(
+        self,
+        frame: dict[str, object],
+        principal: Principal,
+    ) -> dict[str, object] | None:
+        """Scope one published event. ``None`` means this socket gets nothing.
+
+        Owner and admin see the card, including an unscoped one. A member sees
+        only a card for a profile they belong to. An auditor sees meta fields
+        and not arguments, text, or a session id. A non-member sees nothing.
+        The same split applies to any other broadcast (transcript, status).
+        """
+        if not accounts_enforced(self.accounts):
+            return frame
+        payload = frame.get("payload")
+        if isinstance(payload, dict) and payload.get("kind") == "approval":
+            approval = payload.get("approval")
+            if not isinstance(approval, dict):
+                return None
+            visible = self._approval_broadcast(principal, approval)
+            if visible is None:
+                return None
+            cloned = dict(frame)
+            cloned_payload = dict(payload)
+            cloned_payload["approval"] = visible
+            cloned["payload"] = cloned_payload
+            return cloned
+        return self._scoped_event(principal, frame)
+
+    def _approval_broadcast(
+        self,
+        principal: Principal,
+        item: dict[str, object],
+    ) -> dict[str, object] | None:
+        if principal.role == "auditor":
+            if not principal.account_id:
+                return None
+            return _approval_meta(item)
+        if sees_all_profiles(principal.role):
+            return dict(self._hide_foreign_session(principal, item))
+        if self.accounts is None or not principal.account_id:
+            return None
+        profile = item.get("profileId")
+        if not isinstance(profile, str) or not profile:
+            return None
+        allowed = set(self.accounts.profile_ids_for(principal.account_id))
+        if profile not in allowed:
+            return None
+        return dict(self._hide_foreign_session(principal, item))
+
+    def _scoped_event(
+        self,
+        principal: Principal,
+        frame: dict[str, object],
+    ) -> dict[str, object] | None:
+        """Non-approval broadcasts. Auditors get no body. Members need a profile."""
+        if principal.role == "auditor" or not principal.account_id:
+            return None
+        if sees_all_profiles(principal.role):
+            return frame
+        if self.accounts is None:
+            return None
+        profile = _event_profile(frame)
+        if not profile:
+            return None
+        allowed = set(self.accounts.profile_ids_for(principal.account_id))
+        if profile not in allowed:
+            return None
+        return frame
+
     def _visible_approvals(self, principal: Principal) -> list[dict[str, object]]:
         items = self.approvals.list_pending()
         if (
@@ -867,6 +967,45 @@ class GatewayServer:
                 role="owner",
             )
         return Denial(401, "unauthorized", "gateway token rejected")
+
+
+@dataclass
+class _Subscriber:
+    outgoing: queue.Queue[dict[str, object] | None]
+    principal: Principal
+    conn: socket.socket
+
+
+def _approval_meta(item: dict[str, object]) -> dict[str, object]:
+    """The content-free fields from ``GET /v1/approvals/meta``. No text."""
+    decision = item.get("decision")
+    if not isinstance(decision, str) or not decision:
+        state = item.get("state")
+        decision = state if isinstance(state, str) and state else "pending"
+    created = item.get("createdAt")
+    return {
+        "id": item.get("id", ""),
+        "tool": item.get("tool", ""),
+        "risk": item.get("risk", ""),
+        "createdAt": created if isinstance(created, str) else "",
+        "decision": decision,
+    }
+
+
+def _event_profile(frame: dict[str, object]) -> str:
+    payload = frame.get("payload")
+    if not isinstance(payload, dict):
+        return ""
+    for key in ("profileId", "profile"):
+        value = payload.get(key)
+        if isinstance(value, str) and value:
+            return value
+        nested = payload.get("approval")
+        if isinstance(nested, dict):
+            inner = nested.get(key)
+            if isinstance(inner, str) and inner:
+                return inner
+    return ""
 
 
 def _write_frames(
@@ -1045,6 +1184,19 @@ def _request_ticket(path: str, headers: dict[str, str]) -> str:
     if len(values) == 1:
         return values[0]
     return ""
+
+
+def _peer_host(conn: socket.socket) -> str:
+    try:
+        addr = conn.getpeername()
+    except OSError:
+        return ""
+    if not isinstance(addr, tuple) or not addr or not isinstance(addr[0], str):
+        return ""
+    host = addr[0]
+    if len(host) > 64:
+        return ""
+    return host
 
 
 def _peer_is_loopback(addr: object) -> bool:

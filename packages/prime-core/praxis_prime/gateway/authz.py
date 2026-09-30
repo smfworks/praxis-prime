@@ -195,6 +195,8 @@ def login(
     store: AccountStore,
     body: bytes,
     audit: AuditLog | None,
+    *,
+    peer: str = "",
 ) -> tuple[int, dict[str, object], list[tuple[str, str]]]:
     """Check a password and open a session. The password is not logged."""
     try:
@@ -209,7 +211,12 @@ def login(
         return 400, _error("bad_request", "username and password must be strings"), []
     account = store.authenticate(username_text, password)
     if account is None:
-        _audit(audit, "auth.fail", "login failed", {"username": _safe_name(username_text)})
+        _audit(
+            audit,
+            "auth.fail",
+            "login failed",
+            {"username": _safe_name(username_text), "ip": _safe_ip(peer)},
+        )
         return 401, _error("unauthorized", "invalid username or password"), []
     issued = store.open_session(account)
     _audit(
@@ -319,5 +326,15 @@ def _error(code: str, message: str) -> dict[str, object]:
 def _safe_name(value: str) -> str:
     text = value.strip().casefold()
     if len(text) > 64:
+        return ""
+    return text
+
+
+def _safe_ip(value: str) -> str:
+    text = value.strip()
+    if not text or len(text) > 64:
+        return ""
+    allowed = "0123456789.:abcdefABCDEF%"
+    if any(ch not in allowed for ch in text):
         return ""
     return text

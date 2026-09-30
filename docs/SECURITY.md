@@ -18,13 +18,13 @@ An empty `allow` list allows nothing. That is fail closed. A profile cannot add 
 
 The migrated `default` profile is written with `allow = ["*"]` for tools and for MCP. `*` means that layer adds no extra restriction, so a single-user install keeps the same tools after the upgrade. A profile created after that starts with an empty allow list. A missing `profile.toml` allows nothing. Tighten `default` in `profile.toml` when you want fewer tools. An approval cannot put a tool back.
 
-Stop `praxis-primed` before the first `account create`. That command moves `prime.db` into `profiles/default/`. The command refuses while the daemon is running, because an open connection would lose writes.
+Stop `praxis-primed` before the first `account create`. That command moves `prime.db` into `profiles/default/`. It holds a migration lock and refuses while the daemon is running, because an open connection would lose writes. The daemon refuses to start while the lock exists. `praxis-prime profile migrate` finishes an interrupted move and does nothing if the marker is already there.
 
 This process runs one profile. Chat, approvals, `model.set`, and `session.drop` require that profile plus a membership (owner and admin are not limited to memberships). A chat whose profile is not the one the daemon opened is refused. The audit `profile` column is that runtime profile.
 
 ## Auditors
 
-An auditor does not chat and does not receive approval content. `GET /v1/approvals` stays 403 for that role.
+An auditor does not chat and does not receive approval content. `GET /v1/approvals` stays 403 for that role. A WebSocket is subscribed only after `connect` succeeds. Approval events are filtered the same way as the HTTP list: owner and admin receive the card, members receive only their own profile's cards, auditors receive at most the meta fields, and every other socket receives nothing. A disabled or revoked account is dropped on the next publish.
 
 `GET /v1/approvals/meta` is the content-free view: `id`, `tool`, `risk`, `createdAt`, and `decision`, plus a `count`. It has no arguments, summary, reason, or mount line. Auditors, the owner, and admins see every profile. Other accounts see only profiles they belong to. Pending rows use `decision` `pending`. `GET /v1/approvals` omits another account's `sessionId`.
 

@@ -37,6 +37,8 @@ LOCK_AFTER_FAILURES = 5
 LOCK_SECONDS = 15 * 60
 # argon2id uses about 19 MiB per verify. This caps how many run at once.
 LOGIN_CONCURRENCY = 4
+# Distinct usernames each take a lock. Drop the oldest unlocked ones.
+_NAME_LOCK_CAP = 256
 _COOKIE = "pp_session"
 
 
@@ -177,6 +179,36 @@ class AccountStore:
                 raise AccountError(f"account {name} already exists") from exc
             tighten_file(self.path)
         return Account(account_id, name, shown, mail, chosen, "active", now)
+
+    def discard_account(self, account_id: str) -> None:
+        """Delete one account and its sessions. Rolls back a failed first create."""
+        if not account_id.startswith("acc_"):
+            raise AccountError("no such account")
+        with self._lock:
+            self.conn.execute("BEGIN IMMEDIATE")
+            try:
+                self.conn.execute(
+                    "DELETE FROM ws_tickets WHERE account_id = ?",
+                    (account_id,),
+                )
+                self.conn.execute(
+                    "DELETE FROM sessions WHERE account_id = ?",
+                    (account_id,),
+                )
+                self.conn.execute(
+                    "DELETE FROM memberships WHERE account_id = ?",
+                    (account_id,),
+                )
+                deleted = self.conn.execute(
+                    "DELETE FROM accounts WHERE id = ?",
+                    (account_id,),
+                )
+                if deleted.rowcount != 1:
+                    raise AccountError("no such account")
+                self.conn.commit()
+            except Exception:
+                self.conn.rollback()
+                raise
 
     def list_accounts(self) -> list[Account]:
         with self._lock:
@@ -769,10 +801,19 @@ class AccountStore:
 
     def _account_gate(self, name: str) -> threading.Lock:
         with self._name_guard:
-            lock = self._name_locks.get(name)
+            lock = self._name_locks.pop(name, None)
             if lock is None:
                 lock = threading.Lock()
-                self._name_locks[name] = lock
+            self._name_locks[name] = lock
+            overflow = len(self._name_locks) - _NAME_LOCK_CAP
+            if overflow > 0:
+                for old_name, old_lock in list(self._name_locks.items()):
+                    if overflow <= 0:
+                        break
+                    if old_lock is lock or old_lock.locked():
+                        continue
+                    del self._name_locks[old_name]
+                    overflow -= 1
             return lock
 
     def _verify_bounded(self, encoded: str, presented: str) -> bool:

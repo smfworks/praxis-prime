@@ -70,7 +70,11 @@ class Runtime:
         if self.browser is not None:
             self.browser.close()
         self.engine.labels.close()
+        self.audit.close()
         self.db.close()
+        from praxis_prime.policy.boundary import bind_data_root
+
+        bind_data_root(None)
 
     def set_model(self, spec: str) -> str:
         ref = parse_model_spec(spec)
@@ -262,6 +266,9 @@ def build_runtime(
     )
     if built.mcp is not None and layout.allowlist is not None:
         built.mcp.allowed_servers = layout.allowlist.mcp
+    from praxis_prime.policy.boundary import bind_data_root
+
+    bind_data_root(Path(data_path).parent if data_path is not None else None)
     return built
 
 

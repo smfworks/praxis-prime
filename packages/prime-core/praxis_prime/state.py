@@ -1,8 +1,9 @@
 """SQLite state file under the XDG data directory.
 
-Sessions and the audit log share ``prime.db``. The daemon is the writer
-when it is running. ``check_same_thread`` is off because the daemon
-serializes every use of this connection on one lock.
+Sessions and the audit log share ``prime.db``. Chat writes use this
+connection. The audit log opens its own connection so a chat transaction
+cannot nest inside an audit ``BEGIN IMMEDIATE``. ``check_same_thread`` is
+off because the daemon uses the connection from more than one thread.
 
 TODO: ARCHITECTURE §10 and §18. FTS5, sqlite-vec, and a separate ``audit.db``
 are later work. This module is the MVP store.
@@ -33,6 +34,7 @@ class StateDB:
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA foreign_keys=ON")
+        self.conn.execute("PRAGMA busy_timeout=5000")
         self._migrate()
 
     def _migrate(self) -> None:

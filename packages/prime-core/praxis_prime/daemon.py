@@ -116,6 +116,14 @@ def serve(
     queue = ApprovalQueue(ttl=ttl)
     config_path = Path(config) if config else None
     root = data_dir(environ)
+    from praxis_prime.profiles.migrate import migration_in_progress
+
+    if migration_in_progress(root):
+        print(
+            "praxis-primed: refusing to start while a profile migration is in progress",
+            file=sys.stderr,
+        )
+        return 2
     try:
         runtime = build_runtime(env=environ, config_path=config_path, approver=queue.authorize)
     except (OSError, ValueError) as exc:
