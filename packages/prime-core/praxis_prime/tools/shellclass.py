@@ -686,9 +686,9 @@ def _repo_git_is_unsafe(workspace: Path, sub: str) -> bool:
         return True
     if _submodules_present(workspace):
         return True
-    if sub in {"diff", "log", "show"} and _attributes_assign_driver(workspace):
-        return True
-    if _head_attributes_assign_driver(workspace):
+    if sub in {"diff", "log", "show"} and (
+        _attributes_assign_driver(workspace) or _head_attributes_assign_driver(workspace)
+    ):
         return True
     return False
 

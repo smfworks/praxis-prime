@@ -820,12 +820,14 @@ def test_head_gitattributes_driver_asks(tmp_path: Path, monkeypatch):
         lambda: False,
     )
     assert _asks(tmp_path, "git status") is False
+    assert _asks(tmp_path, "git diff note.txt") is False
     monkeypatch.setattr(
         "praxis_prime.tools.shellclass._git_supports_attr_source",
         lambda: True,
     )
-    assert _asks(tmp_path, "git status")
+    assert _asks(tmp_path, "git status") is False
     assert _asks(tmp_path, "git diff note.txt")
+    assert _asks(tmp_path, "git diff --stat")
 
 
 def test_submodule_filter_does_not_run_inside_bwrap(tmp_path: Path):
