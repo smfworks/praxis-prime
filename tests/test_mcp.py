@@ -162,6 +162,38 @@ def test_bwrap_argv_drops_unlisted_env(tmp_path: Path):
     assert "MCP_CALL_LOG" in argv
 
 
+def _stage_interpreter_lib(source: Path, prefix: Path) -> Path | None:
+    """Symlink ``prefix/lib`` at a non-system ``libpython`` directory.
+
+    Ubuntu's Python 3.12 binary does not need one. actions/setup-python
+    3.13 and 3.14 link against ``libpython3.x.so`` in the install prefix,
+    outside the ``/usr`` mount, and keep the stdlib in that same ``lib``.
+    The sandbox binds ``prefix/lib`` when the directory exists.
+    """
+    try:
+        listed = subprocess.check_output(["ldd", os.fspath(source)], text=True)
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    for line in listed.splitlines():
+        if "libpython" not in line or "=>" not in line:
+            continue
+        left, right = line.split("=>", 1)
+        soname = left.strip()
+        target = right.strip().split()[0]
+        if not soname.startswith("libpython") or target == "not":
+            continue
+        library = Path(target)
+        if not library.is_file():
+            continue
+        if library.as_posix().startswith(("/usr/", "/lib/", "/lib64/")):
+            continue
+        libdir = prefix / "lib"
+        if not libdir.exists():
+            libdir.symlink_to(library.resolve().parent, target_is_directory=True)
+        return libdir
+    return None
+
+
 def test_bwrap_mounts_a_symlinked_interpreter_outside_usr(tmp_path: Path):
     prefix = tmp_path / "py"
     bindir = prefix / "bin"
@@ -172,18 +204,25 @@ def test_bwrap_mounts_a_symlinked_interpreter_outside_usr(tmp_path: Path):
     binary.chmod(0o755)
     link = bindir / "python"
     link.symlink_to(binary.name)
+    libdir = _stage_interpreter_lib(source, prefix)
     script = tmp_path / "echo.py"
     script.write_text("print('interpreter-ok')\n", encoding="utf-8")
     work = tmp_path / "work"
     work.mkdir()
+    env = {"PATH": "/usr/bin:/bin", "PYTHONUNBUFFERED": "1"}
+    if libdir is not None:
+        env["LD_LIBRARY_PATH"] = str(libdir)
+        env["PYTHONHOME"] = str(prefix)
     argv = build_mcp_bwrap_argv(
         str(link),
         (str(script),),
         cwd=work,
-        env={"PATH": "/usr/bin:/bin", "PYTHONUNBUFFERED": "1"},
+        env=env,
         network="off",
     )
     assert _mount_flag(argv, str(bindir.resolve())) == "--ro-bind"
+    if libdir is not None:
+        assert _mount_flag(argv, str(libdir)) == "--ro-bind"
     assert _mount_flag(argv, str(work.resolve())) == "--bind"
     in_ci = os.environ.get("CI") == "true" or os.environ.get("GITHUB_ACTIONS") == "true"
     if not bwrap_available():
