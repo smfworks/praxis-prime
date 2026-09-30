@@ -25,8 +25,19 @@ are not allowlisted. ``git status`` does not ask on a ``HEAD`` ``filter=``
 alone; a filter or driver defined in config already asks.
 Secret filenames use
 :func:`praxis_prime.policy.boundary.is_secret_path`, including git pathspecs.
-Globs, ``rev:path``, case-folding magic, and exclude or stacked pathspec
-magic are not allowlisted.
+Reader operands also use :func:`praxis_prime.policy.boundary.assert_readable`
+so a hard link to a credential inode is not auto-approved. Globs,
+``rev:path``, case-folding magic, and exclude or stacked pathspec magic are
+not allowlisted.
+
+``write_capable`` is true only for a write-shaped command: destructive or
+write patterns, output redirects, mutating git subcommands, installers, and
+interpreters running scripts. Anything else still asks, and approving it
+keeps the read-only bind.
+
+The scan root is the workspace. A git toplevel above that workspace is not
+scanned; the command asks. A git dir outside the workspace is not mounted
+into the scan sandbox; the command asks.
 """
 
 from __future__ import annotations
@@ -38,7 +49,12 @@ import stat
 from dataclasses import dataclass
 from pathlib import Path
 
-from praxis_prime.policy.boundary import is_secret_path
+from praxis_prime.policy.boundary import (
+    InodeScanCache,
+    ReadDenied,
+    assert_readable,
+    is_secret_path,
+)
 from praxis_prime.sandbox.bwrap import CommandStatus
 from praxis_prime.tools.registry import Risk
 
@@ -99,6 +115,27 @@ _SHARE = (
 # repo's ``conftest.py``, so it is not on the allowlist.
 _INTERPRETER = re.compile(
     r"(?i)(?:^|[;&|(`\n])\s*(?:sudo\s+)?(?:python|python3|perl|ruby|node|php|sh|bash|zsh|dash)\b"
+)
+# Write-shaped misses. A command that matches none of these still asks, and
+# approving it keeps ``--ro-bind``.
+_GIT_MUTATION = re.compile(
+    r"(?i)(?:^|[;&|(`\n])\s*(?:sudo\s+)?git\s+"
+    r"(?:(?:-c|-C|--git-dir|--work-tree)\s+\S+\s+|--no-pager\s+)*"
+    r"(?:add|commit|rm|mv|checkout|switch|restore|reset|clean|rebase|merge|"
+    r"cherry-pick|revert|stash|tag|branch|config|init|clone|fetch|pull|push|"
+    r"apply|am|submodule|update-index|update-ref|gc|write-tree|read-tree|"
+    r"sparse-checkout|worktree|commit-tree|symbolic-ref)\b"
+)
+_INSTALL_OR_MUTATE = re.compile(
+    r"(?i)(?:^|[;&|(`\n])\s*(?:sudo\s+)?"
+    r"(?:apt-get|apt|dnf|yum|pacman|zypper|pip3?|npm|yarn|pnpm|cargo|gem|"
+    r"brew|snap|flatpak|rustup|touch|mkdir|ln|install|patch|tar|unzip|"
+    r"make|cmake|ninja|rsync|scp)\b"
+)
+_BACKTICK_WRITE = re.compile(
+    r"(?i)`\s*(?:sudo\s+|command\s+|exec\s+)*"
+    r"(?:rm|rmdir|unlink|shred|mv|cp|dd|tee|chmod|chown|chgrp|git|python3?|"
+    r"perl|ruby|node|php|bash|sh|zsh|dash)\b"
 )
 
 _LS_SHORT = re.compile(r"^-[lah1AFCrtSRs]+$")
@@ -261,14 +298,21 @@ class _GitView:
     probe: GitProbe | None = None
 
 
-def classify_shell(command: str, *, workspace: Path | None = None) -> ShellClass:
+def classify_shell(
+    command: str,
+    *,
+    workspace: Path | None = None,
+    cache: InodeScanCache | None = None,
+) -> ShellClass:
     """Classify ``command``. Unknown or unparsed syntax is not allowlisted."""
     text = command.strip()
     if not text:
-        return ShellClass(False, Risk.READ, "empty shell command requires approval", True)
+        return ShellClass(False, Risk.READ, "empty shell command requires approval", False)
     segments, problem = _segments(text)
     if problem == "" and segments is not None and _label(text)[0] == Risk.READ:
-        decisions = [_allowlisted_segment(segment, workspace) for segment in segments]
+        decisions = [
+            _allowlisted_segment(segment, workspace, cache) for segment in segments
+        ]
         if all(allowed for allowed, _probe in decisions):
             probes = tuple(probe for _allowed, probe in decisions if probe is not None)
             return ShellClass(True, Risk.READ, "", False, probes)
@@ -282,7 +326,53 @@ def classify_shell(command: str, *, workspace: Path | None = None) -> ShellClass
         risk = Risk.DESTRUCTIVE
         if reason == "command is not on the read-only allowlist":
             reason = "interpreter invocation requires approval"
-    return ShellClass(False, risk, reason, True)
+    return ShellClass(False, risk, reason, _write_shaped(text))
+
+
+def _write_shaped(command: str) -> bool:
+    """True when the command is shaped like a workspace write.
+
+    Unknown commands still ask. Approving them keeps the read-only bind.
+    """
+    if _output_redirect(command):
+        return True
+    if _matches(_DESTRUCTIVE, command) or _matches(_SHARE, command):
+        return True
+    if _GIT_MUTATION.search(command) or _INSTALL_OR_MUTATE.search(command):
+        return True
+    if _INTERPRETER.search(command) or _BACKTICK_WRITE.search(command):
+        return True
+    return False
+
+
+def _output_redirect(command: str) -> bool:
+    """True when an unquoted ``>`` would truncate or append a file."""
+    index = 0
+    length = len(command)
+    while index < length:
+        char = command[index]
+        if char == "'":
+            index += 1
+            while index < length and command[index] != "'":
+                index += 1
+            index += 1
+            continue
+        if char == '"':
+            index += 1
+            while index < length and command[index] != '"':
+                if command[index] == "\\" and index + 1 < length:
+                    index += 2
+                    continue
+                index += 1
+            index += 1
+            continue
+        if char == "\\" and index + 1 < length:
+            index += 2
+            continue
+        if char == ">":
+            return True
+        index += 1
+    return False
 
 
 def _label(command: str) -> tuple[Risk, str]:
@@ -414,7 +504,11 @@ def _word_start(command: str, index: int) -> bool:
     return command[index - 1].isspace() or command[index - 1] in ";&|("
 
 
-def _allowlisted_segment(segment: str, workspace: Path | None) -> tuple[bool, GitProbe | None]:
+def _allowlisted_segment(
+    segment: str,
+    workspace: Path | None,
+    cache: InodeScanCache | None,
+) -> tuple[bool, GitProbe | None]:
     try:
         tokens = shlex.split(segment, posix=True)
     except ValueError:
@@ -427,11 +521,11 @@ def _allowlisted_segment(segment: str, workspace: Path | None) -> tuple[bool, Gi
     if command == "ls":
         return _ls(tokens, workspace), None
     if command == "cat":
-        return _reader(tokens, workspace, flags=False), None
+        return _reader(tokens, workspace, cache, flags=False), None
     if command in {"head", "tail"}:
-        return _head_tail(tokens, workspace), None
+        return _head_tail(tokens, workspace, cache), None
     if command == "git":
-        decision = _git(tokens, workspace)
+        decision = _git(tokens, workspace, cache)
         return decision.allowed, decision.probe
     return False, None
 
@@ -447,17 +541,27 @@ def _ls(tokens: list[str], workspace: Path | None) -> bool:
     return True
 
 
-def _reader(tokens: list[str], workspace: Path | None, *, flags: bool) -> bool:
+def _reader(
+    tokens: list[str],
+    workspace: Path | None,
+    cache: InodeScanCache | None,
+    *,
+    flags: bool,
+) -> bool:
     del flags
     if len(tokens) == 1:
         return True
     for arg in tokens[1:]:
-        if arg.startswith("-") or not _concrete_read_operand(arg, workspace):
+        if arg.startswith("-") or not _concrete_read_operand(arg, workspace, cache):
             return False
     return True
 
 
-def _head_tail(tokens: list[str], workspace: Path | None) -> bool:
+def _head_tail(
+    tokens: list[str],
+    workspace: Path | None,
+    cache: InodeScanCache | None,
+) -> bool:
     index = 1
     while index < len(tokens):
         arg = tokens[index]
@@ -469,13 +573,17 @@ def _head_tail(tokens: list[str], workspace: Path | None) -> bool:
         if re.fullmatch(r"-[nc]\d+", arg) or re.fullmatch(r"-\d+", arg):
             index += 1
             continue
-        if arg.startswith("-") or not _concrete_read_operand(arg, workspace):
+        if arg.startswith("-") or not _concrete_read_operand(arg, workspace, cache):
             return False
         index += 1
     return True
 
 
-def _git(tokens: list[str], workspace: Path | None) -> _GitView:
+def _git(
+    tokens: list[str],
+    workspace: Path | None,
+    cache: InodeScanCache | None,
+) -> _GitView:
     if len(tokens) < 2:
         return _GitView(False)
     index = 1
@@ -504,7 +612,7 @@ def _git(tokens: list[str], workspace: Path | None) -> _GitView:
                 if operand.startswith(":") or sub == "diff":
                     # After ``--`` every diff operand is a pathspec. A leading
                     # ``:`` is a pathspec for every subcommand, never a revision.
-                    if not _is_explicit_safe_file(operand, workspace):
+                    if not _is_explicit_safe_file(operand, workspace, cache):
                         return _GitView(False)
                 if sub == "diff":
                     pathspecs.append(operand)
@@ -557,7 +665,7 @@ def _git(tokens: list[str], workspace: Path | None) -> _GitView:
                 continue
             return _GitView(False)
         if arg.startswith(":"):
-            if not _is_explicit_safe_file(arg, workspace):
+            if not _is_explicit_safe_file(arg, workspace, cache):
                 return _GitView(False)
             if sub == "diff":
                 pathspecs.append(arg)
@@ -566,7 +674,7 @@ def _git(tokens: list[str], workspace: Path | None) -> _GitView:
         if not _safe_git_operand(arg, workspace):
             return _GitView(False)
         if sub == "diff":
-            if _is_explicit_safe_file(arg, workspace):
+            if _is_explicit_safe_file(arg, workspace, cache):
                 pathspecs.append(arg)
             elif _operand_exists_as_nonfile(arg, workspace):
                 # A directory, ``.``, or trailing slash is a pathspec. Skipping
@@ -579,7 +687,7 @@ def _git(tokens: list[str], workspace: Path | None) -> _GitView:
         return _GitView(False)
     if not pathspecs:
         return _allow_git(summary, workspace, sub)
-    if not all(_is_explicit_safe_file(item, workspace) for item in pathspecs):
+    if not all(_is_explicit_safe_file(item, workspace, cache) for item in pathspecs):
         return _GitView(False)
     if summary:
         return _allow_git(True, workspace, sub)
@@ -616,21 +724,24 @@ def _pinned_git_argv(*rest: str) -> list[str]:
     return argv
 
 
-def _git_supports_attr_source() -> bool:
-    """True when this git accepts ``--attr-source`` (2.40 and newer).
+def _git_supports_attr_source() -> bool | None:
+    """Whether this git accepts ``--attr-source`` (2.40 and newer).
 
-    The version check runs inside bubblewrap. The classifier does not
-    execute git on the host.
+    True or False is a successful check and is cached. None means the check
+    failed. A failure is not cached, and callers ask while the answer is
+    unknown. The version check runs inside bubblewrap. The classifier does
+    not execute git on the host.
     """
     global _attr_source_support
     if _attr_source_support is not None:
         return _attr_source_support
-    supported = False
     status = _bwrap_git_raw(shlex.join(_pinned_git_argv("--version")), Path("/tmp"))
-    if status is not None and status.code == 0:
-        match = _GIT_VERSION.search(status.stdout or status.output)
-        if match is not None:
-            supported = (int(match.group(1)), int(match.group(2))) >= (2, 40)
+    if status is None or status.code != 0:
+        return None
+    match = _GIT_VERSION.search(status.stdout or status.output)
+    if match is None:
+        return None
+    supported = (int(match.group(1)), int(match.group(2))) >= (2, 40)
     _attr_source_support = supported
     return supported
 
@@ -639,7 +750,7 @@ def _git_config_args() -> list[str]:
     args: list[str] = []
     for item in _GIT_CONFIG_LOCKS:
         args.extend(["-c", item])
-    if _git_supports_attr_source():
+    if _git_supports_attr_source() is True:
         # HEAD's tree replaces worktree .gitattributes. core.attributesFile
         # still applies on top of that, so point it at /dev/null too.
         # Git older than 2.40 rejects --attr-source; leave those pins off.
@@ -698,8 +809,11 @@ def _repo_git_is_unsafe(workspace: Path, sub: str) -> bool:
 
     ``-c`` cannot clear every diff driver or filter. An include is refused
     outright: the file it pulls in is not auto-approved either. Linked
-    worktrees keep the shared config in the ``commondir``.
+    worktrees keep the shared config in the ``commondir``. A git dir outside
+    the workspace is not mounted into the scan sandbox; the command asks.
     """
+    if _external_git_binds(workspace) is None:
+        return True
     if _git_config_is_hostile(workspace):
         return True
     if _submodules_present(workspace):
@@ -722,10 +836,14 @@ class _GitLayout:
 def _git_layout(workspace: Path) -> _GitLayout:
     """Resolve the worktree git dir and, when linked, its common dir.
 
-    A workspace that is a subdirectory still uses the repo toplevel, so
-    config and attributes above that subdirectory are part of the scan.
+    The scan root is the workspace. A git dir that resolves outside that
+    workspace is hostile: callers ask and do not read or mount it.
     """
     root = _repo_toplevel(workspace)
+    try:
+        workspace_root = workspace.resolve()
+    except OSError:
+        return _GitLayout(hostile=True)
     git = root / ".git"
     try:
         if not os.path.lexists(git):
@@ -742,6 +860,13 @@ def _git_layout(workspace: Path) -> _GitLayout:
     except OSError:
         return _GitLayout(hostile=True)
     try:
+        resolved_gitdir = gitdir.resolve()
+    except OSError:
+        return _GitLayout(hostile=True)
+    if not _contained(workspace_root, resolved_gitdir):
+        return _GitLayout(hostile=True)
+    gitdir = resolved_gitdir
+    try:
         if not gitdir.is_dir():
             return _GitLayout(hostile=True)
     except OSError:
@@ -753,6 +878,8 @@ def _git_layout(workspace: Path) -> _GitLayout:
     if common is not None:
         try:
             if not common.is_dir():
+                return _GitLayout(dirs=(gitdir,), hostile=True)
+            if not _contained(workspace_root, common):
                 return _GitLayout(dirs=(gitdir,), hostile=True)
             if common.resolve() != gitdir.resolve():
                 dirs.append(common)
@@ -968,43 +1095,90 @@ def _attribute_line_assigns_driver(line: str) -> bool:
 
 
 def _repo_toplevel(workspace: Path) -> Path:
-    """Walk parents for ``.git``. A subdirectory scan starts at that root."""
+    """Git root used as a scan root. Never a directory above ``workspace``.
+
+    When ``.git`` exists only in a parent, the scan stays on ``workspace``
+    and :func:`_toplevel_is_outside` makes the command ask.
+    """
     try:
         current = workspace.resolve()
     except OSError:
         return workspace
-    for candidate in (current, *current.parents):
-        try:
-            if os.path.lexists(candidate / ".git"):
-                return candidate
-        except OSError:
-            return workspace
-        if candidate.parent == candidate:
-            break
+    if _has_git_entry(current):
+        return current
     return workspace
 
 
-def _external_git_binds(workspace: Path) -> list[tuple[str, str]]:
-    """Read-only binds for a git dir that lives outside the worktree mount."""
-    root = _repo_toplevel(workspace)
+def _toplevel_is_outside(workspace: Path) -> bool:
+    """True when the checkout root is a parent of ``workspace``."""
     try:
-        root = root.resolve()
+        current = workspace.resolve()
     except OSError:
-        return []
+        return True
+    if _has_git_entry(current):
+        return False
+    for candidate in current.parents:
+        try:
+            if _has_git_entry(candidate):
+                return True
+        except OSError:
+            return True
+        if candidate.parent == candidate:
+            break
+    return False
+
+
+def _has_git_entry(path: Path) -> bool:
+    try:
+        return os.path.lexists(path / ".git")
+    except OSError:
+        return False
+
+
+def _contained(root: Path, path: Path) -> bool:
+    """True when ``path`` resolves to ``root`` or a directory under it."""
+    try:
+        path.resolve().relative_to(root.resolve())
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+def _external_git_binds(workspace: Path) -> list[tuple[str, str]] | None:
+    """Extra read-only binds for a git dir outside the worktree mount.
+
+    ``None`` means a git dir is outside the workspace and outside a common
+    dir that itself sits under the workspace. Callers skip the bind and ask.
+    A path already inside the workspace needs no extra bind.
+    """
+    try:
+        root = workspace.resolve()
+    except OSError:
+        return None
+    if _toplevel_is_outside(workspace):
+        return None
+    layout = _git_layout(workspace)
+    if layout.hostile:
+        return None
+    common = layout.dirs[1] if len(layout.dirs) > 1 else None
+    if common is not None and not _contained(root, common):
+        return None
     binds: list[tuple[str, str]] = []
     seen: set[str] = set()
-    for directory in _git_layout(workspace).dirs:
+    for directory in layout.dirs:
         try:
             resolved = directory.resolve()
         except OSError:
+            return None
+        if _contained(root, resolved):
             continue
-        if resolved == root or root in resolved.parents:
+        if common is not None and _contained(common, resolved):
+            text = str(resolved)
+            if text not in seen:
+                seen.add(text)
+                binds.append((text, text))
             continue
-        text = str(resolved)
-        if text in seen:
-            continue
-        seen.add(text)
-        binds.append((text, text))
+        return None
     return binds
 
 
@@ -1037,19 +1211,24 @@ def _head_attributes_assign_driver(workspace: Path) -> bool:
     """True when ``HEAD:.gitattributes`` assigns a diff or filter driver.
 
     ``--attr-source=HEAD`` reads those blobs instead of the worktree files.
-    The listing runs in the read-only sandbox from the repo toplevel, with
-    ``--full-tree``, so a subdirectory workspace still sees root attributes.
-    A missing blob asks. Git older than 2.40 does not take ``--attr-source``,
-    so this scan stays off. ``git status`` does not call this: a filter or
-    driver key in config already asks.
+    The listing runs in the read-only sandbox from the workspace. A missing
+    blob asks. A failed version check asks and is not cached. Git older than
+    2.40 does not take ``--attr-source``, so this scan stays off. ``git
+    status`` does not call this: a filter or driver key in config already asks.
     """
-    if not _git_supports_attr_source():
+    supported = _git_supports_attr_source()
+    if supported is None:
+        return True
+    if not supported:
         return False
+    binds = _external_git_binds(workspace)
+    if binds is None:
+        return True
     root = _repo_toplevel(workspace)
     listed = _bwrap_git_raw(
         command_for_sandbox("git ls-tree -r -z --full-tree --name-only HEAD"),
         root,
-        binds=_external_git_binds(workspace),
+        binds=binds,
     )
     if listed is None:
         return True
@@ -1072,7 +1251,7 @@ def _head_attributes_assign_driver(workspace: Path) -> bool:
         command_for_sandbox("git cat-file --batch"),
         root,
         spec,
-        binds=_external_git_binds(workspace),
+        binds=binds,
     )
     if blobs is None or blobs.code != 0 or not blobs.stdout:
         return True
@@ -1223,11 +1402,17 @@ def _safe_value(value: str) -> bool:
     return ".." not in Path(value).parts
 
 
-def _concrete_read_operand(arg: str, workspace: Path | None) -> bool:
+def _concrete_read_operand(
+    arg: str,
+    workspace: Path | None,
+    cache: InodeScanCache | None = None,
+) -> bool:
     """True for one workspace path. Globs are expanded by the shell later."""
     if _has_glob(arg) or _operand_is_secret(arg, workspace):
         return False
-    return _in_workspace(arg, workspace)
+    if not _in_workspace(arg, workspace):
+        return False
+    return not _inode_blocks_read(arg, workspace, cache)
 
 
 def _safe_git_operand(arg: str, workspace: Path | None) -> bool:
@@ -1308,11 +1493,16 @@ def _operand_exists_as_nonfile(arg: str, workspace: Path | None) -> bool:
         return False
 
 
-def _is_explicit_safe_file(arg: str, workspace: Path | None) -> bool:
+def _is_explicit_safe_file(
+    arg: str,
+    workspace: Path | None,
+    cache: InodeScanCache | None = None,
+) -> bool:
     """True only when ``arg`` is an existing regular file in the worktree.
 
     A missing name is a revision (``v1.0``, ``origin/main``) or a path that
     git can still expand from the index. Neither is an allowlisted file.
+    A hard link to a credential inode is not allowlisted.
     """
     if workspace is None or not _safe_git_operand(arg, workspace):
         return False
@@ -1324,9 +1514,35 @@ def _is_explicit_safe_file(arg: str, workspace: Path | None) -> bool:
         return False
     candidate = path if path.is_absolute() else workspace / path
     try:
-        return candidate.is_file()
+        if not candidate.is_file():
+            return False
     except OSError:
         return False
+    return not _inode_blocks_read(arg, workspace, cache)
+
+
+def _inode_blocks_read(
+    token: str,
+    workspace: Path | None,
+    cache: InodeScanCache | None,
+) -> bool:
+    """True when a reader operand is a secret inode or the scan cannot finish.
+
+    Uses the same :class:`InodeScanCache` as ``read_file``. A hit asks; it
+    does not auto-approve.
+    """
+    if workspace is None:
+        return False
+    body = _concrete_path(token) if token.startswith(":") else token
+    if not body:
+        return True
+    path = Path(body)
+    candidate = path if path.is_absolute() else workspace / path
+    try:
+        assert_readable(candidate, requested=path, cache=cache)
+    except ReadDenied:
+        return True
+    return False
 
 
 def _concrete_path(token: str) -> str | None:

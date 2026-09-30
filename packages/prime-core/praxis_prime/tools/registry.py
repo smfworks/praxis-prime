@@ -7,9 +7,11 @@ proceed; SEND, DESTRUCTIVE, SPEND, and SHARE stay behind the approval spine.
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
+from pathlib import Path
 from typing import Any
 
 from praxis_prime.policy.boundary import InodeScanCache, ReadAccess
@@ -86,9 +88,20 @@ class Tool:
     classify: Callable[[Mapping[str, Any]], PreparedCall] | None = None
     trusted_output: bool = False
 
-    def prepare(self, arguments: Mapping[str, Any]) -> PreparedCall:
+    def prepare(
+        self,
+        arguments: Mapping[str, Any],
+        *,
+        workspace: Path | None = None,
+        cache: InodeScanCache | None = None,
+    ) -> PreparedCall:
         if self.classify is not None:
-            prepared = self.classify(arguments)
+            prepared = _invoke_classify(
+                self.classify,
+                arguments,
+                workspace=workspace,
+                cache=cache,
+            )
             if _risk_rank(prepared.risk) < _risk_rank(self.risk):
                 return PreparedCall(
                     risk=self.risk,
@@ -174,6 +187,32 @@ class ToolRegistry:
             for tool in self._tools.values()
             if tool.name not in self._hidden
         ]
+
+
+def _invoke_classify(
+    classify: Callable[..., PreparedCall],
+    arguments: Mapping[str, Any],
+    *,
+    workspace: Path | None,
+    cache: InodeScanCache | None,
+) -> PreparedCall:
+    """Pass workspace and the inode cache when the classifier accepts them."""
+    try:
+        parameters = inspect.signature(classify).parameters
+    except (TypeError, ValueError):
+        return classify(arguments)
+    kwargs: dict[str, Any] = {}
+    if _accepts(parameters, "workspace"):
+        kwargs["workspace"] = workspace
+    if _accepts(parameters, "cache"):
+        kwargs["cache"] = cache
+    return classify(arguments, **kwargs)
+
+
+def _accepts(parameters: Mapping[str, inspect.Parameter], name: str) -> bool:
+    if name in parameters:
+        return True
+    return any(item.kind is inspect.Parameter.VAR_KEYWORD for item in parameters.values())
 
 
 def _risk_rank(risk: Risk) -> int:

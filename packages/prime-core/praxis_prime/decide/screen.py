@@ -125,6 +125,8 @@ def is_always_ask(ctx: PolicyContext) -> bool:
 
 
 def _shell_needs_approval(ctx: PolicyContext) -> bool:
+    from pathlib import Path
+
     from praxis_prime.tools.shell import classify_command
 
     command = ctx.summary
@@ -134,7 +136,13 @@ def _shell_needs_approval(ctx: PolicyContext) -> bool:
             command = raw
     if not command.strip():
         return True
-    prepared = classify_command(command, sandbox_ready=ctx.sandboxed)
+    workspace = Path(ctx.workspace_root) if ctx.workspace_root else None
+    prepared = classify_command(
+        command,
+        sandbox_ready=ctx.sandboxed,
+        workspace=workspace,
+        cache=ctx.inode_cache,
+    )
     return prepared.force_approval or prepared.risk in CONSEQUENTIAL_RISKS
 
 

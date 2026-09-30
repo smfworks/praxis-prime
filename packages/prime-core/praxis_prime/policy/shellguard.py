@@ -47,6 +47,7 @@ def apply_shell_guard(engine: PolicyEngine, ctx: PolicyContext, verdict: Verdict
         command,
         sandbox_ready=ctx.sandboxed,
         workspace=workspace,
+        cache=ctx.inode_cache,
     )
     mode = compliance_mode(engine.positions)
     decision = verdict.decision

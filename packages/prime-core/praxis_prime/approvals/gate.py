@@ -39,6 +39,7 @@ class ApprovalRequest:
     arguments: Mapping[str, object]
     grant_key: str
     sandboxed: bool
+    mount: str = ""
 
 
 class Approver(Protocol):
