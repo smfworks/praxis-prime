@@ -121,7 +121,7 @@ def create_profile(data_root: Path, name: str, *, display_name: str = "") -> Pro
     _write(home.config_path, text)
     if lstat_kind(home.soul_path) is StatKind.MISSING:
         _write(home.soul_path, _DEFAULT_SOUL)
-    db = StateDB(home.db_path)
+    db = StateDB(home.db_path, allow_during_migration=True)
     db.close()
     tighten_file(home.db_path)
     return home

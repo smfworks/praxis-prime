@@ -124,11 +124,16 @@ def migrate_under_lock(
 ) -> MigrationResult:
     """Migrate while holding the lock the daemon checks at startup.
 
-    The running check happens again after the lock exists. A daemon that
-    appears between the two checks makes this raise ``MigrationBusy``
-    before any account row has to exist. The lock stays if the move fails
-    after it has started and the marker was not written. ``force`` replaces
-    a pid lock that still looks live. It does not steal the ``prime.db`` flock.
+    The running check happens again after the database flock is held and
+    before ``.migration.lock`` is replaced. A daemon that appears in that
+    window makes this raise ``MigrationBusy`` before the pid lock changes.
+    The lock stays if the move fails after it has started and the marker
+    was not written. ``force`` replaces a pid lock that still looks live.
+    It does not steal the ``prime.db`` flock.
+
+    When the database still has to move, the exclusive flock is taken
+    before ``.migration.lock`` is removed or replaced. A busy database
+    leaves the existing lock file untouched.
     """
     running = daemon_is_running if daemon_running is None else daemon_running
     if running():
@@ -137,14 +142,58 @@ def migrate_under_lock(
             "it still has prime.db open"
         )
     root = Path(data_root)
-    lock = acquire_migration_lock(root, force=force)
-    keep = False
+    marker = migration_marker(root)
+    marker_kind = _kind(marker)
+    if marker_kind not in {StatKind.MISSING, StatKind.FILE}:
+        raise OSError(errno.EPERM, "migration marker is not a regular file", str(marker))
+    if marker_kind is StatKind.FILE:
+        return _finish_under_migration_lock(
+            root,
+            config_dir,
+            owner_account,
+            force,
+            move=False,
+        )
+    from praxis_prime.state import release_db_locks
+
+    held = _hold_exclusive_db_locks(root)
     try:
         if running():
             raise MigrationBusy(
                 "stop praxis-primed before creating the first account; "
                 "it still has prime.db open"
             )
+        return _finish_under_migration_lock(
+            root,
+            config_dir,
+            owner_account,
+            force,
+            move=True,
+        )
+    finally:
+        release_db_locks(held)
+
+
+def _finish_under_migration_lock(
+    root: Path,
+    config_dir: Path | None,
+    owner_account: str,
+    force: bool,
+    *,
+    move: bool,
+) -> MigrationResult:
+    """Replace the pid lock only after the caller has checked the daemon.
+
+    ``move`` is true only when the caller already holds the database flock.
+    A busy flock never reaches this function, so ``--force`` cannot delete
+    the pid lock and then fail. ``move`` is false when the marker is already
+    a regular file; that path does not relocate ``prime.db``.
+    """
+    lock = acquire_migration_lock(root, force=force)
+    keep = False
+    try:
+        if move:
+            return _migrate_holding_locks(root, config_dir, owner_account)
         return migrate_single_user(
             root,
             config_dir,

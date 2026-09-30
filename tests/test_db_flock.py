@@ -13,8 +13,14 @@ from praxis_prime.profiles.migrate import (
     MigrationBusy,
     _process_starttime,
     migrate_under_lock,
+    migration_lock_path,
 )
-from praxis_prime.state import StateDB
+from praxis_prime.state import (
+    MigrationInProgress,
+    StateDB,
+    acquire_exclusive_db_locks,
+    release_db_locks,
+)
 
 
 def _seed(data: Path, rows: int = 50) -> StateDB:
@@ -83,15 +89,17 @@ def test_live_lock_names_the_path_and_force_still_honours_the_flock(
     db = _seed(data, rows=3)
     start = _process_starttime(os.getpid())
     assert start is not None
-    (data / ".migration.lock").write_text(f"{os.getpid()}\n{start}\n", encoding="utf-8")
-    with pytest.raises(MigrationBusy, match=r"\.migration\.lock"):
-        migrate_under_lock(data, config, daemon_running=lambda: False)
+    lock_text = f"{os.getpid()}\n{start}\n"
+    (data / ".migration.lock").write_text(lock_text, encoding="utf-8")
     with pytest.raises(MigrationBusy, match=r"prime\.db\.lock"):
         migrate_under_lock(data, config, daemon_running=lambda: False, force=True)
+    assert (data / ".migration.lock").read_text(encoding="utf-8") == lock_text
     assert _count(db) == 3
     assert (data / "prime.db").is_file()
     db.close()
-    (data / ".migration.lock").write_text(f"{os.getpid()}\n{start}\n", encoding="utf-8")
+    with pytest.raises(MigrationBusy, match=r"\.migration\.lock"):
+        migrate_under_lock(data, config, daemon_running=lambda: False)
+    assert (data / ".migration.lock").read_text(encoding="utf-8") == lock_text
     result = migrate_under_lock(data, config, daemon_running=lambda: False, force=True)
     assert result.already is False
     assert not (data / ".migration.lock").exists()
@@ -134,3 +142,126 @@ def test_daemon_refusal_names_the_lock(tmp_path: Path, monkeypatch: pytest.Monke
     text = err.getvalue()
     assert ".migration.lock" in text
     assert "profile migrate --force" in text
+
+
+def test_shared_locks_do_not_block_each_other(tmp_path: Path) -> None:
+    data = tmp_path / "data"
+    first = _seed(data, rows=1)
+    second = StateDB(data / "prime.db")
+    try:
+        assert _count(first) == 1
+        assert _count(second) == 1
+    finally:
+        second.close()
+        first.close()
+
+
+def test_opener_does_not_wait_or_recreate_during_migration(tmp_path: Path) -> None:
+    data = tmp_path / "data"
+    config = tmp_path / "config"
+    config.mkdir()
+    _seed(data, rows=4).close()
+    legacy = data / "prime.db"
+    held = acquire_exclusive_db_locks([legacy])
+    failed = threading.Event()
+
+    def opener() -> None:
+        try:
+            StateDB(legacy)
+        except MigrationInProgress as exc:
+            if "migration in progress" in str(exc):
+                failed.set()
+
+    thread = threading.Thread(target=opener)
+    thread.start()
+    thread.join(2)
+    assert not thread.is_alive()
+    assert failed.is_set()
+    release_db_locks(held)
+    migrated = migrate_under_lock(data, config, daemon_running=lambda: False)
+    assert migrated.already is False
+    with pytest.raises(MigrationInProgress, match="migration in progress"):
+        StateDB(legacy)
+    assert not legacy.exists()
+    moved = StateDB(data / "profiles" / "default" / "prime.db")
+    try:
+        assert _count(moved) == 4
+    finally:
+        moved.close()
+
+
+def test_slow_open_after_the_move_does_not_create_legacy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import praxis_prime.state as state_mod
+
+    data = tmp_path / "data"
+    config = tmp_path / "config"
+    config.mkdir()
+    _seed(data, rows=3).close()
+    started = threading.Event()
+    release = threading.Event()
+    ident: dict[str, int] = {}
+    real = state_mod._open_lock_fd
+
+    def slow(path: Path) -> int:
+        if threading.get_ident() == ident.get("id"):
+            started.set()
+            assert release.wait(5)
+        return real(path)
+
+    monkeypatch.setattr(state_mod, "_open_lock_fd", slow)
+    errors: list[str] = []
+
+    def open_db() -> None:
+        ident["id"] = threading.get_ident()
+        try:
+            StateDB(data / "prime.db")
+        except MigrationInProgress as exc:
+            errors.append(str(exc))
+
+    thread = threading.Thread(target=open_db)
+    thread.start()
+    assert started.wait(3)
+    migrate_under_lock(data, config, daemon_running=lambda: False)
+    release.set()
+    thread.join(5)
+    assert not thread.is_alive()
+    assert errors
+    assert "migration in progress" in errors[0]
+    assert not (data / "prime.db").exists()
+    moved = StateDB(data / "profiles" / "default" / "prime.db")
+    try:
+        assert _count(moved) == 3
+    finally:
+        moved.close()
+
+
+def test_cli_openers_refuse_while_the_migration_lock_exists(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    home = tmp_path / "home"
+    data = home / ".local" / "share" / "praxis-prime"
+    _seed(data, rows=1).close()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_DATA_HOME", str(home / ".local" / "share"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(home / ".local" / "state"))
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "run"))
+    (tmp_path / "run").mkdir()
+    migration_lock_path(data).write_text("1\n1\n", encoding="utf-8")
+    from praxis_prime.cli import main
+    from praxis_prime.runtime import build_runtime
+
+    with pytest.raises(MigrationInProgress, match="migration in progress"):
+        build_runtime(env=os.environ)
+    assert main(["routines", "list"]) == 2
+    assert "migration in progress" in capsys.readouterr().err
+    assert main(["chat", "--local"]) == 2
+    assert "migration in progress" in capsys.readouterr().err
+    assert (data / "prime.db").is_file()
+    reopened = StateDB(data / "prime.db", allow_during_migration=True)
+    try:
+        assert _count(reopened) == 1
+    finally:
+        reopened.close()
