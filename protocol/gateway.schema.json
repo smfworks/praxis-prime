@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/smfworks/praxis-prime/protocol/gateway.schema.json",
+  "title": "Praxis Prime gateway frame",
+  "description": "One JSON frame for every client. WebSocket is the session transport. HTTP carries health, status, and approvals with the same payloads. Loopback only.",
+  "type": "object",
+  "required": ["type", "id"],
+  "properties": {
+    "type": {
+      "type": "string",
+      "enum": [
+        "connect",
+        "hello",
+        "ping",
+        "pong",
+        "status",
+        "chat.send",
+        "approvals.list",
+        "approvals.decide",
+        "model.set",
+        "session.drop",
+        "event",
+        "result",
+        "error"
+      ]
+    },
+    "id": { "type": "string" },
+    "idempotencyKey": { "type": "string" },
+    "sessionId": { "type": "string" },
+    "ok": { "type": "boolean" },
+    "payload": { "type": "object" }
+  },
+  "additionalProperties": false
+}

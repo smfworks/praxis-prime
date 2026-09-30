@@ -2,8 +2,9 @@
 
 Console scripts: ``praxis-prime`` and the alias ``pprime``.
 
-``chat`` and ``ask`` run the agent loop in this process. The daemon entry
-point stays in ``praxis_prime.daemon`` and does not listen.
+``chat`` and ``ask`` attach to a running ``praxis-primed`` when one is
+healthy, and run the agent loop in this process otherwise. ``--local``
+always stays in this process.
 
 ARCHITECTURE §24 and §33.
 """
@@ -36,6 +37,14 @@ def main(argv: list[str] | None = None) -> int:
         return _chat_command(args)
     if args.command == "ask":
         return _ask_command(args)
+    if args.command == "daemon":
+        return _daemon_command(args)
+    if args.command == "service":
+        return _service_command(args)
+    if args.command == "approvals":
+        return _approvals_command(args)
+    if args.command == "telegram":
+        return _telegram_command(args)
     parser.print_help()
     return 2
 
@@ -82,6 +91,42 @@ def build_parser() -> argparse.ArgumentParser:
     )
     ask.add_argument("prompt", nargs="+", help="The question to ask.")
     _add_runtime_args(ask)
+
+    daemon = commands.add_parser("daemon", help="Start, stop, or inspect praxis-primed.")
+    daemon_commands = daemon.add_subparsers(dest="daemon_command")
+    daemon_commands.add_parser("start", help="Start the daemon in the background.")
+    daemon_commands.add_parser("stop", help="Ask the daemon to shut down.")
+    daemon_commands.add_parser("status", help="Show whether the daemon is healthy.")
+    logs = daemon_commands.add_parser("logs", help="Print recent daemon log lines.")
+    logs.add_argument("--lines", type=int, default=80, help="How many lines to print.")
+
+    service = commands.add_parser(
+        "service",
+        help="Install or remove the systemd --user unit (Ubuntu and Arch/Omarchy).",
+    )
+    service_commands = service.add_subparsers(dest="service_command")
+    service_commands.add_parser("install", help="Write, enable, and start praxis-prime.service.")
+    service_commands.add_parser("uninstall", help="Disable and remove praxis-prime.service.")
+
+    approvals = commands.add_parser("approvals", help="List or decide pending approvals.")
+    approval_commands = approvals.add_subparsers(dest="approvals_command")
+    approval_commands.add_parser("list", help="List approvals waiting on the daemon.")
+    approve = approval_commands.add_parser("approve", help="Allow a pending approval.")
+    approve.add_argument("approval_id")
+    approve.add_argument(
+        "--session",
+        action="store_true",
+        help="Allow this action for the rest of its session.",
+    )
+    deny = approval_commands.add_parser("deny", help="Deny a pending approval.")
+    deny.add_argument("approval_id")
+
+    telegram = commands.add_parser("telegram", help="Pair the Telegram bot with your chat.")
+    telegram_commands = telegram.add_subparsers(dest="telegram_command")
+    telegram_commands.add_parser(
+        "pair",
+        help="Print a one-time code. Send it to the bot as /pair CODE.",
+    )
     return parser
 
 
@@ -96,14 +141,42 @@ def _add_runtime_args(parser: argparse.ArgumentParser) -> None:
         "--data-dir",
         help="Data directory for prime.db. Defaults to the XDG data path.",
     )
+    parser.add_argument(
+        "--local",
+        action="store_true",
+        help="Run in this process even when a daemon is already running.",
+    )
 
 
 def _chat_command(args: argparse.Namespace) -> int:
-    from praxis_prime.repl import run_repl, stdout_writer, terminal_approver
+    from praxis_prime.repl import run_remote_repl, run_repl, stdout_writer, terminal_approver
     from praxis_prime.runtime import build_runtime
 
     color = _use_color(sys.stdout)
     writer = stdout_writer()
+    endpoint = _endpoint_for(args)
+    if endpoint is not None:
+        from praxis_prime.gateway.client import GatewayClient, GatewayError
+
+        print(
+            f"attached to praxis-primed at {endpoint.host}:{endpoint.port}",
+            file=sys.stderr,
+        )
+        try:
+            client = GatewayClient.connect(endpoint)
+        except (OSError, GatewayError, TimeoutError) as exc:
+            print(f"praxis-prime chat: {exc}", file=sys.stderr)
+            return 1
+        try:
+            return run_remote_repl(
+                client,
+                read_line=input,
+                write=writer,
+                color=color,
+                interactive=sys.stdin.isatty(),
+            )
+        finally:
+            client.close()
     approver = terminal_approver(input, writer, color=color)
     try:
         runtime = _runtime_from_args(args, approver, build_runtime)
@@ -126,8 +199,10 @@ def _ask_command(args: argparse.Namespace) -> int:
     from praxis_prime.repl import (
         noninteractive_approver,
         run_ask,
+        run_remote_ask,
         stdout_writer,
         terminal_approver,
+        tty_decider,
     )
     from praxis_prime.runtime import build_runtime
 
@@ -137,6 +212,32 @@ def _ask_command(args: argparse.Namespace) -> int:
         return 2
     err = stdout_writer(sys.stderr)
     color = _use_color(sys.stderr)
+    endpoint = _endpoint_for(args)
+    if endpoint is not None:
+        from praxis_prime.gateway.client import GatewayClient, GatewayError
+
+        print(
+            f"attached to praxis-primed at {endpoint.host}:{endpoint.port}",
+            file=sys.stderr,
+        )
+        try:
+            client = GatewayClient.connect(endpoint)
+        except (OSError, GatewayError, TimeoutError) as exc:
+            print(f"praxis-prime ask: {exc}", file=sys.stderr)
+            return 1
+        try:
+            decider = tty_decider(err) if sys.stdin.isatty() else None
+            return run_remote_ask(
+                client,
+                prompt,
+                write_out=stdout_writer(),
+                write_err=err,
+                color=color,
+                decider=decider,
+                session_id=args.session,
+            )
+        finally:
+            client.close()
     if sys.stdin.isatty():
         approver = terminal_approver(input, err, color=color)
     else:
@@ -181,6 +282,102 @@ def _use_color(stream: object) -> bool:
         return False
     isatty = getattr(stream, "isatty", None)
     return bool(isatty and isatty())
+
+
+def _endpoint_for(args: argparse.Namespace):
+    if getattr(args, "local", False) or args.config_dir or args.data_dir:
+        return None
+    from praxis_prime.gateway.discover import discover
+
+    return discover()
+
+
+def _daemon_command(args: argparse.Namespace) -> int:
+    from praxis_prime.daemon import show_logs, start_detached, status, stop_running
+
+    if args.daemon_command == "start":
+        return start_detached()
+    if args.daemon_command == "stop":
+        return stop_running()
+    if args.daemon_command == "status":
+        return status()
+    if args.daemon_command == "logs":
+        count = args.lines if isinstance(args.lines, int) and args.lines > 0 else 80
+        return show_logs(count)
+    print("usage: praxis-prime daemon {start|stop|status|logs}", file=sys.stderr)
+    return 2
+
+
+def _service_command(args: argparse.Namespace) -> int:
+    from praxis_prime.service import install, uninstall
+
+    if args.service_command == "install":
+        return install()
+    if args.service_command == "uninstall":
+        return uninstall()
+    print("usage: praxis-prime service {install|uninstall}", file=sys.stderr)
+    return 2
+
+
+def _approvals_command(args: argparse.Namespace) -> int:
+    from praxis_prime.approvals.card import format_approval_card
+    from praxis_prime.gateway.client import GatewayClient, GatewayError
+    from praxis_prime.gateway.discover import discover
+
+    if args.approvals_command not in {"list", "approve", "deny"}:
+        print("usage: praxis-prime approvals {list|approve|deny}", file=sys.stderr)
+        return 2
+    endpoint = discover()
+    if endpoint is None:
+        print("praxis-primed is not running", file=sys.stderr)
+        return 1
+    try:
+        client = GatewayClient.connect(endpoint)
+    except (OSError, GatewayError, TimeoutError) as exc:
+        print(f"praxis-prime approvals: {exc}", file=sys.stderr)
+        return 1
+    try:
+        if args.approvals_command == "list":
+            items = client.list_approvals()
+            if not items:
+                print("no pending approvals")
+                return 0
+            for item in items:
+                print(format_approval_card(item))
+                print()
+            return 0
+        decision = "allow_session" if args.approvals_command == "approve" and args.session else ""
+        if args.approvals_command == "approve" and not decision:
+            decision = "allow_once"
+        if args.approvals_command == "deny":
+            decision = "deny"
+        client.decide(args.approval_id, decision)
+    except GatewayError as exc:
+        print(f"praxis-prime approvals: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        client.close()
+    print(f"{decision} {args.approval_id}")
+    return 0
+
+
+def _telegram_command(args: argparse.Namespace) -> int:
+    from praxis_prime.channels.telegram import PairingStore
+    from praxis_prime.paths import data_dir, state_dir
+
+    if args.telegram_command != "pair":
+        print("usage: praxis-prime telegram pair", file=sys.stderr)
+        return 2
+    store = PairingStore(
+        state_dir() / "telegram-pairing.json",
+        data_dir() / "telegram-owner.json",
+    )
+    code = store.issue()
+    print("Send this to your Praxis Prime bot within 10 minutes:")
+    print(f"/pair {code}")
+    print("Only the chat that sends the code becomes the owner.")
+    print("The code was not written to config.toml.")
+    return 0
 
 
 def _config_command(explicit: str | None, *, force: bool) -> int:

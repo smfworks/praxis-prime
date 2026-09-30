@@ -1,7 +1,7 @@
 # Protocol schemas
 
-Reserved for gateway and Decision Engine JSON Schemas, generated from Pydantic v2 models, plus the TypeScript types the UI will consume.
+`gateway.schema.json` is the frame every client sends on the loopback gateway (WebSocket, and the same payloads on HTTP for health, status, and approvals). The listen address is `127.0.0.1` only.
 
-Nothing is generated yet. The gateway must stay loopback-only.
+The Decision Engine schema is not generated yet.
 
-TODO: ARCHITECTURE §4 and §7.
+TODO: ARCHITECTURE §7 for `/v1/decide`. The gateway itself is ARCHITECTURE §4.

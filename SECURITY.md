@@ -1,6 +1,6 @@
 # Security policy
 
-Praxis Prime is **pre-alpha**. The `0.0.x` skeleton is not a security-supported release. The daemon does not listen, and the compliance dials do not enforce policy. Treat the code as a design skeleton, not as a control you can rely on.
+Praxis Prime is **pre-alpha**. It is not a security-supported release. `praxis-primed` listens on `127.0.0.1` only, and only when you start it. Compliance dials do not enforce policy. Treat the code as a pre-alpha agent, not as a control you can rely on.
 
 ## Reporting a vulnerability
 

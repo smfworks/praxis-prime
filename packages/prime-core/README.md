@@ -6,6 +6,6 @@ The Hatchling build maps `packages/prime-core/` onto the wheel root, so imports 
 
 - `praxis-prime`
 - `pprime` (alias)
-- `praxis-primed` (daemon stub)
+- `praxis-primed` (loopback daemon)
 
-The running kernel lives here: `loop/`, `router/`, `policy/`, `approvals/`, `tools/`, `sandbox/`, `memory/`, and `audit/`. FastAPI and Pydantic stay out until the gateway needs them (ARCHITECTURE §23 and §24).
+The running kernel lives here: `loop/`, `router/`, `policy/`, `approvals/`, `tools/`, `sandbox/`, `memory/`, `audit/`, `gateway/`, and `channels/`. The gateway is stdlib HTTP and WebSocket. FastAPI and Pydantic stay out (ARCHITECTURE §23 and §24).

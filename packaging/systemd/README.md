@@ -1,12 +1,21 @@
 # systemd user units
 
-These files are the units from ARCHITECTURE §26. They are not installed into `~/.config/systemd/user/`.
+`praxis-prime.service` is the kernel and gateway. It is the same unit on Ubuntu and on Arch/Omarchy: systemd user specifiers (`%h`, `%t`), no distro package manager, and no wait that requires a graphical session to be pulled in.
+
+Install it with:
+
+```bash
+praxis-prime service install
+praxis-prime service uninstall
+```
+
+`install` copies the unit to `$XDG_CONFIG_HOME/systemd/user/praxis-prime.service`, points `ExecStart` at the `praxis-primed` on `PATH`, and runs `systemctl --user enable --now`. It does not enable linger.
 
 | Unit | Role |
 |---|---|
-| `praxis-prime.service` | Kernel and gateway. The ExecStart binary is the stub daemon today. |
+| `praxis-prime.service` | Kernel and gateway. |
 | `praxis-prime-voice.service` | Jarvis layer. Off unless a person enables it. |
-| `praxis-prime-gateway@.service` | Optional out-of-process channel adapter. |
+| `praxis-prime-gateway@.service` | Optional out-of-process channel adapter. Not used by the in-process Telegram MVP. |
 | `praxis-prime-sweeper.timer` | Daily retention sweep backup. |
 | `praxis-prime-decide.timer` | Nightly Decision Engine recalibration. |
 

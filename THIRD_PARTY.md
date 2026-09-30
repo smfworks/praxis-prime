@@ -47,14 +47,18 @@ Octicons (MIT). Its icons include simple-icons (CC0) and devicon (MIT).
 files are copied. The TypeSafe extension talks to a hosted service; Praxis
 Prime does not use that service. See the Decision Engine note below.
 
-## What this skeleton actually contains
+## What this tree actually contains
 
 No file under this repository is a copy from Hermes, OpenClaw, Omarchy,
 TypeSafe, SMF Praxis, or SMF Swarm 2.0. The agent loop, router, tool
-registry, and audit chain are original code that follows patterns described
-in `docs/ARCHITECTURE.md` (Hermes prompt-cache invariants, OpenClaw
-steer/cancel, Praxis approval classes, Swarm's hash-chained audit idea).
-They are not vendored modules. When a file is later copied:
+registry, audit chain, loopback gateway, approval queue, Telegram adapter,
+and systemd unit are original code. They follow patterns described in
+`docs/ARCHITECTURE.md`: Hermes prompt-cache invariants, OpenClaw's
+connect-first gateway and the rule that chat text cannot approve, Praxis
+approval classes, and Swarm's hash-chained audit idea. The WebSocket
+handshake is the public RFC 6455 framing, written here, not taken from
+another project's socket stack. Nothing was vendored. When a file is later
+copied:
 
 1. Record the source repo, path, commit, and license in the table below.
 2. Keep the original copyright header.

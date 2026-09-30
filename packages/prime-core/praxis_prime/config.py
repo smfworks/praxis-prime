@@ -88,6 +88,7 @@ def default_config_document() -> dict[str, object]:
         "gateway": {
             "listen": "127.0.0.1:18790",
             "socket": "$XDG_RUNTIME_DIR/praxis-prime/prime.sock",
+            "approval_ttl_seconds": 900,
         },
         "budgets": {"daily_usd": 5.0, "per_task_usd": 1.0},
     }
