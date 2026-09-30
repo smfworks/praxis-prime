@@ -15,7 +15,12 @@ from collections.abc import AsyncIterator, Callable, Iterator, Mapping
 from pathlib import Path
 from urllib.parse import urlparse, urlunparse
 
-from praxis_prime.approvals.card import HOST_DATA_DIR, HOST_FULL_WRITE, mount_phrase
+from praxis_prime.approvals.card import (
+    HOST_DATA_DIR,
+    HOST_FULL_WRITE,
+    HOST_NEEDS_BWRAP,
+    mount_phrase,
+)
 from praxis_prime.approvals.gate import (
     ApprovalDecision,
     ApprovalGate,
@@ -605,13 +610,18 @@ class AgentLoop:
         """Say how this command runs if it is approved.
 
         A sandboxed command is a read-only mount or a read-write mount.
-        Without bubblewrap it runs on the host, so the card says that and
-        does not describe the run as read-only. A host command whose cwd
-        or tokens can reach the account data directory says it is refused.
+        Without bubblewrap, and with account or profile data on disk, the
+        card says to install bubblewrap and the command is not run. A fresh
+        install with no account data can still run on the host. That card
+        says so, and does not describe the run as read-only.
         """
         if tool_name not in {"shell", "run_command", "run_tests"}:
             return ""
         if not prepared.sandboxed:
+            from praxis_prime.policy.boundary import account_data_present
+
+            if account_data_present():
+                return HOST_NEEDS_BWRAP
             return HOST_FULL_WRITE + self._host_data_line(arguments)
         from praxis_prime.tools.shell import bind_is_writable
 

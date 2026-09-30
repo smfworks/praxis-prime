@@ -138,8 +138,10 @@ def execute_shell(arguments: Mapping[str, object], context: ToolContext) -> str:
         raise ValueError("shell requires a command string")
     timeout = _timeout(arguments.get("timeout_seconds"))
     cwd = Path(context.cwd)
-    from praxis_prime.policy.boundary import private_data_command
+    from praxis_prime.policy.boundary import account_data_present, private_data_command
 
+    if not bwrap_available() and account_data_present():
+        raise RuntimeError("install bubblewrap to run shell commands")
     if private_data_command(command, cwd):
         raise RuntimeError("refusing to read protected account or profile data")
     prepared = classify_command(command, workspace=cwd, cache=context.inode_cache)

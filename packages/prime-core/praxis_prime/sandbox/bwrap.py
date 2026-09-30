@@ -158,8 +158,10 @@ def _data_dir_mask(mounts: list[tuple[Path, str]]) -> list[str]:
     """Hide the account data directory when a bind mount contains it.
 
     A later ``--tmpfs`` covers that path inside the sandbox, so no command
-    string can read profiles, backups, or ``accounts.db``. The directory is
-    left alone when it is not on any mount.
+    string can read profiles, backups, or ``accounts.db``. Containment is
+    by real path and by ``(st_dev, st_ino)``, so a bind-mount alias of a
+    parent is masked too. A bind that sits inside the data directory is
+    refused. The directory is left alone when it is not on any mount.
     """
     from praxis_prime.policy.boundary import _data_root
     from praxis_prime.statfile import StatKind, lstat_kind
@@ -176,10 +178,12 @@ def _data_dir_mask(mounts: list[tuple[Path, str]]) -> list[str]:
     masked: list[str] = []
     seen: set[str] = set()
     for src, dest in mounts:
-        try:
-            src_real = Path(os.path.realpath(src, strict=False))
-            relative = data.relative_to(src_real)
-        except (OSError, ValueError):
+        if _bind_is_inside_data(src, data):
+            raise SandboxError(
+                "refusing to bind a directory inside the account data directory"
+            )
+        relative = _data_relative_to_mount(src, data)
+        if relative is None:
             continue
         sandbox = str(Path(dest) / relative)
         if sandbox in seen:
@@ -187,6 +191,67 @@ def _data_dir_mask(mounts: list[tuple[Path, str]]) -> list[str]:
         seen.add(sandbox)
         masked.extend(["--tmpfs", sandbox])
     return masked
+
+
+def _file_id(path: Path) -> tuple[int, int] | None:
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return (st.st_dev, st.st_ino)
+
+
+def _data_relative_to_mount(mount: Path, data: Path) -> Path | None:
+    """Path of ``data`` inside ``mount``, or None when ``mount`` does not contain it.
+
+    Walks ``data`` and its ancestors and matches ``(st_dev, st_ino)``, so a
+    bind-mount alias of a parent counts. A realpath prefix is the same check
+    when the two paths are not aliases.
+    """
+    mount_id = _file_id(mount)
+    current = data
+    parts: list[str] = []
+    while mount_id is not None:
+        ident = _file_id(current)
+        if ident is not None and ident == mount_id:
+            if not parts:
+                return None
+            return Path(*reversed(parts))
+        parent = current.parent
+        if parent == current:
+            break
+        parts.append(current.name)
+        current = parent
+    try:
+        mount_real = Path(os.path.realpath(mount, strict=False))
+        data_real = Path(os.path.realpath(data, strict=False))
+        relative = data_real.relative_to(mount_real)
+    except (OSError, ValueError):
+        return None
+    if relative == Path("."):
+        return None
+    return relative
+
+
+def _bind_is_inside_data(mount: Path, data: Path) -> bool:
+    """True when ``mount`` is the data directory or a path inside it."""
+    data_id = _file_id(data)
+    current = mount
+    while True:
+        ident = _file_id(current)
+        if data_id is not None and ident is not None and ident == data_id:
+            return True
+        parent = current.parent
+        if parent == current:
+            break
+        current = parent
+    try:
+        mount_real = Path(os.path.realpath(mount, strict=False))
+        data_real = Path(os.path.realpath(data, strict=False))
+        mount_real.relative_to(data_real)
+    except (OSError, ValueError):
+        return False
+    return True
 
 
 def run_bwrap(

@@ -96,6 +96,12 @@ def test_unsandboxed_shell_does_not_run_without_approval(monkeypatch, tmp_path):
 
     monkeypatch.setattr("praxis_prime.tools.shell.bwrap_available", lambda: False)
     monkeypatch.setattr("praxis_prime.tools.shell.run_host_shell", host)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
+    (tmp_path / "home").mkdir()
+    from praxis_prime.policy.boundary import bind_data_root
+
+    bind_data_root(None)
     prepared = classify_command("echo hi", sandbox_ready=False)
     assert prepared.force_approval is True
     try:
@@ -117,6 +123,12 @@ def test_approved_host_shell_runs_and_bwrap_failure_does_not_fall_back(monkeypat
 
     monkeypatch.setattr("praxis_prime.tools.shell.bwrap_available", lambda: False)
     monkeypatch.setattr("praxis_prime.tools.shell.run_host_shell", host)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
+    (tmp_path / "home").mkdir()
+    from praxis_prime.policy.boundary import bind_data_root
+
+    bind_data_root(None)
     assert execute_shell({"command": "echo hi"}, _ctx(tmp_path, host_approved=True)) == "ok"
     assert calls == ["echo hi"]
 

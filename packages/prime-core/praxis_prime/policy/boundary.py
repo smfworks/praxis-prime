@@ -723,12 +723,15 @@ def _assess_read(
 def private_data_command(command: str, workspace: Path) -> bool:
     """True when a shell command names account or profile data.
 
-    Quotes are parsed with ``shlex``. ``cd`` changes the directory later
-    tokens are judged against, and globs are expanded on the filesystem.
-    A recursive reader (``grep -r``, ``rg``, ``git grep``, ``ag``, ``ack``,
-    ``find -exec``, ``tar``, ``cp -r``, ``rsync``, ``zip -r``) is refused
-    when a path it walks contains the data directory. The bubblewrap mount
-    also hides that directory; this check is the host-shell backstop.
+    Quotes are parsed with ``shlex`` and ``punctuation_chars``, so ``;`` and
+    ``&&`` split even when they are not surrounded by spaces. ``cd`` changes
+    the directory later tokens are judged against, and globs are expanded on
+    the filesystem. ``cd -`` fails closed. A recursive reader (``grep -r``,
+    ``rg``, ``git grep``, ``ag``, ``ack``, ``find -exec``, ``tar``, ``cp -r``,
+    ``rsync``, ``zip -r``) is refused when a path it walks contains the data
+    directory. Bubblewrap also hides that directory. Without bubblewrap,
+    host shell is refused outright once account data exists; this check is
+    defence in depth.
     """
     root = _data_root()
     if root is None:
@@ -736,10 +739,41 @@ def private_data_command(command: str, workspace: Path) -> bool:
     if str(root) in command:
         return True
     try:
-        tokens = shlex.split(command, posix=True)
+        tokens = _shell_tokens(command)
     except ValueError:
         return True
     return _command_reaches_data(tokens, workspace, root)
+
+
+def account_data_present() -> bool:
+    """True when the data directory holds accounts, profiles, or their files.
+
+    A missing or empty data directory is a fresh install. Host shell is
+    allowed only in that case, and only when bubblewrap is unavailable.
+    """
+    root = _data_root()
+    if root is None:
+        return True
+    kind = lstat_kind(root)
+    if kind is StatKind.MISSING:
+        return False
+    if kind is not StatKind.DIR:
+        return True
+    for name in ("accounts.db", "profiles", "backups", "prime.db", "SOUL.md"):
+        if lstat_kind(root / name) is not StatKind.MISSING:
+            return True
+    try:
+        children = list(root.iterdir())
+    except OSError:
+        return True
+    return any(child.name.startswith("accounts.db") for child in children)
+
+
+def _shell_tokens(command: str) -> list[str]:
+    """Split a shell command. Punctuation such as ``;`` and ``&&`` is its own token."""
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+    lexer.commenters = ""
+    return list(lexer)
 
 
 _data_root_lock = threading.Lock()
@@ -1083,14 +1117,14 @@ def _cd_destination(argv: list[str], cwd: Path) -> tuple[Path | None, bool]:
     unwrapped = _unwrap_command(argv)
     if not unwrapped or Path(unwrapped[0]).name != "cd":
         return None, False
+    if any(arg == "-" for arg in unwrapped[1:]):
+        return None, True
     args = [arg for arg in unwrapped[1:] if arg != "--" and not arg.startswith("-")]
     if not args:
         try:
             return Path.home().resolve(), False
         except OSError:
             return None, True
-    if args[0] == "-":
-        return None, True
     path = Path(args[0])
     if not path.is_absolute():
         path = Path(cwd) / path
