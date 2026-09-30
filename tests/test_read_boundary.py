@@ -6,6 +6,7 @@ import logging
 import os
 import shutil
 import socket
+from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Thread
@@ -15,7 +16,12 @@ from tests.fakes import ScriptedProvider
 
 from praxis_prime.approvals.gate import ApprovalGate
 from praxis_prime.audit.log import AuditLog
-from praxis_prime.coding.tools import execute_glob, execute_grep
+from praxis_prime.coding.tools import (
+    execute_edit_file,
+    execute_glob,
+    execute_grep,
+    execute_write_file,
+)
 from praxis_prime.loop.engine import AgentLoop, _reuses_inode_cache
 from praxis_prime.loop.events import StatusEvent
 from praxis_prime.policy import boundary as boundary_mod
@@ -594,6 +600,192 @@ def test_large_indexeddb_tree_stays_readable(tmp_path: Path, monkeypatch, reques
     denial = _denied(execute_read_file, {"path": "notes.txt"}, ctx)
     assert denial.code == "secret_path"
     assert SECRET not in str(denial)
+
+
+def test_symlinked_chrome_profile_with_a_large_cache_stays_readable(
+    tmp_path: Path, monkeypatch, request: pytest.FixtureRequest
+):
+    """A profile-sync symlink keeps the cache skip and the browser budget."""
+    home = tmp_path / "home"
+    real = tmp_path / "tmpfs" / "google-chrome"
+    request.addfinalizer(lambda: _drop_tree(real))
+    cache = real / "Default" / "Cache"
+    _touch_count(cache, 25_000)
+    login = real / "Default" / "Login Data"
+    login.parent.mkdir(parents=True, exist_ok=True)
+    login.write_text(SECRET, encoding="utf-8")
+    link = home / ".config" / "google-chrome"
+    link.parent.mkdir(parents=True)
+    link.symlink_to(real, target_is_directory=True)
+    root = tmp_path / "ws"
+    root.mkdir()
+    (root / "hello.txt").write_text("hello\n", encoding="utf-8")
+    os.link(login, root / "notes.txt")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    assert boundary_mod._is_lexical_browser_root(link, include_gcloud=False)
+    assert (
+        boundary_mod._directory_entry_budget(link, True)
+        == boundary_mod._MAX_BROWSER_SCAN_ENTRIES
+    )
+    # The old 20k cap is what made this profile fail closed. The cache skip
+    # has to keep those entries off the budget.
+    monkeypatch.setattr(
+        "praxis_prime.policy.boundary._MAX_BROWSER_SCAN_ENTRIES",
+        boundary_mod._MAX_SCAN_ENTRIES,
+    )
+    ctx = _ctx(root)
+    assert execute_read_file({"path": "hello.txt"}, ctx) == "hello\n"
+    denial = _denied(execute_read_file, {"path": "notes.txt"}, ctx)
+    assert denial.code == "secret_path"
+    assert SECRET not in str(denial)
+
+
+def test_flatpak_config_outside_the_profile_dir_is_scanned(tmp_path: Path, monkeypatch):
+    home = tmp_path / "home"
+    secret = (
+        home / ".var" / "app" / "com.google.Chrome" / "config" / "outside-profile" / "Cookies"
+    )
+    secret.parent.mkdir(parents=True)
+    secret.write_text(SECRET, encoding="utf-8")
+    root = tmp_path / "ws"
+    root.mkdir()
+    (root / "hello.txt").write_text("hello\n", encoding="utf-8")
+    os.link(secret, root / "notes.txt")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    assert is_secret_path(secret)
+    ctx = _ctx(root)
+    assert execute_read_file({"path": "hello.txt"}, ctx) == "hello\n"
+    denial = _denied(execute_read_file, {"path": "notes.txt"}, ctx)
+    assert denial.code == "secret_path"
+    assert SECRET not in str(denial)
+
+
+def test_flatpak_data_keyrings_are_denied(tmp_path: Path, monkeypatch):
+    home = tmp_path / "home"
+    keyrings = home / ".var" / "app" / "com.example.App" / "data" / "keyrings"
+    keyrings.mkdir(parents=True)
+    secret = keyrings / "default.keyring"
+    secret.write_text(SECRET, encoding="utf-8")
+    plain = keyrings / "readme.txt"
+    plain.write_text(SECRET, encoding="utf-8")
+    root = tmp_path / "ws"
+    workspace_note = root / ".var" / "app" / "com.example.App" / "data" / "keyrings" / "notes.md"
+    workspace_note.parent.mkdir(parents=True)
+    workspace_note.write_text("hello\n", encoding="utf-8")
+    (root / "hello.txt").write_text("hello\n", encoding="utf-8")
+    os.link(secret, root / "notes.txt")
+    os.link(plain, root / "plain.txt")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    assert is_secret_path(secret)
+    assert is_secret_path(plain)
+    assert not is_secret_path(workspace_note)
+    ctx = _ctx(root)
+    assert execute_read_file({"path": "hello.txt"}, ctx) == "hello\n"
+    assert execute_read_file({"path": ".var/app/com.example.App/data/keyrings/notes.md"}, ctx) == (
+        "hello\n"
+    )
+    for name in ("notes.txt", "plain.txt"):
+        denial = _denied(execute_read_file, {"path": name}, ctx)
+        assert denial.code == "secret_path", name
+        assert SECRET not in str(denial)
+
+
+def test_unreadable_credential_dir_fails_closed(tmp_path: Path, monkeypatch):
+    home = tmp_path / "home"
+    ssh = home / ".ssh"
+    ssh.mkdir(parents=True)
+    key = ssh / "id_ed25519"
+    key.write_text(SECRET, encoding="utf-8")
+    root = tmp_path / "ws"
+    root.mkdir()
+    (root / "hello.txt").write_text("hello\n", encoding="utf-8")
+    os.link(key, root / "notes.txt")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    monkeypatch.setattr("praxis_prime.policy.boundary._inode_candidates", lambda: [ssh])
+    os.chmod(ssh, 0)
+    try:
+        ctx = _ctx(root)
+        denial = _denied(execute_read_file, {"path": "hello.txt"}, ctx)
+        assert denial.code == "inode_scan_capped"
+        assert "could not list" in str(denial)
+        denied = _denied(execute_read_file, {"path": "notes.txt"}, ctx)
+        assert denied.code == "inode_scan_capped"
+        assert SECRET not in str(denied)
+    finally:
+        os.chmod(ssh, 0o700)
+
+
+def test_unreadable_profile_dir_fails_closed(tmp_path: Path, monkeypatch):
+    home = tmp_path / "home"
+    profile = home / ".config" / "google-chrome" / "Default"
+    profile.mkdir(parents=True)
+    login = profile / "Login Data"
+    login.write_text(SECRET, encoding="utf-8")
+    root = tmp_path / "ws"
+    root.mkdir()
+    (root / "hello.txt").write_text("hello\n", encoding="utf-8")
+    os.link(login, root / "notes.txt")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    os.chmod(profile, 0)
+    try:
+        ctx = _ctx(root)
+        denial = _denied(execute_read_file, {"path": "notes.txt"}, ctx)
+        assert denial.code == "inode_scan_capped"
+        assert "could not list" in str(denial)
+        assert SECRET not in str(denial)
+    finally:
+        os.chmod(profile, 0o700)
+
+
+def test_unreadable_cache_dir_fails_closed(tmp_path: Path, monkeypatch):
+    home = tmp_path / "home"
+    nested = home / ".config" / "google-chrome" / "Default" / "Cache" / "x"
+    nested.mkdir(parents=True)
+    login = nested / "Login Data"
+    login.write_text(SECRET, encoding="utf-8")
+    root = tmp_path / "ws"
+    root.mkdir()
+    (root / "hello.txt").write_text("hello\n", encoding="utf-8")
+    os.link(login, root / "notes.txt")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    os.chmod(nested, 0)
+    try:
+        ctx = _ctx(root)
+        denial = _denied(execute_read_file, {"path": "hello.txt"}, ctx)
+        assert denial.code == "inode_scan_capped"
+        assert "could not list" in str(denial)
+        denied = _denied(execute_read_file, {"path": "notes.txt"}, ctx)
+        assert denied.code == "inode_scan_capped"
+        assert SECRET not in str(denied)
+    finally:
+        os.chmod(nested, 0o700)
+
+
+def test_edit_and_write_reuse_the_loop_inode_cache(tmp_path: Path, monkeypatch):
+    root = tmp_path / "ws"
+    root.mkdir()
+    calls = {"n": 0}
+    real = boundary_mod._scan_secret_inodes
+
+    def counting() -> set[tuple[int, int]]:
+        calls["n"] += 1
+        return real()
+
+    monkeypatch.setattr("praxis_prime.policy.boundary._scan_secret_inodes", counting)
+    ctx = replace(_ctx(root), inode_cache=InodeScanCache())
+    execute_write_file({"path": "note.txt", "content": "hello\n"}, ctx)
+    execute_edit_file(
+        {"path": "note.txt", "old_string": "hello\n", "new_string": "hello!\n"},
+        ctx,
+    )
+    assert calls["n"] == 1
+    assert (root / "note.txt").read_text(encoding="utf-8") == "hello!\n"
 
 
 def test_skipped_cache_names_are_not_credential_paths():
@@ -1328,7 +1520,9 @@ def test_profile_symlink_outside_home_is_not_walked(tmp_path: Path, monkeypatch)
         return real_walk(top, *args, **kwargs)
 
     monkeypatch.setattr("praxis_prime.policy.boundary.os.walk", guarded)
-    assert execute_read_file({"path": "hello.txt"}, _ctx(root)) == "hello\n"
+    denial = _denied(execute_read_file, {"path": "hello.txt"}, _ctx(root))
+    assert denial.code == "inode_scan_capped"
+    assert "unbounded root" in str(denial)
 
 
 def test_scan_skips_only_root_proc_and_sys():
@@ -1392,7 +1586,10 @@ def test_root_proc_and_sys_symlinks_are_not_walked(
         return real_walk(top, *args, **kwargs)
 
     monkeypatch.setattr("praxis_prime.policy.boundary.os.walk", guarded)
-    assert execute_read_file({"path": "hello.txt"}, _ctx(root)) == "hello\n"
+    denial = _denied(execute_read_file, {"path": "hello.txt"}, _ctx(root))
+    assert denial.code == "inode_scan_capped"
+    assert "unbounded root" in str(denial)
+    assert "hello" not in str(denial)
 
 
 def test_proc_subdirectory_is_entry_budgeted(tmp_path: Path, monkeypatch, caplog):
@@ -1492,7 +1689,9 @@ def test_generic_symlink_over_budget_still_fails_closed(tmp_path: Path, monkeypa
     (root / "hello.txt").write_text("hello\n", encoding="utf-8")
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setattr("praxis_prime.policy.boundary._inode_candidates", lambda: [link])
-    monkeypatch.setattr("praxis_prime.policy.boundary._MAX_SCAN_ENTRIES", 1)
+    # The path is a browser root even though it is a symlink, so the walk
+    # uses the browser budget. ``/usr`` still has to fail closed.
+    monkeypatch.setattr("praxis_prime.policy.boundary._MAX_BROWSER_SCAN_ENTRIES", 1)
     with caplog.at_level(logging.WARNING, logger="praxis_prime.policy.boundary"):
         denial = _denied(execute_read_file, {"path": "hello.txt"}, _ctx(root))
     assert denial.code == "inode_scan_capped"

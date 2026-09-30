@@ -118,8 +118,11 @@ def _profile(
 # deny the whole ``snap/<app>`` tree: Brave, Vivaldi, and Opera keep the
 # profile at ``<rev>/.config/<name>/``, and ``current`` is a symlink to that
 # revision. Chromium and Firefox profiles under ``common/`` are inside the
-# same prefix. Flatpak rows deny the app config prefix and scan the profile
-# directory under it.
+# same prefix. Flatpak Chromium-family rows scan and deny the whole
+# ``config/`` tree. Chrome beta, Brave beta/nightly, Thorium, and Vivaldi
+# snapshot are not published Flatpak app IDs. Chrome Dev and Ungoogled
+# Chromium (current and legacy ids) are. ``~/.var/app/*/data/keyrings`` is
+# denied and scanned separately.
 _BROWSER_PROFILES: tuple[_BrowserProfile, ...] = (
     _profile((".config", "gcloud")),
     _profile((".config", "google-chrome")),
@@ -140,32 +143,19 @@ _BROWSER_PROFILES: tuple[_BrowserProfile, ...] = (
     _profile(("snap", "brave")),
     _profile(("snap", "opera")),
     _profile(("snap", "vivaldi")),
+    _profile((".var", "app", "com.google.Chrome", "config")),
+    _profile((".var", "app", "com.google.ChromeDev", "config")),
+    _profile((".var", "app", "org.chromium.Chromium", "config")),
     _profile(
-        (".var", "app", "com.google.Chrome", "config", "google-chrome"),
-        (".var", "app", "com.google.Chrome", "config"),
+        (".var", "app", "io.github.ungoogled_software.ungoogled_chromium", "config")
     ),
-    _profile(
-        (".var", "app", "org.chromium.Chromium", "config", "chromium"),
-        (".var", "app", "org.chromium.Chromium", "config"),
-    ),
+    _profile((".var", "app", "com.github.Eloston.UngoogledChromium", "config")),
     _profile((".var", "app", "org.mozilla.firefox", ".mozilla")),
     _profile((".var", "app", "org.mozilla.firefox", "config")),
-    _profile(
-        (".var", "app", "com.brave.Browser", "config", "BraveSoftware"),
-        (".var", "app", "com.brave.Browser", "config"),
-    ),
-    _profile(
-        (".var", "app", "com.microsoft.Edge", "config", "microsoft-edge"),
-        (".var", "app", "com.microsoft.Edge", "config"),
-    ),
-    _profile(
-        (".var", "app", "com.opera.Opera", "config", "opera"),
-        (".var", "app", "com.opera.Opera", "config"),
-    ),
-    _profile(
-        (".var", "app", "com.vivaldi.Vivaldi", "config", "vivaldi"),
-        (".var", "app", "com.vivaldi.Vivaldi", "config"),
-    ),
+    _profile((".var", "app", "com.brave.Browser", "config")),
+    _profile((".var", "app", "com.microsoft.Edge", "config")),
+    _profile((".var", "app", "com.opera.Opera", "config")),
+    _profile((".var", "app", "com.vivaldi.Vivaldi", "config")),
 )
 _BROWSER_CONFIG = frozenset(
     profile.deny[1].lower()
@@ -766,9 +756,22 @@ def _home_browser_prefix(parts: Sequence[str]) -> bool:
         if len(parts) < len(home) or parts[: len(home)] != home:
             continue
         relative = parts[len(home) :]
+        if _is_flatpak_keyrings(relative):
+            return True
         if any(relative[: len(prefix)] == prefix for prefix in _HOME_BROWSER_PREFIXES):
             return True
     return False
+
+
+def _is_flatpak_keyrings(relative: tuple[str, ...]) -> bool:
+    """True for ``.var/app/<id>/data/keyrings`` and anything under it."""
+    return (
+        len(relative) >= 5
+        and relative[0] == ".var"
+        and relative[1] == "app"
+        and relative[3] == "data"
+        and relative[4] == "keyrings"
+    )
 
 
 def _absolute_xdg_config_home() -> Path | None:
@@ -831,6 +834,15 @@ def _xdg_browser_roots(home: Path) -> list[Path]:
     ]
 
 
+def _flatpak_keyring_dirs(home: Path) -> list[Path]:
+    """Existing ``~/.var/app/*/data/keyrings`` directories."""
+    root = home / ".var" / "app"
+    try:
+        return list(root.glob("*/data/keyrings"))
+    except OSError:
+        return []
+
+
 def _inode_candidates() -> list[Path]:
     home = Path.home()
     paths = [
@@ -843,6 +855,7 @@ def _inode_candidates() -> list[Path]:
     ]
     paths.extend(home.joinpath(*profile.scan) for profile in _BROWSER_PROFILES)
     paths.extend(_xdg_browser_roots(home))
+    paths.extend(_flatpak_keyring_dirs(home))
     paths.extend(
         [
             home / ".netrc",
@@ -955,7 +968,7 @@ def _record_cache_secret_inodes(
         try:
             children = list(os.scandir(current))
         except OSError:
-            continue
+            return _CapHit(0, "unreadable-directory")
         tally.examined += len(children)
         if tally.examined > _MAX_CACHE_NAME_ENTRIES:
             return _CapHit(_MAX_CACHE_NAME_ENTRIES, "cache-name")
@@ -997,10 +1010,13 @@ class _CapHit:
 
 
 def _refuse_capped_inode_scan(limit: int, kind: str) -> None:
-    message = (
-        f"secret inode scan hit the {limit} {kind} cap; "
-        "denying the read because a secret file could have been missed"
-    )
+    if kind == "unbounded-root":
+        detail = "secret inode scan refused an unbounded root"
+    elif kind == "unreadable-directory":
+        detail = "secret inode scan could not list a directory"
+    else:
+        detail = f"secret inode scan hit the {limit} {kind} cap"
+    message = f"{detail}; denying the read because a secret file could have been missed"
     _log.warning(message)
     raise ReadDenied(message, "inode_scan_capped")
 
@@ -1032,8 +1048,9 @@ def _is_unbounded_scan_root(path: Path) -> bool:
     """True when a walk would be ``/``, ``/proc``, ``/sys``, or the same inode as ``/``.
 
     ``/etc``, ``/usr``, and ``/dev`` are walked with the entry budget. A path
-    that resolves to ``/`` (for example ``/etc/..``) is the whole filesystem
-    and is skipped. A resolve failure skips the root.
+    that resolves to ``/`` (for example ``/etc/..``) is the whole filesystem.
+    A resolve failure is treated as unbounded. The caller fails the scan
+    closed instead of skipping the root.
     """
     try:
         posix = path.resolve(strict=False).as_posix()
@@ -1070,13 +1087,14 @@ def _is_browser_scan_root(path: Path) -> bool:
 
 
 def _is_lexical_browser_root(path: Path, *, include_gcloud: bool) -> bool:
-    """True when ``path`` itself is a browser scan root, not a symlink to one.
+    """True when ``path`` is a configured browser scan root.
 
-    ``include_gcloud`` is false for the disk-cache skip. The gcloud row stays
-    on the named walk, so ``cache/x/credentials.db`` is recorded there.
+    The path is compared as given, so a profile-sync symlink such as
+    ``~/.config/google-chrome`` -> tmpfs still matches. ``~/.ssh`` does not,
+    even when that symlink points at a profile. ``include_gcloud`` is false
+    for the disk-cache skip. The gcloud row stays on the named walk, so
+    ``cache/x/credentials.db`` is recorded there.
     """
-    if path.is_symlink():
-        return False
     home = Path.home()
     for candidate in _browser_scan_candidates(home):
         if not include_gcloud and candidate.name.lower() == "gcloud":
@@ -1086,21 +1104,22 @@ def _is_lexical_browser_root(path: Path, *, include_gcloud: bool) -> bool:
     return False
 
 
-def _resolve_scan_root(path: Path) -> tuple[Path, bool] | None:
+def _resolve_scan_root(path: Path) -> tuple[Path, bool] | _CapHit | None:
     """Return the path to scan, and whether the walk has an entry budget.
 
     A top-level symlink is followed in the same mode as the link name.
-    ``/``, ``/proc``, and ``/sys`` are skipped. ``/etc``, ``/usr``, and
-    ``/dev`` are walked with ``_MAX_SCAN_ENTRIES``, as is any other symlink
-    outside ``$HOME``. A symlink that resolves to ``$HOME`` itself uses that
-    budget too, so ``~/.ssh -> $HOME`` does not walk the home directory
-    without a cap. Browser scan roots are budgeted even when they are real
-    directories, so ``~/snap/<app>`` cannot walk without a cap. A real
-    browser directory uses ``_MAX_BROWSER_SCAN_ENTRIES`` because IndexedDB
-    and Extensions sit outside the cache skip. Other budgeted walks,
-    including gcloud and a credential symlink into a profile, keep
-    ``_MAX_SCAN_ENTRIES``. Hitting either budget, the cache-name cap, or the
-    credential-file cap fails every read closed.
+    ``/``, ``/proc``, ``/sys``, and a path that resolves to ``/`` fail the
+    scan closed. ``/etc``, ``/usr``, and ``/dev`` are walked with
+    ``_MAX_SCAN_ENTRIES``, as is any other symlink outside ``$HOME``. A
+    symlink that resolves to ``$HOME`` itself uses that budget too, so
+    ``~/.ssh -> $HOME`` does not walk the home directory without a cap.
+    Browser scan roots are budgeted even when they are symlinks, so
+    ``~/snap/<app>`` and a profile-sync ``~/.config/google-chrome`` cannot
+    walk without a cap. Those roots use ``_MAX_BROWSER_SCAN_ENTRIES``
+    because IndexedDB and Extensions sit outside the cache skip. gcloud and
+    a credential symlink into a profile keep ``_MAX_SCAN_ENTRIES``. Hitting
+    either budget, the cache-name cap, or the credential-file cap fails
+    every read closed.
     """
     try:
         browser = _is_browser_scan_root(path)
@@ -1108,7 +1127,7 @@ def _resolve_scan_root(path: Path) -> tuple[Path, bool] | None:
             return path, browser
         resolved = path.resolve(strict=False)
         if _is_unbounded_scan_root(resolved):
-            return None
+            return _CapHit(0, "unbounded-root")
         return resolved, browser or _scan_root_needs_budget(resolved, Path.home())
     except (OSError, RuntimeError, ValueError):
         return None
@@ -1133,9 +1152,10 @@ def _same_resolved(left: Path, right: Path) -> bool:
 def _directory_entry_budget(path: Path, budget_entries: bool) -> int | None:
     """Entry budget for one scan root, or None when the walk is unbounded.
 
-    Real browser directories use the larger budget so IndexedDB and
-    Extensions do not fail every read closed. gcloud and symlinks stay on
-    ``_MAX_SCAN_ENTRIES``.
+    A configured browser root uses the larger budget so IndexedDB and
+    Extensions do not fail every read closed, including when that path is a
+    symlink to tmpfs or another disk. gcloud and credential symlinks such as
+    ``~/.ssh`` stay on ``_MAX_SCAN_ENTRIES``.
     """
     if not budget_entries:
         return None
@@ -1159,6 +1179,8 @@ def _collect_inodes(path: Path, found: set[tuple[int, int]]) -> _CapHit | None:
     scan.
     """
     resolved = _resolve_scan_root(path)
+    if isinstance(resolved, _CapHit):
+        return resolved
     if resolved is None:
         return None
     root, budget_entries = resolved
@@ -1171,8 +1193,8 @@ def _collect_inodes(path: Path, found: set[tuple[int, int]]) -> _CapHit | None:
         mode = "named"
     file_cap = _MAX_CREDENTIAL_FILES if mode == "all" else None
     kube_root = root if path.name.lower() == ".kube" else None
-    # The cache skip follows the path that was asked for, not a symlink
-    # target. ``~/.ssh`` -> a browser profile keeps the credential walk.
+    # Match the configured path, not where a symlink points. A profile-sync
+    # ``~/.config/google-chrome`` is still that browser root. ``~/.ssh`` is not.
     skip_browser_caches = _is_lexical_browser_root(path, include_gcloud=False)
     tally = _NameTally()
     try:
@@ -1186,42 +1208,55 @@ def _collect_inodes(path: Path, found: set[tuple[int, int]]) -> _CapHit | None:
     try:
         # followlinks so snap ``current`` is entered. Directory inodes are
         # recorded below; a second path to the same revision is not walked.
-        walker = os.walk(root, followlinks=True)
+        # onerror turns an unreadable directory into a closed scan. os.walk
+        # would otherwise skip it and miss a secret inside.
+        walker = os.walk(root, followlinks=True, onerror=_raise_scan_io)
     except OSError:
-        return None
+        return _CapHit(0, "unreadable-directory")
     count = 0
     entries = 0
     seen_dirs: set[tuple[int, int]] = set()
     budget = _directory_entry_budget(path, budget_entries)
-    for dirpath, dirnames, filenames in walker:
-        directory = Path(dirpath)
-        inode = _dir_inode(directory)
-        if inode is None or inode in seen_dirs:
-            dirnames[:] = []
-            continue
-        seen_dirs.add(inode)
-        hit = _prune_scan_dirs(
-            dirnames,
-            directory,
-            kube_root,
-            root,
-            found,
-            tally,
-            skip_browser_caches=skip_browser_caches,
-        )
-        if hit is not None:
-            return hit
-        if budget is not None:
-            entries += len(dirnames) + len(filenames)
-            if entries > budget:
-                return _CapHit(budget, "directory-entry")
-        for name in filenames:
-            if not _file_counts(name, directory, mode):
+    try:
+        for dirpath, dirnames, filenames in walker:
+            directory = Path(dirpath)
+            inode = _dir_inode(directory)
+            if inode is None or inode in seen_dirs:
+                dirnames[:] = []
                 continue
-            if file_cap is not None and count >= file_cap:
-                return _CapHit(file_cap, "secret-file")
-            count = _add_inode(directory / name, found, count)
+            seen_dirs.add(inode)
+            hit = _prune_scan_dirs(
+                dirnames,
+                directory,
+                kube_root,
+                root,
+                found,
+                tally,
+                skip_browser_caches=skip_browser_caches,
+            )
+            if hit is not None:
+                return hit
+            if budget is not None:
+                entries += len(dirnames) + len(filenames)
+                if entries > budget:
+                    return _CapHit(budget, "directory-entry")
+            for name in filenames:
+                if not _file_counts(name, directory, mode):
+                    continue
+                if file_cap is not None and count >= file_cap:
+                    return _CapHit(file_cap, "secret-file")
+                count = _add_inode(directory / name, found, count)
+    except _ScanIOError:
+        return _CapHit(0, "unreadable-directory")
     return None
+
+
+class _ScanIOError(Exception):
+    """os.walk could not list a directory inside a scan root."""
+
+
+def _raise_scan_io(exc: OSError) -> None:
+    raise _ScanIOError(exc.strerror or "unreadable directory") from exc
 
 
 def _add_inode(path: Path, found: set[tuple[int, int]], count: int) -> int:
