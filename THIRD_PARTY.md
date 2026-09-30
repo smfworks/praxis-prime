@@ -62,7 +62,13 @@ hash-chained audit idea, and the public Claude Code hook event names
 Skeptic, and Forecaster are SMF Swarm 2.0's; the lens text in
 `praxis_prime.decide.judges` was written here and was not copied.
 The WebSocket handshake is the public RFC 6455 framing, written here, not
-taken from another project's socket stack. The `SKILL.md` parser reads
+taken from another project's socket stack. The MCP client and the optional
+stdio server speak the public Model Context Protocol (stdio NDJSON,
+streamable HTTP, and the legacy SSE transport) and accept the public
+`mcpServers` JSON object used by Claude Code and Cursor. That code was
+written here. The official `mcp` Python SDK was not vendored. Playwright
+(Apache-2.0) is an optional extra (`praxis-prime[browser]`); its source is
+not copied into this tree. The `SKILL.md` parser reads
 `name` and `description` frontmatter so a folder written for Claude Code,
 Hermes, or OpenClaw still loads. That parser was written here. OpenClaw's
 `skills/skill-creator` tree was not copied. Cron matching follows the
@@ -126,6 +132,7 @@ linking or executing them as separate programs when the license requires it.
 | SetFit | Apache-2.0 | Keep the Apache notice if code is copied. |
 | xdotool | BSD-style | Fine. |
 | wtype, grim | MIT | Fine. |
+| Playwright (`microsoft/playwright-python`) | Apache-2.0 | Optional extra only. Not vendored. Install with `pip install 'praxis-prime[browser]'`. Browser binaries are a separate download. |
 
 Judge and classifier weights (Qwen, Phi, ModernBERT, DeBERTa, Llama, Gemma,
 and others) are not in this repository. Verify each model's license before

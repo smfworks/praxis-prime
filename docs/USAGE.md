@@ -262,6 +262,30 @@ praxis-prime skills install ./some-skill
 
 A git URL is cloned only after you confirm it, and only with `git clone --depth 1`. Install does not run scripts.
 
+## MCP
+
+The client connects to stdio and streamable HTTP servers (SSE when the HTTP POST is rejected). Project config is `.prime/mcp.json` with a `mcpServers` object. Tools are named `mcp__<server>__<tool>` and loaded lazily so a large catalog stays out of the prompt. Untrusted write-like tools ask. Stdio children get an env allowlist and bubblewrap when `bwrap` is installed. Every call is audited. Tool output is untrusted. See [MCP.md](MCP.md).
+
+```bash
+praxis-prime mcp add notes --command python3 --arg .prime/notes_server.py
+praxis-prime mcp list
+praxis-prime mcp test notes
+praxis-prime mcp tools notes
+```
+
+`praxis-prime mcp serve` exposes `decide`, `recall`, and `skills_list` on stdio for other agents. It is off unless you run that command. The daemon does not start it. Bearer tokens for HTTP servers come from the environment or `secrets.env`. Full OAuth 2.1 is not implemented.
+
+## Browser
+
+Headless browsing is optional:
+
+```bash
+python -m pip install "praxis-prime[browser]"
+python -m playwright install chromium
+```
+
+The `browser` tool can navigate, snapshot, click, type, screenshot, extract text, and close. The profile is disposable unless `browser.profile` is `persistent`. Domain allow and deny lists come from config. Form submits, logins, downloads, and purchase pages always ask. Page content is untrusted. Without Playwright, doctor warns and read actions use `web_fetch`. See [BROWSER.md](BROWSER.md).
+
 ## Not in this milestone
 
-MCP, a coding-mode embedding index of the repo, regulatory dial enforcement beyond redaction and retention windows, the TUI, and the web UI are still stubs. ONNX classifiers, parallel jury calls, nightly recalibration, and the decision eval suites are not in this build. Per-hunk diff review, the `auto` coding classifier, background cloud coding, Ed25519 device pairing, an approval Edit button, and channels other than Telegram are not either. Natural-language cron, FTS5, sqlite-vec, skill security grading, and a skill hub lockfile are later work. See [ARCHITECTURE.md](ARCHITECTURE.md) §29 for the rest of the roadmap.
+A coding-mode embedding index of the repo, regulatory dial enforcement beyond redaction and retention windows, the TUI, and the web UI are still stubs. ONNX classifiers, parallel jury calls, nightly recalibration, and the decision eval suites are not in this build. Per-hunk diff review, the `auto` coding classifier, background cloud coding, Ed25519 device pairing, an approval Edit button, and channels other than Telegram are not either. Natural-language cron, FTS5, sqlite-vec, skill security grading, and a skill hub lockfile are later work. Full MCP OAuth 2.1, an MCP security grade, a remote egress proxy, a browser vision loop, and driving the user's signed-in browser are later work too. See [ARCHITECTURE.md](ARCHITECTURE.md) §29 for the rest of the roadmap.

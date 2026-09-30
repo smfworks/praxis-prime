@@ -33,6 +33,10 @@ _CONFIG_HEADER = """\
 # decide.prescreen defaults to false, so approvals are unchanged until you
 # turn it on. The engine cannot auto-approve git push, force operations,
 # deletes of tracked files, or writes outside the task worktree.
+#
+# mcp.serve stays false. Nothing listens for other agents until you run
+# `praxis-prime mcp serve`. Browser profile defaults to a disposable
+# directory. Playwright is optional; without it the browser tool uses web_fetch.
 """
 
 _PROFILE_HEADER = """\
@@ -122,6 +126,18 @@ def default_config_document() -> dict[str, object]:
             "episodic_ttl_days": 90,
         },
         "routines": {"min_interval_seconds": 60, "max_iterations": 20},
+        "mcp": {
+            "enabled": True,
+            "serve": False,
+            "lazy_threshold": 8,
+            "env_allow": ["PATH", "LANG", "LC_ALL", "LC_CTYPE", "TERM"],
+        },
+        "browser": {
+            "enabled": True,
+            "profile": "disposable",
+            "allow_domains": [],
+            "deny_domains": [],
+        },
     }
 
 

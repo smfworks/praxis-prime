@@ -35,11 +35,13 @@ class ToolContext:
 
     ``host_shell_approved`` is true only after a person approved an
     unsandboxed shell command. A missing sandbox must not imply it.
+    ``session_id`` is the chat session when the loop is running one.
     """
 
     cwd: str
     cancelled: Callable[[], bool]
     host_shell_approved: bool = False
+    session_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,24 +104,60 @@ class Tool:
 
 
 class ToolRegistry:
-    """Name → tool. Registration order is the order schemas are sent."""
+    """Name → tool. Registration order is the order schemas are sent.
+
+    Hidden tools stay callable but are left out of ``schemas`` so a large
+    MCP catalog does not land in the prompt until it is revealed.
+    """
 
     def __init__(self) -> None:
         self._tools: dict[str, Tool] = {}
+        self._hidden: set[str] = set()
+        self._resolver: Callable[[str], Tool | None] | None = None
 
     def register(self, tool: Tool) -> None:
         if tool.name in self._tools:
             raise ValueError(f"tool already registered: {tool.name}")
         self._tools[tool.name] = tool
 
+    def set_resolver(self, resolver: Callable[[str], Tool | None] | None) -> None:
+        """Resolve a name the first time the model calls it."""
+        self._resolver = resolver
+
+    def hide(self, name: str) -> None:
+        if name in self._tools:
+            self._hidden.add(name)
+
+    def reveal(self, name: str) -> bool:
+        if name not in self._tools:
+            return False
+        self._hidden.discard(name)
+        return True
+
+    def is_hidden(self, name: str) -> bool:
+        return name in self._hidden
+
+    def contains(self, name: str) -> bool:
+        return name in self._tools
+
     def get(self, name: str) -> Tool | None:
-        return self._tools.get(name)
+        found = self._tools.get(name)
+        if found is not None:
+            return found
+        resolver = self._resolver
+        if resolver is None:
+            return None
+        return resolver(name)
 
     def names(self) -> tuple[str, ...]:
         return tuple(self._tools)
 
     def schemas(self) -> list[dict[str, Any]]:
-        return [tool.openai_schema() for tool in self._tools.values()]
+        return [
+            tool.openai_schema()
+            for tool in self._tools.values()
+            if tool.name not in self._hidden
+        ]
 
 
 def _risk_rank(risk: Risk) -> int:

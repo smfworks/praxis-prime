@@ -1,6 +1,11 @@
-"""MCP client and server stub.
+"""MCP client and the optional stdio server.
 
-Neither side is implemented. Server mode is a v1.0 item.
+The client speaks stdio and streamable HTTP, with a legacy SSE fallback.
+``praxis-prime mcp serve`` is off unless that command is run.
 
-TODO: ARCHITECTURE §8.
+ARCHITECTURE §8.
 """
+
+from praxis_prime.mcp.config import ServerSpec, load_servers
+
+__all__ = ["ServerSpec", "load_servers"]

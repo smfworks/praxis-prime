@@ -1,8 +1,10 @@
 """OS, session, and Ollama checks."""
 
 from praxis_prime.doctor import (
+    check_browser,
     check_ollama,
     check_python,
+    check_sandbox,
     classify_os,
     classify_session,
     collect_checks,
@@ -84,6 +86,24 @@ def test_session_prefers_wayland_over_x11():
     assert "DISPLAY" in detail
 
 
+def test_missing_browser_and_sandbox_are_warnings():
+    assert check_sandbox(True).status == "ok"
+    assert check_sandbox(False).status == "warn"
+    assert "web_fetch" in check_browser(False).detail
+    assert check_browser(True).status == "ok"
+    checks = collect_checks(
+        version_info=(3, 12, 0),
+        os_release_text=UBUNTU,
+        env={},
+        which=_no_which,
+        path_exists=_no_path,
+        ollama_reachable=True,
+        bwrap_present=False,
+        playwright_present=False,
+    )
+    assert report_exit_code(checks) == 0
+
+
 def test_python_requirement_and_ollama_status():
     assert check_python((3, 12, 3)).status == "ok"
     assert check_python((3, 13, 0)).status == "ok"
@@ -101,7 +121,14 @@ def test_only_python_failure_sets_the_exit_code():
         path_exists=_no_path,
         ollama_reachable=False,
     )
-    assert [check.name for check in checks] == ["Python", "OS", "Session", "Ollama"]
+    assert [check.name for check in checks] == [
+        "Python",
+        "OS",
+        "Session",
+        "Ollama",
+        "Sandbox",
+        "Browser",
+    ]
     assert report_exit_code(checks) == 1
 
     healthy = collect_checks(

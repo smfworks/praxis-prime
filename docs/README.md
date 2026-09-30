@@ -11,4 +11,4 @@ The blueprint is the source of truth for layout, names, and stack.
 
 These files were approved as the design. The repository still points at later sections with `TODO: ARCHITECTURE §…` notes.
 
-[USAGE.md](USAGE.md) is the operator note for chat, ask, the daemon, coding mode, and `praxis-prime decide`. [DECISION-ENGINE.md](DECISION-ENGINE.md) describes the local cascade. [ROUTINES.md](ROUTINES.md), [MEMORY.md](MEMORY.md), and [SKILLS.md](SKILLS.md) cover the scheduler, memory tiers, and `SKILL.md` folders.
+[USAGE.md](USAGE.md) is the operator note for chat, ask, the daemon, coding mode, and `praxis-prime decide`. [DECISION-ENGINE.md](DECISION-ENGINE.md) describes the local cascade. [ROUTINES.md](ROUTINES.md), [MEMORY.md](MEMORY.md), and [SKILLS.md](SKILLS.md) cover the scheduler, memory tiers, and `SKILL.md` folders. [MCP.md](MCP.md) covers the MCP client and `praxis-prime mcp serve`. [BROWSER.md](BROWSER.md) covers the optional Playwright browser tool.
