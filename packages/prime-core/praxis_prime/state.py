@@ -68,7 +68,9 @@ class StateDB:
                 summary TEXT NOT NULL,
                 payload_json TEXT NOT NULL,
                 prev_hash TEXT NOT NULL,
-                hash TEXT NOT NULL
+                hash TEXT NOT NULL,
+                actor_account TEXT NOT NULL DEFAULT '',
+                profile TEXT NOT NULL DEFAULT ''
             );
 
             CREATE TABLE IF NOT EXISTS memory_entries (
@@ -146,7 +148,23 @@ class StateDB:
             );
             """
         )
+        self._ensure_column(
+            "audit_events",
+            "actor_account",
+            "actor_account TEXT NOT NULL DEFAULT ''",
+        )
+        self._ensure_column(
+            "audit_events",
+            "profile",
+            "profile TEXT NOT NULL DEFAULT ''",
+        )
         self.conn.commit()
+
+    def _ensure_column(self, table: str, column: str, declaration: str) -> None:
+        rows = self.conn.execute(f"PRAGMA table_info({table})").fetchall()
+        names = {str(row[1]) for row in rows}
+        if column not in names:
+            self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {declaration}")
 
     def close(self) -> None:
         self.conn.close()

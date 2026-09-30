@@ -1,0 +1,162 @@
+"""``praxis-prime account`` commands.
+
+``create`` on an empty database is the first-run owner bootstrap. It also
+migrates single-user state into the ``default`` profile. Passwords are read
+from stdin, never from an argument.
+
+docs/blueprint-addendum-2026-09.md §6.2 and §6.3.
+"""
+
+from __future__ import annotations
+
+import argparse
+import getpass
+import sys
+from pathlib import Path
+
+from praxis_prime.accounts.db import AccountError, AccountStore
+from praxis_prime.accounts.roles import SERVER_ROLES
+from praxis_prime.paths import config_dir, data_dir
+from praxis_prime.profiles.migrate import migrate_single_user
+
+
+def add_account_parser(commands: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    account = commands.add_parser("account", help="Create and inspect local accounts.")
+    sub = account.add_subparsers(dest="account_command")
+    create = sub.add_parser("create", help="Create an account. The first one is the owner.")
+    create.add_argument("username")
+    create.add_argument("--display-name", default="", help="Name shown in the audit log.")
+    create.add_argument("--role", default="operator", choices=SERVER_ROLES)
+    create.add_argument("--email", default="")
+    create.add_argument(
+        "--password-stdin",
+        action="store_true",
+        help="Read one password line from stdin. It is not a command argument.",
+    )
+    _add_dirs(create)
+    listing = sub.add_parser("list", help="List accounts. Password hashes are not printed.")
+    _add_dirs(listing)
+    passwd = sub.add_parser("passwd", help="Set a new password and clear a lockout.")
+    passwd.add_argument("username")
+    passwd.add_argument("--password-stdin", action="store_true")
+    _add_dirs(passwd)
+
+
+def account_command(args: argparse.Namespace) -> int:
+    command = getattr(args, "account_command", None)
+    if command == "create":
+        return _create(args)
+    if command == "list":
+        return _list(args)
+    if command == "passwd":
+        return _passwd(args)
+    print("usage: praxis-prime account {create|list|passwd}", file=sys.stderr)
+    return 2
+
+
+def _create(args: argparse.Namespace) -> int:
+    password = _read_password(args, confirm=True)
+    if password is None:
+        return 2
+    store = _store(args)
+    try:
+        if not store.has_accounts():
+            account = store.create_account(
+                username_text=args.username,
+                password=password,
+                display_name=args.display_name or args.username,
+                role="owner",
+                email=args.email,
+            )
+            result = migrate_single_user(
+                _data(args),
+                _config(args),
+                owner_account=account.id,
+            )
+            store.set_membership(account.id, result.profile_id, "owner")
+            print(f"created owner {account.username} ({account.id})")
+            print(f"profile {result.profile_id}")
+            if result.backup:
+                print(f"backup {result.backup}")
+            return 0
+        account = store.create_account(
+            username_text=args.username,
+            password=password,
+            display_name=args.display_name or args.username,
+            role=args.role,
+            email=args.email,
+        )
+    except AccountError as exc:
+        print(f"praxis-prime account: {exc}", file=sys.stderr)
+        return 2
+    print(f"created {account.role} {account.username} ({account.id})")
+    return 0
+
+
+def _list(args: argparse.Namespace) -> int:
+    accounts = _store(args).list_accounts()
+    if not accounts:
+        print("no accounts")
+        return 0
+    for account in accounts:
+        print(f"{account.id}  {account.username}  {account.role}  {account.status}")
+    return 0
+
+
+def _passwd(args: argparse.Namespace) -> int:
+    password = _read_password(args, confirm=True)
+    if password is None:
+        return 2
+    try:
+        account = _store(args).set_password(args.username, password)
+    except AccountError as exc:
+        print(f"praxis-prime account: {exc}", file=sys.stderr)
+        return 2
+    print(f"updated password for {account.username}")
+    return 0
+
+
+def _read_password(args: argparse.Namespace, *, confirm: bool) -> str | None:
+    if args.password_stdin:
+        line = sys.stdin.readline()
+        if line.endswith("\n"):
+            line = line[:-1]
+        if line.endswith("\r"):
+            line = line[:-1]
+        return line
+    if not sys.stdin.isatty():
+        print(
+            "praxis-prime account: pass --password-stdin or run in a terminal",
+            file=sys.stderr,
+        )
+        return None
+    first = getpass.getpass("Password: ")
+    if confirm:
+        second = getpass.getpass("Repeat password: ")
+        if first != second:
+            print("praxis-prime account: passwords did not match", file=sys.stderr)
+            return None
+    return first
+
+
+def _store(args: argparse.Namespace) -> AccountStore:
+    return AccountStore(_data(args) / "accounts.db")
+
+
+def _data(args: argparse.Namespace) -> Path:
+    explicit = getattr(args, "data_dir", None)
+    if explicit:
+        return Path(explicit)
+    return data_dir()
+
+
+def _config(args: argparse.Namespace) -> Path:
+    explicit = getattr(args, "config_dir", None)
+    if explicit:
+        return Path(explicit)
+    return config_dir()
+
+
+def _add_dirs(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--data-dir", help="Data directory. Defaults to the XDG data path.")
+    parser.add_argument("--config-dir", help="Config directory. Defaults to the XDG config path.")

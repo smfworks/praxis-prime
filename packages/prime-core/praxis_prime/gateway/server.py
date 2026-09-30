@@ -14,16 +14,33 @@ import re
 import socket
 import threading
 from collections.abc import Callable
+from pathlib import Path
+from urllib.parse import parse_qs
 
+from praxis_prime.accounts.db import AccountStore
+from praxis_prime.accounts.roles import sees_all_profiles
 from praxis_prime.approvals.queue import ApprovalQueue, parse_decision
+from praxis_prime.audit.log import AuditLog, actor_account_var, profile_var
 from praxis_prime.decide.engine import DecisionEngine
 from praxis_prime.decide.schema import DecideError
 from praxis_prime.gateway.auth import bearer_token, token_ok
+from praxis_prime.gateway.authz import (
+    Denial,
+    Principal,
+    accounts_enforced,
+    authenticate_http,
+    authorize_action,
+    claim_protocol_role,
+    issue_ws_ticket,
+    login,
+    logout,
+    principal_from_ticket,
+)
+from praxis_prime.gateway.guard import host_origin_denial
 from praxis_prime.gateway.protocol import (
     CHAT_ROLES,
     OPERATOR_ONLY,
     PROTOCOL_VERSION,
-    ROLES,
     request_id_var,
 )
 from praxis_prime.gateway.ws import (
@@ -37,6 +54,7 @@ from praxis_prime.observe import JsonLogger
 
 _APPROVAL_PATH = re.compile(r"^/v1/approvals/(ap_[0-9a-f]{8})$")
 _ROUTINE_FIRE = re.compile(r"^/v1/routines/(rt_[0-9a-f]{8})/fire$")
+_PROFILE_PATH = re.compile(r"^/v1/profiles/([a-z][a-z0-9-]{0,63})$")
 RoutineFire = Callable[[str], tuple[int, dict[str, object]]]
 
 
@@ -55,6 +73,9 @@ class GatewayServer:
         socket_path: str | None = None,
         decider: DecisionEngine | None = None,
         routine_fire: RoutineFire | None = None,
+        accounts: AccountStore | None = None,
+        audit: AuditLog | None = None,
+        data_root: Path | None = None,
     ) -> None:
         self.host = host
         self._port = port
@@ -63,6 +84,9 @@ class GatewayServer:
         self.approvals = approvals
         self.decider = decider
         self.routine_fire = routine_fire
+        self.accounts = accounts
+        self.audit = audit
+        self.data_root = data_root
         self.logger = logger
         self.socket_path = socket_path
         self._stopped = threading.Event()
@@ -187,13 +211,21 @@ class GatewayServer:
             buffer = ByteBuffer(conn)
             raw = buffer.read_until(b"\r\n\r\n", limit=16384)
             method, path, headers = _parse_head(raw)
+            denied = host_origin_denial(headers, bound_port=self.bound_port)
+            if denied is not None:
+                status, code, message = denied
+                _write_http(conn, status, _error(code, message))
+                if self.logger is not None:
+                    self.logger.warning("host_rejected", code=code)
+                return
             if headers.get("upgrade", "").lower() == "websocket":
-                self._handle_ws(conn, buffer, headers)
+                self._handle_ws(conn, buffer, headers, path)
                 return
             length = _content_length(headers)
             body = buffer.read_exact(length) if length else b""
-            status, payload = self._http(method, path, headers, body)
-            _write_http(conn, status, payload)
+            extras: list[tuple[str, str]] = []
+            status, payload = self._http(method, path, headers, body, extras)
+            _write_http(conn, status, payload, extras)
         except (ConnectionError, OSError, ValueError, WebSocketError):
             if self.logger is not None:
                 self.logger.warning("connection_closed")
@@ -211,18 +243,88 @@ class GatewayServer:
         path: str,
         headers: dict[str, str],
         body: bytes,
+        extras: list[tuple[str, str]],
     ) -> tuple[int, dict[str, object]]:
         route = path.split("?", 1)[0]
         if method == "GET" and route == "/health":
             return 200, {"ok": True, "service": "praxis-primed"}
-        if not token_ok(bearer_token(headers), self.token):
-            if self.logger is not None:
+        if method == "POST" and route == "/v1/auth/login":
+            if self.accounts is None:
+                return 503, _error("unavailable", "accounts are not configured")
+            status, payload, cookies = login(self.accounts, body, self.audit)
+            extras.extend(cookies)
+            if status != 200 and self.logger is not None:
+                self.logger.warning("auth_fail")
+            return status, payload
+        principal = authenticate_http(
+            self.accounts,
+            headers,
+            method,
+            bootstrap_token=self.token,
+        )
+        if isinstance(principal, Denial):
+            if principal.status == 401 and self.logger is not None:
                 self.logger.warning("http_unauthorized", path=route)
-            return 401, _error("unauthorized", "Bearer token required")
+            return principal.status, _error(principal.code, principal.message)
+        profile_name = headers.get("x-praxis-profile", "").strip()
+        named = _PROFILE_PATH.fullmatch(route)
+        if named is not None:
+            profile_name = named.group(1)
+        action = _http_action(method, route)
+        denial = authorize_action(
+            self.accounts,
+            principal,
+            action=action,
+            profile=profile_name,
+            profile_exists=self._profile_exists,
+        )
+        if not denial.ok:
+            return denial.status, _error(denial.code, denial.message)
+        actor_token = actor_account_var.set(principal.account_id)
+        profile_token = profile_var.set(profile_name or self._runtime_profile())
+        try:
+            return self._authed_http(
+                method, route, headers, body, extras, principal, profile_name
+            )
+        finally:
+            actor_account_var.reset(actor_token)
+            profile_var.reset(profile_token)
+
+    def _authed_http(
+        self,
+        method: str,
+        route: str,
+        headers: dict[str, str],
+        body: bytes,
+        extras: list[tuple[str, str]],
+        principal: Principal,
+        profile_name: str,
+    ) -> tuple[int, dict[str, object]]:
+        if method == "POST" and route == "/v1/auth/logout":
+            if self.accounts is None:
+                return 404, _error("not_found", "no such route")
+            status, payload, cookies = logout(self.accounts, principal, self.audit)
+            extras.extend(cookies)
+            return status, payload
+        if method == "GET" and route == "/v1/auth/session":
+            return 200, {"ok": True, "account": _principal_public(principal)}
+        if method == "POST" and route == "/v1/auth/ws-ticket":
+            if self.accounts is None:
+                return 404, _error("not_found", "no such route")
+            status, payload = issue_ws_ticket(self.accounts, principal, profile_name)
+            return status, payload
+        if method == "GET" and route == "/v1/profiles":
+            return 200, self._list_profiles(principal)
+        named = _PROFILE_PATH.fullmatch(route)
+        if method == "GET" and named is not None:
+            role = ""
+            if self.accounts is not None and principal.account_id:
+                role = self.accounts.membership(principal.account_id, named.group(1)) or ""
+            return 200, {"ok": True, "profile": {"id": named.group(1), "role": role}}
         if method == "GET" and route == "/status":
             return 200, {"ok": True, "status": self._status()}
         if method == "GET" and route == "/v1/approvals":
-            return 200, {"ok": True, "approvals": self.approvals.list_pending()}
+            return 200, {"ok": True, "approvals": self._visible_approvals(principal)}
         match = _APPROVAL_PATH.fullmatch(route)
         if method == "POST" and match is not None:
             try:
@@ -231,9 +333,23 @@ class GatewayServer:
                 return 400, _error("bad_request", "approval body must be JSON")
             if not isinstance(parsed, dict):
                 return 400, _error("bad_request", "approval body must be an object")
+            existing = self.approvals.get(match.group(1))
+            item_profile = _profile_of(existing)
+            target = item_profile or profile_name
+            if target:
+                scoped = authorize_action(
+                    self.accounts,
+                    principal,
+                    action="approve",
+                    profile=target,
+                    profile_exists=self._profile_exists,
+                )
+                if not scoped.ok:
+                    return scoped.status, _error(scoped.code, scoped.message)
             try:
                 decision = parse_decision(parsed.get("decision"))
-                item = self.approvals.decide(match.group(1), decision, actor="operator")
+                actor = principal.account_id or "operator"
+                item = self.approvals.decide(match.group(1), decision, actor=actor)
             except LookupError as exc:
                 return 404, _error("not_found", str(exc))
             except ValueError as exc:
@@ -281,13 +397,15 @@ class GatewayServer:
         conn: socket.socket,
         buffer: ByteBuffer,
         headers: dict[str, str],
+        path: str,
     ) -> None:
         key = headers.get("sec-websocket-key", "")
         if not key:
             _write_http(conn, 400, _error("bad_request", "missing websocket key"))
             return
         header_token = bearer_token(headers)
-        if header_token and not token_ok(header_token, self.token):
+        ticket = _request_ticket(path, headers)
+        if header_token and not token_ok(header_token, self.token) and not ticket:
             if self.logger is not None:
                 self.logger.warning("ws_unauthorized")
             _write_http(conn, 401, _error("unauthorized", "Bearer token required"))
@@ -302,14 +420,15 @@ class GatewayServer:
         role: str | None = None
         try:
             first = _read_json(ws)
-            role = self._connect(first, header_token, outgoing)
-            if role is None:
+            connected = self._connect(first, header_token, outgoing, path, headers)
+            if connected is None:
                 return
+            role, principal = connected
             while not self._stopped.is_set():
                 frame = _read_json(ws)
                 if frame is None:
                     return
-                self._dispatch(frame, role, outgoing)
+                self._dispatch(frame, role, principal, outgoing)
         finally:
             with self._sub_lock:
                 if outgoing in self._subs:
@@ -322,7 +441,9 @@ class GatewayServer:
         frame: dict[str, object] | None,
         header_token: str,
         outgoing: queue.Queue[dict[str, object] | None],
-    ) -> str | None:
+        path: str,
+        headers: dict[str, str],
+    ) -> tuple[str, Principal] | None:
         if frame is None or frame.get("type") != "connect":
             frame_id = str((frame or {}).get("id", ""))
             outgoing.put(
@@ -330,16 +451,16 @@ class GatewayServer:
             )
             return None
         payload = _payload(frame)
-        presented = str(payload.get("token", "")) or header_token
         frame_id = str(frame.get("id", ""))
-        if not token_ok(presented, self.token):
-            if self.logger is not None:
+        principal = self._ws_principal(payload, header_token, path, headers)
+        if isinstance(principal, Denial):
+            if self.logger is not None and principal.status == 401:
                 self.logger.warning("ws_unauthorized")
-            outgoing.put(_frame_error(frame_id, "unauthorized", "gateway token rejected"))
+            outgoing.put(_frame_error(frame_id, principal.code, principal.message))
             return None
-        role = str(payload.get("role", ""))
-        if role not in ROLES:
-            outgoing.put(_frame_error(frame_id, "bad_role", "unknown role"))
+        claimed = claim_protocol_role(principal, str(payload.get("role", "")))
+        if isinstance(claimed, Denial):
+            outgoing.put(_frame_error(frame_id, claimed.code, claimed.message))
             return None
         outgoing.put(
             {
@@ -349,20 +470,32 @@ class GatewayServer:
                 "payload": {
                     "protocol": PROTOCOL_VERSION,
                     "version": self._status().get("version", ""),
-                    "role": role,
+                    "role": claimed,
                 },
             }
         )
-        return role
+        return claimed, principal
 
     def _dispatch(
         self,
         frame: dict[str, object],
         role: str,
+        principal: Principal,
         outgoing: queue.Queue[dict[str, object] | None],
     ) -> None:
         kind = str(frame.get("type", ""))
         frame_id = str(frame.get("id", ""))
+        profile_name = str(_payload(frame).get("profile", "") or "")
+        denial = authorize_action(
+            self.accounts,
+            principal,
+            action=_frame_action(kind),
+            profile=profile_name,
+            profile_exists=self._profile_exists,
+        )
+        if not denial.ok:
+            outgoing.put(_frame_error(frame_id, denial.code, denial.message))
+            return
         if kind in OPERATOR_ONLY and role != "operator":
             outgoing.put(_frame_error(frame_id, "forbidden", f"{role} cannot {kind}"))
             return
@@ -392,13 +525,13 @@ class GatewayServer:
                     "type": "result",
                     "id": frame_id,
                     "ok": True,
-                    "payload": {"approvals": self.approvals.list_pending()},
+                    "payload": {"approvals": self._visible_approvals(principal)},
                 }
                 outgoing.put(result)
             elif kind == "approvals.decide":
-                self._decide(frame, outgoing)
+                self._decide(frame, principal, outgoing)
             elif kind == "chat.send":
-                self._chat(frame, outgoing, key)
+                self._chat(frame, principal, outgoing, key)
             elif kind == "model.set":
                 self._model(frame, outgoing)
             elif kind == "session.drop":
@@ -414,14 +547,29 @@ class GatewayServer:
     def _decide(
         self,
         frame: dict[str, object],
+        principal: Principal,
         outgoing: queue.Queue[dict[str, object] | None],
     ) -> None:
         frame_id = str(frame.get("id", ""))
         payload = _payload(frame)
+        approval_id = str(payload.get("approvalId", ""))
+        existing = self.approvals.get(approval_id)
+        target = _profile_of(existing) or str(payload.get("profile", "") or "")
+        if target:
+            scoped = authorize_action(
+                self.accounts,
+                principal,
+                action="approve",
+                profile=target,
+                profile_exists=self._profile_exists,
+            )
+            if not scoped.ok:
+                outgoing.put(_frame_error(frame_id, scoped.code, scoped.message))
+                return
         try:
             decision = parse_decision(payload.get("decision"))
-            approval_id = str(payload.get("approvalId", ""))
-            item = self.approvals.decide(approval_id, decision, actor="operator")
+            actor = principal.account_id or "operator"
+            item = self.approvals.decide(approval_id, decision, actor=actor)
         except LookupError as exc:
             outgoing.put(_frame_error(frame_id, "not_found", str(exc)))
             return
@@ -433,6 +581,7 @@ class GatewayServer:
     def _chat(
         self,
         frame: dict[str, object],
+        principal: Principal,
         outgoing: queue.Queue[dict[str, object] | None],
         idem: str,
     ) -> None:
@@ -445,9 +594,13 @@ class GatewayServer:
             return
         session = frame.get("sessionId") or payload.get("sessionId")
         session_id = session if isinstance(session, str) and session else None
+        account_id = principal.account_id
+        profile_name = str(payload.get("profile", "") or "") or self._runtime_profile()
 
         def work() -> None:
             token = request_id_var.set(frame_id)
+            actor_token = actor_account_var.set(account_id)
+            profile_token = profile_var.set(profile_name)
 
             def on_event(event: dict[str, object]) -> None:
                 outgoing.put({"type": "event", "id": frame_id, "payload": event})
@@ -466,6 +619,8 @@ class GatewayServer:
             except Exception as exc:
                 outgoing.put(_frame_error(frame_id, "turn_failed", type(exc).__name__))
             finally:
+                profile_var.reset(profile_token)
+                actor_account_var.reset(actor_token)
                 request_id_var.reset(token)
                 self._clear_inflight(idem)
 
@@ -525,6 +680,77 @@ class GatewayServer:
         with self._idem_lock:
             self._inflight.discard(key)
 
+    def _profile_exists(self, name: str) -> bool:
+        if self.data_root is None:
+            return False
+        home = self.data_root / "profiles" / name
+        return (home / "profile.toml").is_file() or (home / "prime.db").is_file()
+
+    def _runtime_profile(self) -> str:
+        if self.audit is None:
+            return ""
+        return self.audit.profile
+
+    def _list_profiles(self, principal: Principal) -> dict[str, object]:
+        if self.data_root is None:
+            return {"ok": True, "profiles": []}
+        from praxis_prime.profiles.home import list_profiles
+
+        names = list_profiles(self.data_root)
+        if (
+            accounts_enforced(self.accounts)
+            and self.accounts is not None
+            and principal.account_id
+            and not sees_all_profiles(principal.role)
+        ):
+            allowed = set(self.accounts.profile_ids_for(principal.account_id))
+            names = [name for name in names if name in allowed]
+        return {"ok": True, "profiles": [{"id": name} for name in names]}
+
+    def _visible_approvals(self, principal: Principal) -> list[dict[str, object]]:
+        items = self.approvals.list_pending()
+        if not accounts_enforced(self.accounts) or sees_all_profiles(principal.role):
+            return items
+        if self.accounts is None or not principal.account_id:
+            return items
+        allowed = set(self.accounts.profile_ids_for(principal.account_id))
+        visible: list[dict[str, object]] = []
+        for item in items:
+            profile = item.get("profileId")
+            if not isinstance(profile, str) or not profile or profile in allowed:
+                visible.append(item)
+        return visible
+
+    def _ws_principal(
+        self,
+        payload: dict[str, object],
+        header_token: str,
+        path: str,
+        headers: dict[str, str],
+    ) -> Principal | Denial:
+        ticket = str(payload.get("ticket", "") or "") or _request_ticket(path, headers)
+        if ticket and self.accounts is not None:
+            found = principal_from_ticket(self.accounts, ticket)
+            if found is None:
+                return Denial(401, "unauthorized", "websocket ticket rejected")
+            return found
+        presented = str(payload.get("token", "") or "") or header_token
+        if not accounts_enforced(self.accounts):
+            if not token_ok(presented, self.token):
+                return Denial(401, "unauthorized", "gateway token rejected")
+            return Principal(kind="legacy", account_id="", username="", role="operator")
+        if token_ok(presented, self.token) and self.accounts is not None:
+            owner = self.accounts.owner()
+            if owner is None or owner.status != "active":
+                return Denial(401, "unauthorized", "gateway token rejected")
+            return Principal(
+                kind="bootstrap",
+                account_id=owner.id,
+                username=owner.username,
+                role="owner",
+            )
+        return Denial(401, "unauthorized", "gateway token rejected")
+
 
 def _write_frames(
     ws: WebSocketConnection,
@@ -567,7 +793,10 @@ def _parse_head(raw: bytes) -> tuple[str, str, dict[str, str]]:
         if ":" not in line:
             continue
         name, value = line.split(":", 1)
-        headers[name.strip().lower()] = value.strip()
+        key = name.strip().lower()
+        if key == "host" and "host" in headers:
+            headers["x-duplicate-host"] = "1"
+        headers[key] = value.strip()
     return parts[0].upper(), parts[1], headers
 
 
@@ -582,11 +811,17 @@ def _content_length(headers: dict[str, str]) -> int:
     return length
 
 
-def _write_http(conn: socket.socket, status: int, payload: dict[str, object]) -> None:
+def _write_http(
+    conn: socket.socket,
+    status: int,
+    payload: dict[str, object],
+    extras: list[tuple[str, str]] | None = None,
+) -> None:
     reasons = {
         200: "OK",
         400: "Bad Request",
         401: "Unauthorized",
+        403: "Forbidden",
         404: "Not Found",
         409: "Conflict",
         429: "Too Many Requests",
@@ -594,14 +829,19 @@ def _write_http(conn: socket.socket, status: int, payload: dict[str, object]) ->
         503: "Unavailable",
     }
     body = json.dumps(payload).encode("utf-8")
-    head = (
-        f"HTTP/1.1 {status} {reasons.get(status, 'Error')}\r\n"
-        "Content-Type: application/json\r\n"
-        f"Content-Length: {len(body)}\r\n"
-        "Connection: close\r\n"
-        "Cache-Control: no-store\r\n"
-        "\r\n"
-    )
+    lines = [
+        f"HTTP/1.1 {status} {reasons.get(status, 'Error')}",
+        "Content-Type: application/json",
+        f"Content-Length: {len(body)}",
+        "Connection: close",
+        "Cache-Control: no-store",
+        "X-Content-Type-Options: nosniff",
+    ]
+    for name, value in extras or []:
+        if "\r" in value or "\n" in value:
+            continue
+        lines.append(f"{name}: {value}")
+    head = "\r\n".join(lines) + "\r\n\r\n"
     try:
         conn.sendall(head.encode("ascii") + body)
     except OSError:
@@ -635,6 +875,59 @@ def _turn_payload(result: TurnResult) -> dict[str, object]:
         "error": result.error,
         "cancelled": result.cancelled,
     }
+
+
+def _http_action(method: str, route: str) -> str:
+    if method == "POST" and (_APPROVAL_PATH.fullmatch(route) or route == "/v1/approvals"):
+        return "approve"
+    if method == "GET" and route == "/v1/approvals":
+        return "content"
+    if method == "POST" and route in {"/v1/decide", "/v1/systemone"}:
+        return "chat"
+    if method == "POST" and _ROUTINE_FIRE.fullmatch(route):
+        return "chat"
+    if method == "GET" and route == "/v1/audit":
+        return "audit"
+    return "read"
+
+
+def _frame_action(kind: str) -> str:
+    if kind == "approvals.decide":
+        return "approve"
+    if kind in {"chat.send", "model.set", "session.drop"}:
+        return "chat"
+    if kind == "approvals.list":
+        return "content"
+    return "read"
+
+
+def _profile_of(item: dict[str, object] | None) -> str:
+    if item is None:
+        return ""
+    raw = item.get("profileId", "")
+    if isinstance(raw, str):
+        return raw
+    return ""
+
+
+def _principal_public(principal: Principal) -> dict[str, object]:
+    return {
+        "id": principal.account_id,
+        "username": principal.username,
+        "role": principal.role,
+        "kind": principal.kind,
+    }
+
+
+def _request_ticket(path: str, headers: dict[str, str]) -> str:
+    header = headers.get("x-praxis-ticket", "").strip()
+    if header:
+        return header
+    query = parse_qs(path.split("?", 1)[1] if "?" in path else "", keep_blank_values=False)
+    values = query.get("ticket", [])
+    if len(values) == 1:
+        return values[0]
+    return ""
 
 
 def _peer_is_loopback(addr: object) -> bool:

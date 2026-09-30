@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from praxis_prime.approvals.gate import ApprovalGate, Approver
@@ -15,7 +15,12 @@ from praxis_prime.decide.engine import DecisionEngine, build_engine
 from praxis_prime.decide.screen import ActionScreener
 from praxis_prime.decide.tool import install_decide_tool
 from praxis_prime.loop.engine import AgentLoop
-from praxis_prime.loop.prompt import session_preamble
+from praxis_prime.loop.prompt import (
+    SYSTEM_PROMPT,
+    compose_system_prompt,
+    read_persona,
+    session_preamble,
+)
 from praxis_prime.mcp.tools import McpManager, install_mcp_tools
 from praxis_prime.memory.embed import embedder_for
 from praxis_prime.memory.store import SessionStore
@@ -24,13 +29,15 @@ from praxis_prime.memory.tools import install_memory_tools
 from praxis_prime.paths import config_dir
 from praxis_prime.policy.boundary import ReadAccess
 from praxis_prime.policy.engine import PolicyEngine
+from praxis_prime.profiles.home import resolve_runtime_layout
+from praxis_prime.profiles.policy import ToolAllowlist, clamp_dials
 from praxis_prime.router.factory import build_router
 from praxis_prime.router.router import ChatProvider, ModelRouter
 from praxis_prime.router.settings import Settings, load_settings
 from praxis_prime.router.types import parse_model_spec
 from praxis_prime.skills.catalog import SkillCatalog, bundled_skills_dir
 from praxis_prime.skills.tools import install_skill_tool
-from praxis_prime.state import StateDB, default_db_path
+from praxis_prime.state import StateDB
 from praxis_prime.tools.builtin import builtin_registry
 from praxis_prime.tools.registry import ToolRegistry
 
@@ -53,6 +60,9 @@ class Runtime:
     read_access: ReadAccess
     mcp: McpManager | None = None
     browser: BrowserSession | None = None
+    system_prompt: str = ""
+    tool_policy: ToolAllowlist | None = None
+    profile_id: str = ""
 
     def close(self) -> None:
         if self.mcp is not None:
@@ -115,6 +125,7 @@ class Runtime:
             cwd=self.cwd,
             max_iterations=self.settings.max_iterations,
             mode=self.settings.mode,
+            system_prompt=self.system_prompt or SYSTEM_PROMPT,
             history=history,
             preamble=active_preamble,
             store=self.store,
@@ -124,6 +135,7 @@ class Runtime:
             recall_for=recall_for,
             on_turn_end=on_turn_end,
             read_access=self.read_access,
+            tool_policy=self.tool_policy,
         )
         return session_id, loop
 
@@ -138,6 +150,8 @@ def build_runtime(
     providers: dict[str, ChatProvider] | None = None,
     model: str | None = None,
     registry: ToolRegistry | None = None,
+    profile: str | None = None,
+    actor_account: str = "",
 ) -> Runtime:
     if env is None and config_path is None:
         settings = load_settings()
@@ -150,9 +164,15 @@ def build_runtime(
     if model:
         ref = parse_model_spec(model)
         router.use_primary(ref)
-    path = data_path or default_db_path(env)
+    layout = resolve_runtime_layout(env, data_file=data_path, profile=profile)
+    if layout.profile_id:
+        requested = dict(settings.dials)
+        requested.update(layout.profile_dials)
+        settings = replace(settings, dials=clamp_dials(layout.floor_dials, requested))
+    path = layout.db_path
     db = StateDB(path)
     audit = AuditLog(db)
+    audit.bind(actor_account=actor_account, profile=layout.profile_id)
     tools = registry or builtin_registry()
     environ = os.environ if env is None else env
     if config_path is not None:
@@ -180,7 +200,7 @@ def build_runtime(
         episodic_ttl_days=settings.memory_episodic_ttl_days,
         cwd=work,
     )
-    skills = _skills(environ, work, config_path)
+    skills = _skills(environ, work, config_path, layout.skills_dir)
     install_memory_tools(tools, memory)
     install_skill_tool(tools, skills)
     sync_dial_positions(db, audit, settings.dials)
@@ -228,6 +248,9 @@ def build_runtime(
         read_access=access,
         mcp=mcp,
         browser=browser,
+        system_prompt=_system_prompt(layout.persona_path),
+        tool_policy=layout.allowlist,
+        profile_id=layout.profile_id,
     )
 
 
@@ -251,12 +274,21 @@ def _preamble(runtime: Runtime, scopes: tuple[str, ...], skill: str) -> str:
     return "\n\n".join(blocks)
 
 
+def _system_prompt(persona_path: Path | None) -> str:
+    if persona_path is None:
+        return SYSTEM_PROMPT
+    return compose_system_prompt(read_persona(persona_path))
+
+
 def _skills(
     env: Mapping[str, str],
     cwd: Path,
     config_path: Path | None,
+    profile_skills: Path | None = None,
 ) -> SkillCatalog:
-    if config_path is not None:
+    if profile_skills is not None:
+        user = profile_skills
+    elif config_path is not None:
         user = config_path.parent / "skills"
     else:
         user = config_dir(env) / "skills"

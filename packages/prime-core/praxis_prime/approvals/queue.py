@@ -38,6 +38,7 @@ class _Item:
     actor: str
     decision: ApprovalDecision | None
     event: threading.Event
+    profile_id: str = ""
 
     def public(self) -> dict[str, object]:
         return {
@@ -50,6 +51,7 @@ class _Item:
             "sandboxed": self.request.sandboxed,
             "mount": self.request.mount,
             "sessionId": self.session_id,
+            "profileId": self.profile_id,
             "state": self.state,
             "actor": self.actor,
             "expiresAt": datetime.fromtimestamp(self.expires_at, UTC).isoformat(),
@@ -69,6 +71,7 @@ class ApprovalQueue:
         self.ttl = ttl
         self.on_pending = on_pending
         self.on_resolved = on_resolved
+        self.profile_id = ""
         self._items: dict[str, _Item] = {}
         self._lock = threading.Lock()
 
@@ -85,6 +88,7 @@ class ApprovalQueue:
             actor="",
             decision=None,
             event=threading.Event(),
+            profile_id=self.profile_id,
         )
         with self._lock:
             self._items[item.id] = item

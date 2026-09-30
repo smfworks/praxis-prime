@@ -17,11 +17,13 @@ import sys
 from pathlib import Path
 
 from praxis_prime import __version__
+from praxis_prime.accounts.cli import account_command, add_account_parser
 from praxis_prime.compliance.cli import add_compliance_parsers, dispatch_compliance
 from praxis_prime.config import describe_write, resolve_config_dir, write_default_config
 from praxis_prime.doctor import format_report, report_exit_code, run_system_doctor
 from praxis_prime.mcp.cli import add_mcp_parser, mcp_command
 from praxis_prime.packs.cli import add_packs_parsers, dispatch_packs
+from praxis_prime.profiles.cli import add_profile_parser, profile_command
 from praxis_prime.user_commands import add_user_commands, dispatch_user_command
 
 
@@ -55,6 +57,10 @@ def main(argv: list[str] | None = None) -> int:
         return _decide_command(args)
     if args.command == "mcp":
         return mcp_command(args)
+    if args.command == "account":
+        return account_command(args)
+    if args.command == "profile":
+        return profile_command(args)
     handled = dispatch_packs(args)
     if handled is not None:
         return handled
@@ -163,6 +169,8 @@ def build_parser() -> argparse.ArgumentParser:
         "pair",
         help="Print a one-time code. Send it to the bot as /pair CODE.",
     )
+    add_account_parser(commands)
+    add_profile_parser(commands)
     add_mcp_parser(commands)
     add_packs_parsers(commands)
     add_compliance_parsers(commands)

@@ -22,6 +22,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from praxis_prime import __version__
+from praxis_prime.accounts.db import AccountStore
 from praxis_prime.approvals.queue import ApprovalQueue
 from praxis_prime.channels.secrets import load_telegram_token
 from praxis_prime.channels.telegram import (
@@ -114,12 +115,15 @@ def serve(
 
     queue = ApprovalQueue(ttl=ttl)
     config_path = Path(config) if config else None
+    root = data_dir(environ)
     try:
         runtime = build_runtime(env=environ, config_path=config_path, approver=queue.authorize)
     except (OSError, ValueError) as exc:
         logger.error("runtime_failed", error=type(exc).__name__)
         print(f"praxis-primed: {exc}", file=sys.stderr)
         return 1
+    queue.profile_id = runtime.profile_id
+    accounts: AccountStore | None = AccountStore(root / "accounts.db")
     agent = Host(runtime, queue)
     adapter = _telegram(environ, agent, queue, logger, telegram_token)
     socket_path = str(runtime_root / "prime.sock")
@@ -132,6 +136,9 @@ def serve(
         logger=logger,
         socket_path=socket_path,
         decider=runtime.engine,
+        accounts=accounts,
+        audit=runtime.audit,
+        data_root=root,
     )
 
     def on_pending(item: dict[str, object]) -> None:
@@ -169,6 +176,9 @@ def serve(
         logger.error("bind_failed", error=type(exc).__name__)
         print(f"praxis-primed: {exc}", file=sys.stderr)
         agent.close()
+        if accounts is not None:
+            accounts.close()
+            accounts = None
         return 1
     started = datetime.now(UTC).isoformat(timespec="seconds")
     write_discovery(
@@ -207,6 +217,8 @@ def serve(
             adapter.stop()
         agent.close()
         server.shutdown()
+        if accounts is not None:
+            accounts.close()
         clear_discovery(environ)
     return 0
 

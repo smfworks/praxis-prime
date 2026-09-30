@@ -67,6 +67,21 @@ praxis-prime approvals deny ap_0123abcd
 
 `shell` uses bubblewrap when `bwrap` is installed. The sandbox has no network, and the workspace is mounted read-only unless a write was approved for that directory. Only `ls`, `cat` (and `head` / `tail`) of concrete workspace paths, `git status`, `git diff` of existing non-secret files or `--stat` / `--name-only` / `--name-status`, and `git log` without `-p` skip approval. `pytest --collect-only` asks, because collection imports the repo's `conftest.py`. A directory or `.` beside a file asks unless the diff is one of those summary flags. A pathspec that starts with `:` is allowlisted only when it names an existing non-secret file. Before a content diff is auto-approved, `git --name-only -z` must list only those files. The sandbox home is an empty directory. Repo git config is an allowlist: auto-approval requires every key in the worktree config, `config.worktree`, a linked worktree's common dir, and any included file to be `core.repositoryformatversion=0`, `core.filemode`, `core.bare`, `core.logallrefupdates`, `core.ignorecase`, `core.precomposeunicode`, `core.symlinks`, `remote.<name>.url`, `remote.<name>.fetch`, `branch.<name>.remote`, `branch.<name>.merge`, `user.name`, `user.email`, or `init.defaultBranch`. Any other key asks, as does an unreadable or oversized config, a `.gitmodules` file, or a `modules` directory. `git status` does not ask on a `HEAD` `filter=` alone, because a filter or driver defined in config already asks. Globs, `rev:path`, and patch output of the whole tree ask. Anything else asks, including deletes, redirects, and interpreters. If bubblewrap is missing, or it fails to start, the command is not silently run on the host: every unsandboxed command needs approval, and a failed sandbox is reported as a failure.
 
+## Accounts and profiles
+
+The first account is the owner. Passwords are argon2id and are not command arguments:
+
+```bash
+praxis-prime account create ada --password-stdin
+praxis-prime account list
+praxis-prime account passwd ada --password-stdin
+praxis-prime profile create work
+praxis-prime profile list
+praxis-prime profile assign work --account ada --role operator
+```
+
+That first `account create` moves an existing single-user `prime.db` into `profiles/default/` and keeps a copy under `data/backups/`. Later runs see the migration marker and do not copy again. Each profile has its own `prime.db`, skills, routines, and `SOUL.md`. A profile can only tighten the org tool list and dial floor. Persona text is appended after the fixed safety rules and cannot auto-approve. The gateway stays on `127.0.0.1`. Cookie sessions need the `x-csrf-token` header on changes. A viewer cannot approve.
+
 ## Models
 
 The default spec is `ollama:qwen3:32b`. Ollama's native chat API is `http://127.0.0.1:11434`. Override it with `PRAXIS_PRIME_OLLAMA_HOST` or `OLLAMA_HOST`.
