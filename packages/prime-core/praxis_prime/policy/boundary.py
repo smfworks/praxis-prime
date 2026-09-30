@@ -21,7 +21,9 @@ import re
 import socket
 import ssl
 import stat
-from collections.abc import Callable, Collection, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
@@ -81,18 +83,8 @@ _BROWSER_CONFIG = frozenset(
         "opera",
     }
 )
-# Profile trees are large. Only these filenames, plus the denylist patterns,
-# contribute inodes. Cache and other files are listed and then skipped.
-_PROFILE_ROOT_NAMES = frozenset(
-    {
-        ".mozilla",
-        "mozilla",
-        "google-chrome",
-        "chromium",
-        "bravesoftware",
-        "microsoft-edge",
-    }
-)
+# Every candidate tree contributes only these filenames, plus the denylist
+# patterns. Cache and log files are listed and then skipped.
 _PROFILE_SECRET_NAMES = frozenset(
     {
         "login data",
@@ -102,6 +94,7 @@ _PROFILE_SECRET_NAMES = frozenset(
         "key4.db",
         "key3.db",
         "logins.json",
+        "logins-backup.json",
         "cookies.sqlite",
         "cert9.db",
         "signons.sqlite",
@@ -109,6 +102,13 @@ _PROFILE_SECRET_NAMES = frozenset(
         "account web data",
         "login data for account",
         "safe browsing cookies",
+    }
+)
+_GCLOUD_SECRET_NAMES = frozenset(
+    {
+        "credentials.db",
+        "access_tokens.db",
+        "application_default_credentials.json",
     }
 )
 _PROFILE_SIDECAR_SUFFIXES = ("-journal", "-wal", "-shm")
@@ -263,16 +263,59 @@ def inode_is_secret(path: Path, inodes: set[tuple[int, int]] | None = None) -> b
     return (st.st_dev, st.st_ino) in known
 
 
+@dataclass
+class _InodeScanCache:
+    done: bool = False
+    found: set[tuple[int, int]] | None = None
+    error: ReadDenied | None = None
+
+
+_inode_scan_cache: ContextVar[_InodeScanCache | None] = ContextVar(
+    "praxis_prime_inode_scan",
+    default=None,
+)
+
+
+@contextmanager
+def inode_scan_scope() -> Iterator[None]:
+    """Reuse one secret-inode scan for the current turn."""
+    token = _inode_scan_cache.set(_InodeScanCache())
+    try:
+        yield
+    finally:
+        _inode_scan_cache.reset(token)
+
+
 def secret_inode_set() -> set[tuple[int, int]]:
     """Inodes of well-known secret files, so a hard link can be recognized.
 
-    Browser profile trees contribute only secret-named files. The file cap
-    denies the read when a secret-candidate file is left unscanned.
+    Every candidate tree contributes files whose names match the secret
+    patterns. The file cap denies the read when a matching file is left
+    unscanned. Inside ``inode_scan_scope`` the scan runs once.
     """
+    cache = _inode_scan_cache.get()
+    if cache is not None and cache.done:
+        if cache.error is not None:
+            raise cache.error
+        return cache.found or set()
+    try:
+        found = _scan_secret_inodes()
+    except ReadDenied as exc:
+        if cache is not None:
+            cache.done = True
+            cache.error = exc
+        raise
+    if cache is not None:
+        cache.done = True
+        cache.found = found
+    return found
+
+
+def _scan_secret_inodes() -> set[tuple[int, int]]:
     found: set[tuple[int, int]] = set()
     count = 0
     for path in _inode_candidates():
-        count, capped = _collect_inodes(path, found, count, named_only=_named_only(path))
+        count, capped = _collect_inodes(path, found, count)
         if capped:
             _refuse_capped_inode_scan()
     return found
@@ -541,18 +584,27 @@ def _special_file(path: Path) -> bool:
 
 def _inode_candidates() -> list[Path]:
     home = Path.home()
+    config = home / ".config"
     paths = [
         home / ".ssh",
         home / ".aws",
-        home / ".config" / "gcloud",
+        config / "gcloud",
         home / ".kube",
         home / ".gnupg",
         home / ".local" / "share" / "keyrings",
         home / ".mozilla",
-        home / ".config" / "google-chrome",
-        home / ".config" / "chromium",
-        home / ".config" / "BraveSoftware",
-        home / ".config" / "microsoft-edge",
+        config / "google-chrome",
+        config / "google-chrome-beta",
+        config / "chromium",
+        config / "BraveSoftware",
+        config / "microsoft-edge",
+        config / "vivaldi",
+        config / "opera",
+        home / "snap" / "chromium" / "common" / "chromium",
+        home / "snap" / "firefox" / "common" / ".mozilla",
+        home / ".var" / "app" / "com.google.Chrome" / "config" / "google-chrome",
+        home / ".var" / "app" / "org.chromium.Chromium" / "config" / "chromium",
+        home / ".var" / "app" / "org.mozilla.firefox" / ".mozilla",
         home / ".netrc",
         home / ".git-credentials",
         home / ".docker" / "config.json",
@@ -567,17 +619,12 @@ def _inode_candidates() -> list[Path]:
     return paths
 
 
-def _named_only(path: Path) -> bool:
-    """Browser profiles are matched by secret filename. Other roots count every file."""
-    return path.name.lower() in _PROFILE_ROOT_NAMES
-
-
 def _profile_file_is_secret(name: str) -> bool:
     """True for denylist names and known browser credential files."""
     if _name_is_secret(name):
         return True
     lower = name.lower()
-    if lower in _PROFILE_SECRET_NAMES:
+    if lower in _PROFILE_SECRET_NAMES or lower.startswith("sessionstore"):
         return True
     for suffix in _PROFILE_SIDECAR_SUFFIXES:
         if lower.endswith(suffix) and lower[: -len(suffix)] in _PROFILE_SECRET_NAMES:
@@ -585,10 +632,17 @@ def _profile_file_is_secret(name: str) -> bool:
     return False
 
 
-def _candidate_name(name: str, *, named_only: bool) -> bool:
-    if named_only:
-        return _profile_file_is_secret(name)
-    return True
+def _inode_file_is_secret(name: str, directory: Path) -> bool:
+    """True when this filename is a secret candidate under ``directory``."""
+    if _profile_file_is_secret(name):
+        return True
+    lower = name.lower()
+    if lower in _GCLOUD_SECRET_NAMES:
+        return True
+    parts = tuple(part.lower() for part in directory.parts)
+    if lower == "config" and ".kube" in parts:
+        return True
+    return "legacy_credentials" in parts
 
 
 def _refuse_capped_inode_scan() -> None:
@@ -600,20 +654,21 @@ def _refuse_capped_inode_scan() -> None:
     raise ReadDenied(message, "inode_scan_capped")
 
 
-def _collect_inodes(
-    path: Path,
-    found: set[tuple[int, int]],
-    count: int,
-    *,
-    named_only: bool,
-) -> tuple[int, bool]:
-    """Return ``(count, capped)``. ``capped`` means a secret candidate was skipped."""
+def _resolve_scan_root(path: Path) -> Path:
+    """Follow a top-level candidate symlink. Nested links stay unfollowed."""
     try:
-        if path.is_symlink() and path.is_dir():
-            return count, False
+        if path.is_symlink():
+            return path.resolve(strict=False)
+    except (OSError, RuntimeError, ValueError):
+        return path
+    return path
+
+
+def _collect_inodes(path: Path, found: set[tuple[int, int]], count: int) -> tuple[int, bool]:
+    """Return ``(count, capped)``. ``capped`` means a secret candidate was skipped."""
+    path = _resolve_scan_root(path)
+    try:
         if path.is_file():
-            if not _candidate_name(path.name, named_only=named_only):
-                return count, False
             if count >= _MAX_INODE_FILES:
                 return count, True
             return _add_inode(path, found, count), False
@@ -622,7 +677,7 @@ def _collect_inodes(
     except OSError:
         return count, False
     if count >= _MAX_INODE_FILES:
-        return count, _has_pending_secret(path, named_only=named_only)
+        return count, _has_pending_secret(path)
     try:
         walker = os.walk(path, followlinks=False)
     except OSError:
@@ -634,22 +689,22 @@ def _collect_inodes(
             if not child.is_symlink():
                 kept.append(name)
         dirnames[:] = kept
+        directory = Path(dirpath)
         for name in filenames:
-            if not _candidate_name(name, named_only=named_only):
+            if not _inode_file_is_secret(name, directory):
                 continue
             if count >= _MAX_INODE_FILES:
                 return count, True
-            count = _add_inode(Path(dirpath) / name, found, count)
+            count = _add_inode(directory / name, found, count)
     return count, False
 
 
-def _has_pending_secret(path: Path, *, named_only: bool) -> bool:
+def _has_pending_secret(path: Path) -> bool:
     """True when ``path`` still contains a secret-candidate file."""
+    path = _resolve_scan_root(path)
     try:
-        if path.is_symlink() and path.is_dir():
-            return False
         if path.is_file():
-            return _candidate_name(path.name, named_only=named_only)
+            return True
         if not path.is_dir():
             return False
     except OSError:
@@ -665,8 +720,9 @@ def _has_pending_secret(path: Path, *, named_only: bool) -> bool:
             if not child.is_symlink():
                 kept.append(name)
         dirnames[:] = kept
+        directory = Path(dirpath)
         for name in filenames:
-            if _candidate_name(name, named_only=named_only):
+            if _inode_file_is_secret(name, directory):
                 return True
     return False
 

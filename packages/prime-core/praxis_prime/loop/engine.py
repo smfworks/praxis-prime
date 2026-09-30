@@ -29,7 +29,7 @@ from praxis_prime.loop.events import LoopEvent, StatusEvent, TurnEnded
 from praxis_prime.loop.hooks import HookDecision, HookResult, LoopHooks
 from praxis_prime.loop.prompt import FENCE_END, SYSTEM_PROMPT, fence_untrusted
 from praxis_prime.memory.store import SessionStore
-from praxis_prime.policy.boundary import ReadAccess, ReadDenied
+from praxis_prime.policy.boundary import ReadAccess, ReadDenied, inode_scan_scope
 from praxis_prime.policy.engine import HookPoint, PolicyContext, PolicyEngine
 from praxis_prime.router.router import ModelRouter
 from praxis_prime.router.types import (
@@ -99,6 +99,14 @@ class AgentLoop:
         control: TurnControl | None = None,
     ) -> Iterator[LoopEvent]:
         """Run one user turn, yielding text and timeline events as they happen."""
+        with inode_scan_scope():
+            yield from self._run_turn(user_text, control)
+
+    def _run_turn(
+        self,
+        user_text: str,
+        control: TurnControl | None = None,
+    ) -> Iterator[LoopEvent]:
         control = control or TurnControl()
         self._turn_user = user_text
         self.policy.session_id = self.session_id

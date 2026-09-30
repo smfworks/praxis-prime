@@ -20,8 +20,11 @@ from praxis_prime.loop.events import StatusEvent
 from praxis_prime.policy.boundary import (
     ReadAccess,
     ReadDenied,
+    _inode_candidates,
     fetch_public,
+    inode_scan_scope,
     is_secret_path,
+    secret_inode_set,
 )
 from praxis_prime.policy.dials import default_positions
 from praxis_prime.policy.engine import HookPoint, PolicyContext, PolicyEngine
@@ -202,8 +205,8 @@ def test_hardlink_to_a_known_secret_is_rejected(tmp_path: Path, monkeypatch):
 def test_inode_scan_cap_denies_the_read(tmp_path: Path, monkeypatch, caplog):
     ssh = tmp_path / "ssh"
     ssh.mkdir()
-    for index in range(4):
-        (ssh / f"file-{index}").write_text("x", encoding="utf-8")
+    for name in ("id_rsa", "id_ed25519", "id_ecdsa", "id_dsa"):
+        (ssh / name).write_text("x", encoding="utf-8")
     root = tmp_path / "ws"
     root.mkdir()
     (root / "note.txt").write_text("hello\n", encoding="utf-8")
@@ -258,6 +261,153 @@ def test_skipped_profile_secret_still_fails_closed(tmp_path: Path, monkeypatch, 
     assert denial.code == "inode_scan_capped"
     assert "hello" not in str(denial)
     assert "secret-file cap" in caplog.text
+
+
+def test_kube_cache_does_not_trip_the_inode_cap(tmp_path: Path, monkeypatch):
+    kube = tmp_path / ".kube"
+    discovery = kube / "cache" / "discovery"
+    discovery.mkdir(parents=True)
+    for index in range(600):
+        (discovery / f"item-{index}.json").write_text("{}", encoding="utf-8")
+    config = kube / "config"
+    config.write_text("apiVersion: v1\n", encoding="utf-8")
+    root = tmp_path / "ws"
+    root.mkdir()
+    (root / "hello.txt").write_text("hello\n", encoding="utf-8")
+    os.link(config, root / "notes.txt")
+    monkeypatch.setattr("praxis_prime.policy.boundary._inode_candidates", lambda: [kube])
+    ctx = _ctx(root)
+    assert execute_read_file({"path": "hello.txt"}, ctx) == "hello\n"
+    denial = _denied(execute_read_file, {"path": "notes.txt"}, ctx)
+    assert denial.code == "secret_path"
+    assert SECRET not in str(denial)
+
+
+def test_gcloud_logs_do_not_hide_named_credentials(tmp_path: Path, monkeypatch):
+    gcloud = tmp_path / "gcloud"
+    logs = gcloud / "logs"
+    logs.mkdir(parents=True)
+    for index in range(40):
+        (logs / f"log-{index}.txt").write_text("x", encoding="utf-8")
+    legacy = gcloud / "legacy_credentials" / "user"
+    legacy.mkdir(parents=True)
+    adc = legacy / "adc.json"
+    adc.write_text(SECRET, encoding="utf-8")
+    (gcloud / "access_tokens.db").write_text("tokens", encoding="utf-8")
+    (gcloud / "credentials.db").write_text("creds", encoding="utf-8")
+    (gcloud / "application_default_credentials.json").write_text("{}\n", encoding="utf-8")
+    root = tmp_path / "ws"
+    root.mkdir()
+    (root / "hello.txt").write_text("hello\n", encoding="utf-8")
+    os.link(adc, root / "notes.txt")
+    os.link(gcloud / "access_tokens.db", root / "tokens.txt")
+    monkeypatch.setattr("praxis_prime.policy.boundary._inode_candidates", lambda: [gcloud])
+    monkeypatch.setattr("praxis_prime.policy.boundary._MAX_INODE_FILES", 4)
+    ctx = _ctx(root)
+    assert execute_read_file({"path": "hello.txt"}, ctx) == "hello\n"
+    assert _denied(execute_read_file, {"path": "notes.txt"}, ctx).code == "secret_path"
+    assert _denied(execute_read_file, {"path": "tokens.txt"}, ctx).code == "secret_path"
+
+
+_PACKAGED_BROWSER_ROOTS = (
+    "snap/chromium/common/chromium",
+    "snap/firefox/common/.mozilla",
+    ".var/app/com.google.Chrome/config/google-chrome",
+    ".var/app/org.chromium.Chromium/config/chromium",
+    ".var/app/org.mozilla.firefox/.mozilla",
+    ".config/vivaldi",
+    ".config/opera",
+    ".config/google-chrome-beta",
+)
+
+
+def test_packaged_browser_roots_are_inode_candidates(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    found = set(_inode_candidates())
+    for relative in _PACKAGED_BROWSER_ROOTS:
+        assert tmp_path.joinpath(*relative.split("/")) in found
+
+
+@pytest.mark.parametrize("relative", _PACKAGED_BROWSER_ROOTS)
+def test_packaged_browser_root_hardlink_is_denied(tmp_path: Path, monkeypatch, relative: str):
+    profile = tmp_path.joinpath(*relative.split("/"))
+    profile.mkdir(parents=True)
+    secret = profile / "Cookies"
+    secret.write_text(SECRET, encoding="utf-8")
+    (profile / "Cache").mkdir()
+    for index in range(8):
+        (profile / "Cache" / f"data_{index}").write_text("x", encoding="utf-8")
+    root = tmp_path / "ws"
+    root.mkdir()
+    (root / "hello.txt").write_text("hello\n", encoding="utf-8")
+    os.link(secret, root / "notes.txt")
+    monkeypatch.setattr("praxis_prime.policy.boundary._inode_candidates", lambda: [profile])
+    ctx = _ctx(root)
+    assert execute_read_file({"path": "hello.txt"}, ctx) == "hello\n"
+    denial = _denied(execute_read_file, {"path": "notes.txt"}, ctx)
+    assert denial.code == "secret_path"
+    assert SECRET not in str(denial)
+
+
+def test_symlinked_profile_root_still_catches_a_hardlink(tmp_path: Path, monkeypatch):
+    real = tmp_path / "real-chromium"
+    real.mkdir()
+    secret = real / "Login Data"
+    secret.write_text(SECRET, encoding="utf-8")
+    linked = tmp_path / "chromium"
+    linked.symlink_to(real, target_is_directory=True)
+    root = tmp_path / "ws"
+    root.mkdir()
+    (root / "hello.txt").write_text("hello\n", encoding="utf-8")
+    os.link(secret, root / "notes.txt")
+    monkeypatch.setattr("praxis_prime.policy.boundary._inode_candidates", lambda: [linked])
+    ctx = _ctx(root)
+    assert execute_read_file({"path": "hello.txt"}, ctx) == "hello\n"
+    denial = _denied(execute_read_file, {"path": "notes.txt"}, ctx)
+    assert denial.code == "secret_path"
+    assert SECRET not in str(denial)
+
+
+def test_firefox_session_backups_are_secret_inodes(tmp_path: Path, monkeypatch):
+    profile = tmp_path / "firefox"
+    profile.mkdir()
+    backups = {
+        "logins-backup.json": SECRET,
+        "sessionstore.jsonlz4": SECRET,
+    }
+    root = tmp_path / "ws"
+    root.mkdir()
+    (root / "hello.txt").write_text("hello\n", encoding="utf-8")
+    for name, body in backups.items():
+        source = profile / name
+        source.write_text(body, encoding="utf-8")
+        os.link(source, root / f"copy-{name}")
+    monkeypatch.setattr("praxis_prime.policy.boundary._inode_candidates", lambda: [profile])
+    ctx = _ctx(root)
+    assert execute_read_file({"path": "hello.txt"}, ctx) == "hello\n"
+    for name in backups:
+        denial = _denied(execute_read_file, {"path": f"copy-{name}"}, ctx)
+        assert denial.code == "secret_path"
+        assert SECRET not in str(denial)
+
+
+def test_inode_scan_runs_once_per_turn(tmp_path: Path, monkeypatch):
+    calls = {"n": 0}
+    real = _inode_candidates
+
+    def counted():
+        calls["n"] += 1
+        return real()
+
+    monkeypatch.setattr("praxis_prime.policy.boundary._inode_candidates", counted)
+    with inode_scan_scope():
+        secret_inode_set()
+        secret_inode_set()
+    assert calls["n"] == 1
+    secret_inode_set()
+    assert calls["n"] == 2
+    del tmp_path
 
 
 def test_allowlist_is_explicit_and_does_not_unlock_secrets(tmp_path: Path):
