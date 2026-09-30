@@ -19,6 +19,7 @@ from praxis_prime.loop.engine import AgentLoop, _reuses_inode_cache
 from praxis_prime.loop.events import StatusEvent
 from praxis_prime.policy import boundary as boundary_mod
 from praxis_prime.policy.boundary import (
+    _BROWSER_PROFILES,
     InodeScanCache,
     ReadAccess,
     ReadDenied,
@@ -317,95 +318,106 @@ def test_gcloud_logs_do_not_hide_named_credentials(tmp_path: Path, monkeypatch):
     assert _denied(execute_read_file, {"path": "tokens.txt"}, ctx).code == "secret_path"
 
 
-_PACKAGED_BROWSER_ROOTS = (
-    "snap/chromium/common/chromium",
-    "snap/firefox/common/.mozilla",
-    ".var/app/com.google.Chrome/config/google-chrome",
-    ".var/app/org.chromium.Chromium/config/chromium",
-    ".var/app/org.mozilla.firefox/.mozilla",
-    ".config/vivaldi",
-    ".config/opera",
-    ".config/google-chrome-beta",
-    ".config/google-chrome-unstable",
-)
+def _profile_id(profile: object) -> str:
+    scan = getattr(profile, "scan", ())
+    return "/".join(scan)
 
 
-def test_packaged_browser_roots_are_inode_candidates(tmp_path: Path, monkeypatch):
+def test_every_direct_read_browser_root_has_an_inode_candidate(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
     found = set(_inode_candidates())
-    for relative in _PACKAGED_BROWSER_ROOTS:
-        assert tmp_path.joinpath(*relative.split("/")) in found
+    assert _BROWSER_PROFILES
+    for profile in _BROWSER_PROFILES:
+        assert profile.scan[: len(profile.deny)] == profile.deny
+        scan = tmp_path.joinpath(*profile.scan)
+        assert scan in found, profile.scan
+        marker = tmp_path.joinpath(*profile.deny) / "Login Data"
+        assert is_secret_path(marker), profile.deny
 
 
-@pytest.mark.parametrize("relative", _PACKAGED_BROWSER_ROOTS)
-def test_packaged_browser_root_hardlink_is_denied(tmp_path: Path, monkeypatch, relative: str):
-    profile = tmp_path.joinpath(*relative.split("/"))
-    profile.mkdir(parents=True)
-    secret = profile / "Cookies"
+def test_ordinary_config_file_stays_readable(tmp_path: Path, monkeypatch):
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    ordinary = home / ".config" / "ordinary" / "settings.toml"
+    ordinary.parent.mkdir(parents=True)
+    ordinary.write_text("theme = light\n", encoding="utf-8")
+    root = tmp_path / "ws"
+    root.mkdir()
+    access = ReadAccess(allow_paths=(str(home / ".config"),))
+    ctx = _ctx(root, access)
+    assert execute_read_file({"path": str(ordinary)}, ctx) == "theme = light\n"
+    assert not is_secret_path(ordinary)
+
+
+def test_workspace_snap_and_flatpak_paths_are_not_browser_roots(tmp_path: Path, monkeypatch):
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    real = home / "snap" / "firefox" / "notes.md"
+    real.parent.mkdir(parents=True)
+    real.write_text(SECRET, encoding="utf-8")
+    root = tmp_path / "ws"
+    snap_note = root / "snap" / "firefox" / "notes.md"
+    flatpak_note = root / ".var" / "app" / "com.google.Chrome" / "config" / "notes.md"
+    for path in (snap_note, flatpak_note):
+        path.parent.mkdir(parents=True)
+        path.write_text("hello\n", encoding="utf-8")
+    access = ReadAccess(allow_paths=(str(home / "snap"),))
+    ctx = _ctx(root, access)
+    assert execute_read_file({"path": "snap/firefox/notes.md"}, ctx) == "hello\n"
+    assert execute_read_file({"path": str(flatpak_note)}, ctx) == "hello\n"
+    assert not is_secret_path(snap_note)
+    assert not is_secret_path(flatpak_note)
+    denial = _denied(execute_read_file, {"path": str(real)}, ctx)
+    assert denial.code == "secret_path"
+    assert SECRET not in str(denial)
+
+
+@pytest.mark.parametrize("profile", _BROWSER_PROFILES, ids=_profile_id)
+def test_browser_table_direct_read_is_denied(tmp_path: Path, monkeypatch, profile):
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    secret = home.joinpath(*profile.scan) / "Login Data"
+    secret.parent.mkdir(parents=True)
     secret.write_text(SECRET, encoding="utf-8")
-    (profile / "Cache").mkdir()
+    root = tmp_path / "ws"
+    root.mkdir()
+    access = ReadAccess(
+        allow_paths=(str(home / ".config"), str(home / "snap"), str(home / ".var"))
+    )
+    ctx = _ctx(root, access)
+    assert is_secret_path(secret)
+    denial = _denied(execute_read_file, {"path": str(secret)}, ctx)
+    assert denial.code == "secret_path"
+    assert SECRET not in str(denial)
+
+
+@pytest.mark.parametrize("profile", _BROWSER_PROFILES, ids=_profile_id)
+def test_browser_table_hardlink_is_denied(tmp_path: Path, monkeypatch, profile):
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    profile_dir = home.joinpath(*profile.scan)
+    profile_dir.mkdir(parents=True)
+    secret = profile_dir / "Cookies"
+    secret.write_text(SECRET, encoding="utf-8")
+    cache = profile_dir / "Cache"
+    cache.mkdir()
     for index in range(8):
-        (profile / "Cache" / f"data_{index}").write_text("x", encoding="utf-8")
+        (cache / f"data_{index}").write_text("x", encoding="utf-8")
     root = tmp_path / "ws"
     root.mkdir()
     (root / "hello.txt").write_text("hello\n", encoding="utf-8")
     os.link(secret, root / "notes.txt")
-    monkeypatch.setattr("praxis_prime.policy.boundary._inode_candidates", lambda: [profile])
+    monkeypatch.setattr(
+        "praxis_prime.policy.boundary._inode_candidates",
+        lambda profile_dir=profile_dir: [profile_dir],
+    )
     ctx = _ctx(root)
     assert execute_read_file({"path": "hello.txt"}, ctx) == "hello\n"
     denial = _denied(execute_read_file, {"path": "notes.txt"}, ctx)
     assert denial.code == "secret_path"
     assert SECRET not in str(denial)
-
-
-_DIRECT_BROWSER_FILES = (
-    ".config/vivaldi/Default/Preferences",
-    ".config/vivaldi/Default/Login Data",
-    ".config/google-chrome-beta/Default/Preferences",
-    ".config/google-chrome-beta/Default/Login Data",
-    ".config/google-chrome-unstable/Default/Preferences",
-    ".config/google-chrome-unstable/Default/Login Data",
-    "snap/chromium/common/chromium/Default/Preferences",
-    "snap/chromium/common/chromium/Default/Login Data",
-    "snap/firefox/common/.mozilla/firefox/profile/logins.json",
-    "snap/firefox/common/.mozilla/firefox/profile/key4.db",
-    ".var/app/com.google.Chrome/config/google-chrome/Default/Preferences",
-    ".var/app/com.google.Chrome/config/google-chrome/Default/Login Data",
-    ".var/app/org.chromium.Chromium/config/chromium/Default/Preferences",
-    ".var/app/org.chromium.Chromium/config/chromium/Default/Login Data",
-    ".var/app/org.mozilla.firefox/.mozilla/firefox/profile/logins.json",
-    ".var/app/org.mozilla.firefox/.mozilla/firefox/profile/key4.db",
-)
-
-
-def test_direct_read_denies_new_browser_trees(tmp_path: Path):
-    home = tmp_path / "home"
-    ordinary = home / ".config" / "ordinary" / "settings.toml"
-    ordinary.parent.mkdir(parents=True)
-    ordinary.write_text("theme = light\n", encoding="utf-8")
-    for relative in _DIRECT_BROWSER_FILES:
-        path = home.joinpath(*relative.split("/"))
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(SECRET, encoding="utf-8")
-    root = tmp_path / "ws"
-    root.mkdir()
-    access = ReadAccess(
-        allow_paths=(
-            str(home / ".config"),
-            str(home / "snap"),
-            str(home / ".var"),
-        )
-    )
-    ctx = _ctx(root, access)
-    assert execute_read_file({"path": str(ordinary)}, ctx) == "theme = light\n"
-    assert not is_secret_path(ordinary)
-    for relative in _DIRECT_BROWSER_FILES:
-        path = home.joinpath(*relative.split("/"))
-        assert is_secret_path(path), relative
-        denial = _denied(execute_read_file, {"path": str(path)}, ctx)
-        assert denial.code == "secret_path", relative
-        assert SECRET not in str(denial)
 
 
 def test_symlinked_profile_root_still_catches_a_hardlink(tmp_path: Path, monkeypatch):
@@ -661,8 +673,8 @@ def test_scan_skips_only_root_proc_and_sys():
         assert not _is_unbounded_scan_root(Path(raw)), raw
 
 
-@pytest.mark.parametrize("target", ["/etc", "/usr", "/dev"])
-def test_etc_usr_and_dev_symlinks_use_the_entry_budget(
+@pytest.mark.parametrize("target", ["/etc", "/dev"])
+def test_etc_and_dev_symlinks_use_the_entry_budget(
     tmp_path: Path, monkeypatch, caplog, target: str
 ):
     home = tmp_path / "home"
@@ -727,19 +739,62 @@ def test_proc_subdirectory_is_entry_budgeted(tmp_path: Path, monkeypatch, caplog
     assert "hello" not in str(denial)
 
 
-def test_ssh_symlink_to_home_is_entry_budgeted(tmp_path: Path, monkeypatch, caplog):
+def test_ssh_symlink_to_home_over_budget_skips_the_walk(tmp_path: Path, monkeypatch, caplog):
     home = tmp_path / "home"
     home.mkdir()
     for index in range(5):
-        (home / f"notes-{index}.txt").write_text("x", encoding="utf-8")
+        (home / f"notes-{index}.txt").write_text("plain\n", encoding="utf-8")
+    key = home / "id_rsa"
+    key.write_text(SECRET, encoding="utf-8")
     (home / ".ssh").symlink_to(home, target_is_directory=True)
-    root = tmp_path / "ws"
+    root = home / "ws"
     root.mkdir()
     (root / "hello.txt").write_text("hello\n", encoding="utf-8")
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setattr(
         "praxis_prime.policy.boundary._inode_candidates", lambda: [home / ".ssh"]
     )
+    monkeypatch.setattr("praxis_prime.policy.boundary._MAX_SCAN_ENTRIES", 1)
+    access = ReadAccess(allow_paths=(str(home),))
+    ctx = _ctx(root, access)
+    with caplog.at_level(logging.WARNING, logger="praxis_prime.policy.boundary"):
+        assert execute_read_file({"path": "hello.txt"}, ctx) == "hello\n"
+        kept = execute_read_file({"path": str(home / "notes-0.txt")}, ctx)
+    assert kept == "plain\n"
+    assert "skipping inode walk" in caplog.text
+    assert ".ssh" in caplog.text
+    denial = _denied(execute_read_file, {"path": str(key)}, ctx)
+    assert denial.code == "secret_path"
+    assert SECRET not in str(denial)
+
+
+def test_ssh_symlink_to_usr_over_budget_skips_the_walk(tmp_path: Path, monkeypatch, caplog):
+    home = tmp_path / "home"
+    link = home / ".ssh"
+    link.parent.mkdir()
+    link.symlink_to("/usr")
+    root = tmp_path / "ws"
+    root.mkdir()
+    (root / "hello.txt").write_text("hello\n", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr("praxis_prime.policy.boundary._inode_candidates", lambda: [link])
+    monkeypatch.setattr("praxis_prime.policy.boundary._MAX_SCAN_ENTRIES", 1)
+    with caplog.at_level(logging.WARNING, logger="praxis_prime.policy.boundary"):
+        assert execute_read_file({"path": "hello.txt"}, _ctx(root)) == "hello\n"
+    assert "skipping inode walk" in caplog.text
+    assert "inode_scan_capped" not in caplog.text
+
+
+def test_generic_symlink_over_budget_still_fails_closed(tmp_path: Path, monkeypatch, caplog):
+    home = tmp_path / "home"
+    link = home / ".config" / "chromium"
+    link.parent.mkdir(parents=True)
+    link.symlink_to("/usr")
+    root = tmp_path / "ws"
+    root.mkdir()
+    (root / "hello.txt").write_text("hello\n", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr("praxis_prime.policy.boundary._inode_candidates", lambda: [link])
     monkeypatch.setattr("praxis_prime.policy.boundary._MAX_SCAN_ENTRIES", 1)
     with caplog.at_level(logging.WARNING, logger="praxis_prime.policy.boundary"):
         denial = _denied(execute_read_file, {"path": "hello.txt"}, _ctx(root))

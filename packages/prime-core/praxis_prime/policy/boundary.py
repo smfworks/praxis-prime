@@ -78,30 +78,89 @@ _SERVICE_ACCOUNT_SUFFIXES = (
 _KEY_PREFIXES = ("id_rsa", "id_ed25519", "id_ecdsa", "id_dsa")
 _SOURCE_SUFFIXES = frozenset({".py", ".pyi", ".md", ".rst", ".js", ".ts", ".tsx", ".go", ".rs"})
 _SECRET_DIR_PARTS = frozenset({".ssh", ".aws", ".gnupg", ".kube", ".mozilla"})
+
+
+@dataclass(frozen=True, slots=True)
+class _BrowserProfile:
+    """One browser tree shared by direct reads and the inode scan.
+
+    ``scan`` is the directory the inode walk covers, relative to ``$HOME``.
+    ``deny`` is the direct-read prefix, also relative to ``$HOME``. ``scan``
+    is ``deny`` or a directory under it, so the two cannot name different trees.
+    """
+
+    scan: tuple[str, ...]
+    deny: tuple[str, ...]
+
+
+def _profile(
+    scan: tuple[str, ...], deny: tuple[str, ...] | None = None
+) -> _BrowserProfile:
+    prefix = scan if deny is None else deny
+    if scan[: len(prefix)] != prefix:
+        raise ValueError(f"inode scan {scan} is outside direct-read prefix {prefix}")
+    return _BrowserProfile(scan=scan, deny=prefix)
+
+
+# Native ``~/.config`` names use their on-disk spelling. Snap and flatpak
+# rows deny the whole app prefix and scan the profile directory under it.
+_BROWSER_PROFILES: tuple[_BrowserProfile, ...] = (
+    _profile((".config", "gcloud")),
+    _profile((".config", "google-chrome")),
+    _profile((".config", "google-chrome-beta")),
+    _profile((".config", "google-chrome-unstable")),
+    _profile((".config", "chromium")),
+    _profile((".config", "chromium-browser")),
+    _profile((".config", "BraveSoftware")),
+    _profile((".config", "microsoft-edge")),
+    _profile((".config", "microsoft-edge-beta")),
+    _profile((".config", "microsoft-edge-dev")),
+    _profile((".config", "opera")),
+    _profile((".config", "opera-beta")),
+    _profile((".config", "vivaldi")),
+    _profile((".config", "vivaldi-snapshot")),
+    _profile(("snap", "chromium", "common", "chromium"), ("snap", "chromium")),
+    _profile(("snap", "firefox", "common", ".mozilla"), ("snap", "firefox")),
+    _profile(("snap", "brave", "common"), ("snap", "brave")),
+    _profile(("snap", "opera", "common"), ("snap", "opera")),
+    _profile(("snap", "vivaldi", "common"), ("snap", "vivaldi")),
+    _profile(
+        (".var", "app", "com.google.Chrome", "config", "google-chrome"),
+        (".var", "app", "com.google.Chrome", "config"),
+    ),
+    _profile(
+        (".var", "app", "org.chromium.Chromium", "config", "chromium"),
+        (".var", "app", "org.chromium.Chromium", "config"),
+    ),
+    _profile((".var", "app", "org.mozilla.firefox", ".mozilla")),
+    _profile((".var", "app", "org.mozilla.firefox", "config")),
+    _profile(
+        (".var", "app", "com.brave.Browser", "config", "BraveSoftware"),
+        (".var", "app", "com.brave.Browser", "config"),
+    ),
+    _profile(
+        (".var", "app", "com.microsoft.Edge", "config", "microsoft-edge"),
+        (".var", "app", "com.microsoft.Edge", "config"),
+    ),
+    _profile(
+        (".var", "app", "com.opera.Opera", "config", "opera"),
+        (".var", "app", "com.opera.Opera", "config"),
+    ),
+    _profile(
+        (".var", "app", "com.vivaldi.Vivaldi", "config", "vivaldi"),
+        (".var", "app", "com.vivaldi.Vivaldi", "config"),
+    ),
+)
 _BROWSER_CONFIG = frozenset(
-    {
-        "gcloud",
-        "google-chrome",
-        "google-chrome-beta",
-        "google-chrome-unstable",
-        "chromium",
-        "bravesoftware",
-        "microsoft-edge",
-        "opera",
-        "vivaldi",
-    }
+    profile.deny[1].lower()
+    for profile in _BROWSER_PROFILES
+    if profile.deny[0] == ".config" and len(profile.deny) == 2
 )
-# Snap and flatpak profile trees the inode scan already walks. Flatpak keeps
-# config under ``config/``, not ``.config/``. Ids are compared lowercase.
-_SNAP_BROWSERS = frozenset({"chromium", "firefox"})
-_FLATPAK_BROWSERS = frozenset(
-    {
-        "com.google.chrome",
-        "org.chromium.chromium",
-        "org.mozilla.firefox",
-    }
+_HOME_BROWSER_PREFIXES = tuple(
+    tuple(part.lower() for part in profile.deny)
+    for profile in _BROWSER_PROFILES
+    if profile.deny[0] in {"snap", ".var"}
 )
-_FLATPAK_PROFILE_DIRS = frozenset({"config", ".mozilla"})
 # Browser and gcloud trees contribute these filenames, plus the denylist
 # patterns. Credential directories count every file instead.
 _PROFILE_SECRET_NAMES = frozenset(
@@ -617,24 +676,22 @@ def _components_secret(parts: Sequence[str]) -> bool:
             return True
         if part == ".config" and nxt in _BROWSER_CONFIG:
             return True
-        if part == "snap" and nxt in _SNAP_BROWSERS:
-            return True
-        if _flatpak_profile(lower, index):
-            return True
         if part == ".local" and nxt == "share" and "keyrings" in lower[index + 2 :]:
             return True
-    return False
+    return _home_browser_prefix(lower)
 
 
-def _flatpak_profile(parts: Sequence[str], index: int) -> bool:
-    """True for ``.var/app/<id>/config`` and ``.var/app/<id>/.mozilla``."""
-    if index + 3 >= len(parts):
+def _home_browser_prefix(parts: Sequence[str]) -> bool:
+    """True for ``$HOME/snap/<browser>`` and ``$HOME/.var/app/<id>/...`` only.
+
+    A workspace file such as ``ws/snap/firefox/notes.md`` is not under
+    ``$HOME`` and is not a browser profile.
+    """
+    home = tuple(part.lower() for part in Path.home().parts)
+    if len(parts) < len(home) or parts[: len(home)] != home:
         return False
-    if parts[index] != ".var" or parts[index + 1] != "app":
-        return False
-    if parts[index + 2] not in _FLATPAK_BROWSERS:
-        return False
-    return parts[index + 3] in _FLATPAK_PROFILE_DIRS
+    relative = parts[len(home) :]
+    return any(relative[: len(prefix)] == prefix for prefix in _HOME_BROWSER_PREFIXES)
 
 
 def _special_file(path: Path) -> bool:
@@ -646,34 +703,24 @@ def _special_file(path: Path) -> bool:
 
 def _inode_candidates() -> list[Path]:
     home = Path.home()
-    config = home / ".config"
     paths = [
         home / ".ssh",
         home / ".aws",
-        config / "gcloud",
         home / ".kube",
         home / ".gnupg",
         home / ".local" / "share" / "keyrings",
         home / ".mozilla",
-        config / "google-chrome",
-        config / "google-chrome-beta",
-        config / "google-chrome-unstable",
-        config / "chromium",
-        config / "BraveSoftware",
-        config / "microsoft-edge",
-        config / "vivaldi",
-        config / "opera",
-        home / "snap" / "chromium" / "common" / "chromium",
-        home / "snap" / "firefox" / "common" / ".mozilla",
-        home / ".var" / "app" / "com.google.Chrome" / "config" / "google-chrome",
-        home / ".var" / "app" / "org.chromium.Chromium" / "config" / "chromium",
-        home / ".var" / "app" / "org.mozilla.firefox" / ".mozilla",
-        home / ".netrc",
-        home / ".boto",
-        home / ".git-credentials",
-        home / ".docker" / "config.json",
-        Path("/etc/shadow"),
     ]
+    paths.extend(home.joinpath(*profile.scan) for profile in _BROWSER_PROFILES)
+    paths.extend(
+        [
+            home / ".netrc",
+            home / ".boto",
+            home / ".git-credentials",
+            home / ".docker" / "config.json",
+            Path("/etc/shadow"),
+        ]
+    )
     try:
         paths.append(runtime_dir() / "gateway.token")
         paths.append(config_dir() / "secrets.env")
@@ -747,6 +794,33 @@ def _refuse_capped_inode_scan(limit: int, kind: str) -> None:
     )
     _log.warning(message)
     raise ReadDenied(message, "inode_scan_capped")
+
+
+def _named_root_budget_skips(path: Path, root: Path) -> bool:
+    """True when a credential symlink may be skipped instead of failing closed.
+
+    ``~/.ssh`` and the other credential directory names, pointed at ``$HOME``
+    or ``/usr``, can be larger than the entry budget. Skipping that walk
+    keeps ordinary reads working. Secret file names on the target are still
+    denied directly. Every other root still fails closed.
+    """
+    if path.name.lower() not in _CREDENTIAL_ROOTS:
+        return False
+    if _same_resolved(root, Path.home()):
+        return True
+    try:
+        posix = root.resolve(strict=False).as_posix()
+    except (OSError, RuntimeError, ValueError):
+        return False
+    return posix == "/usr" or posix.startswith("/usr/")
+
+
+def _warn_skipped_inode_root(path: Path, limit: int) -> None:
+    message = (
+        f"skipping inode walk of {path.name} after {limit} directory entries; "
+        "direct reads of secret names under that tree are still denied"
+    )
+    _log.warning(message)
 
 
 def _inside_home(path: Path, home: Path) -> bool:
@@ -857,6 +931,9 @@ def _collect_inodes(
         if budget is not None:
             entries += len(dirnames) + len(filenames)
             if entries > budget:
+                if _named_root_budget_skips(path, root):
+                    _warn_skipped_inode_root(path, budget)
+                    return None
                 return budget, "directory-entry"
         for name in filenames:
             if not _file_counts(name, directory, mode):
