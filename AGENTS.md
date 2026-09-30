@@ -83,7 +83,7 @@ praxis-prime doctor
 praxis-prime config --config-dir /tmp/praxis-prime-config
 ```
 
-CI runs `ruff check .` and `pytest` on Ubuntu with Python 3.12. Keep that green.
+CI runs `ruff check .` and `pytest` on Ubuntu with Python 3.12, 3.13, and 3.14. Keep that green.
 
 Style: Python 3.12, type hints, Ruff's default E/F/I/UP/B selection, line length 100. The standard library is enough for the skeleton. Add a dependency only when a real feature needs it.
 
