@@ -23,7 +23,7 @@ classifiers = [
   "Programming Language :: Python :: 3.14",
   "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
-dependencies = []
+dependencies = ["argon2-cffi>=23.1.0"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8.3", "ruff>=0.8", "hatchling>=1.26"]

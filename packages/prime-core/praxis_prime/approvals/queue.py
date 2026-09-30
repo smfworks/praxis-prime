@@ -11,7 +11,7 @@ import re
 import secrets
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -38,6 +38,7 @@ class _Item:
     actor: str
     decision: ApprovalDecision | None
     event: threading.Event
+    profile_id: str = ""
 
     def public(self) -> dict[str, object]:
         return {
@@ -50,9 +51,26 @@ class _Item:
             "sandboxed": self.request.sandboxed,
             "mount": self.request.mount,
             "sessionId": self.session_id,
+            "profileId": self.profile_id,
             "state": self.state,
             "actor": self.actor,
             "expiresAt": datetime.fromtimestamp(self.expires_at, UTC).isoformat(),
+        }
+
+    def meta(self) -> dict[str, object]:
+        """Id, tool, risk, time, and decision. No arguments and no text."""
+        if self.decision is not None:
+            decision = self.decision.value
+        elif self.state == "pending":
+            decision = "pending"
+        else:
+            decision = self.state
+        return {
+            "id": self.id,
+            "tool": self.request.tool,
+            "risk": self.request.risk.value,
+            "createdAt": datetime.fromtimestamp(self.created_at, UTC).isoformat(),
+            "decision": decision,
         }
 
 
@@ -69,6 +87,7 @@ class ApprovalQueue:
         self.ttl = ttl
         self.on_pending = on_pending
         self.on_resolved = on_resolved
+        self.profile_id = ""
         self._items: dict[str, _Item] = {}
         self._lock = threading.Lock()
 
@@ -85,6 +104,7 @@ class ApprovalQueue:
             actor="",
             decision=None,
             event=threading.Event(),
+            profile_id=self.profile_id,
         )
         with self._lock:
             self._items[item.id] = item
@@ -110,6 +130,22 @@ class ApprovalQueue:
             pending = [item.public() for item in self._items.values() if item.state == "pending"]
         pending.sort(key=lambda item: str(item["id"]))
         return pending
+
+    def list_meta(
+        self,
+        *,
+        profiles: Collection[str] | None = None,
+    ) -> list[dict[str, object]]:
+        """Content-free rows. ``profiles`` limits the set; None keeps every row."""
+        with self._lock:
+            items = list(self._items.values())
+        rows: list[dict[str, object]] = []
+        for item in items:
+            if profiles is not None and item.profile_id not in profiles:
+                continue
+            rows.append(item.meta())
+        rows.sort(key=lambda item: str(item["id"]))
+        return rows
 
     def decide(
         self,

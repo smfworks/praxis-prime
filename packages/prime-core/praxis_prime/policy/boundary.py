@@ -19,15 +19,18 @@ import ipaddress
 import logging
 import os
 import re
+import shlex
 import socket
 import ssl
 import stat
+import threading
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
-from praxis_prime.paths import config_dir, runtime_dir
+from praxis_prime.paths import config_dir, data_dir, runtime_dir
+from praxis_prime.statfile import StatKind, lstat_kind, stat_kind
 
 _log = logging.getLogger(__name__)
 
@@ -705,8 +708,344 @@ def _assess_read(
     return None
 
 
+def private_data_command(command: str, workspace: Path) -> bool:
+    """True when a shell command names account or profile data.
+
+    Quotes are parsed with ``shlex``. A recursive reader (``grep -r``,
+    ``rg``, ``find -exec``, ``tar``, ``cp -r``, ``rsync``) is refused when
+    a path it walks contains the data directory.
+    """
+    root = _data_root()
+    if root is None:
+        return True
+    if str(root) in command:
+        return True
+    try:
+        tokens = shlex.split(command, posix=True)
+    except ValueError:
+        return True
+    if _recursive_private_read(tokens, workspace, root):
+        return True
+    for token in tokens:
+        if token.startswith("-") or token in _SHELL_SEPARATORS:
+            continue
+        if _token_is_private(token, workspace):
+            return True
+    return False
+
+
+_data_root_lock = threading.Lock()
+_data_root_override: Path | None = None
+
+
+def bind_data_root(path: Path | None) -> None:
+    """Use ``path`` as the account data root. ``None`` follows the XDG path.
+
+    ``praxis-prime --data-dir`` passes that directory into the runtime.
+    The denylist has to use it, not only ``$XDG_DATA_HOME``.
+    """
+    global _data_root_override
+    with _data_root_lock:
+        _data_root_override = None if path is None else Path(path)
+
+
+def _data_root() -> Path | None:
+    with _data_root_lock:
+        override = _data_root_override
+    chosen = override
+    if chosen is None:
+        try:
+            chosen = data_dir()
+        except (OSError, RuntimeError, ValueError):
+            return None
+    try:
+        return Path(chosen).resolve(strict=False)
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
+def _is_private_data(path: Path) -> bool:
+    """Accounts database, profile trees, backups, and hard links to them.
+
+    A path that cannot be classified is private. ``Path.resolve`` and
+    ``Path.is_file`` on Python 3.14 hide permission errors, so this uses
+    ``os.stat`` / ``os.path.realpath``.
+    """
+    root = _data_root()
+    if root is None:
+        return True
+    if lstat_kind(path) is StatKind.UNREADABLE or stat_kind(path) is StatKind.UNREADABLE:
+        return True
+    try:
+        resolved = Path(os.path.realpath(path, strict=False))
+    except (OSError, RuntimeError, ValueError):
+        return True
+    if _private_path(resolved, root):
+        return True
+    inodes = _private_inodes(root)
+    if inodes is None:
+        return True
+    return _inode_in(resolved, inodes)
+
+
+def _private_path(resolved: Path, root: Path) -> bool:
+    if resolved == root / "accounts.db":
+        return True
+    if resolved.parent == root and resolved.name.startswith("accounts.db-"):
+        return True
+    if _same_regular_inode(resolved, root / "accounts.db"):
+        return True
+    for folder in ("profiles", "backups"):
+        try:
+            resolved.relative_to(root / folder)
+        except ValueError:
+            continue
+        return True
+    if resolved.name.lower() == "soul.md":
+        try:
+            resolved.relative_to(root)
+        except ValueError:
+            return False
+        return True
+    return False
+
+
+_PRIVATE_INODE_CAP = 20_000
+
+
+def _private_inodes(root: Path) -> set[tuple[int, int]] | None:
+    """Regular-file inodes under ``profiles/`` and ``backups/``.
+
+    ``None`` means the walk could not finish, so the caller fails closed.
+    Symlinks are not followed. Hard links share the inode of the original.
+    """
+    found: set[tuple[int, int]] = set()
+    for folder in (root / "profiles", root / "backups"):
+        if not _collect_tree_inodes(folder, found):
+            return None
+    database = root / "accounts.db"
+    kind = lstat_kind(database)
+    if kind is StatKind.UNREADABLE:
+        return None
+    if kind is StatKind.FILE and not _add_regular_inode(database, found):
+        return None
+    return found
+
+
+def _collect_tree_inodes(folder: Path, found: set[tuple[int, int]]) -> bool:
+    kind = lstat_kind(folder)
+    if kind is StatKind.MISSING:
+        return True
+    if kind is StatKind.UNREADABLE:
+        return False
+    if kind is StatKind.FILE:
+        return _add_regular_inode(folder, found)
+    if kind is not StatKind.DIR:
+        return True
+    stack = [folder]
+    while stack:
+        directory = stack.pop()
+        try:
+            entries = list(os.scandir(directory))
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return False
+        for entry in entries:
+            if len(found) > _PRIVATE_INODE_CAP:
+                return False
+            try:
+                st = entry.stat(follow_symlinks=False)
+            except OSError:
+                return False
+            if stat.S_ISLNK(st.st_mode):
+                continue
+            if stat.S_ISREG(st.st_mode):
+                found.add((st.st_dev, st.st_ino))
+            elif stat.S_ISDIR(st.st_mode):
+                stack.append(Path(entry.path))
+    return True
+
+
+def _add_regular_inode(path: Path, found: set[tuple[int, int]]) -> bool:
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return False
+    if not stat.S_ISREG(st.st_mode):
+        return True
+    if len(found) > _PRIVATE_INODE_CAP:
+        return False
+    found.add((st.st_dev, st.st_ino))
+    return True
+
+
+def _inode_in(path: Path, found: set[tuple[int, int]]) -> bool:
+    try:
+        st = os.stat(path, follow_symlinks=True)
+    except OSError:
+        return False
+    if not stat.S_ISREG(st.st_mode):
+        return False
+    return (st.st_dev, st.st_ino) in found
+
+
+_SHELL_SEPARATORS = frozenset({";", "&&", "||", "|", "&"})
+_RECURSIVE_WRAPPERS = frozenset({"sudo", "command", "env", "nice", "nohup", "stdbuf"})
+_CWD_SEARCHERS = frozenset({"grep", "egrep", "fgrep", "rg", "ripgrep", "find"})
+
+
+def _recursive_private_read(tokens: list[str], workspace: Path, root: Path) -> bool:
+    for segment in _command_segments(tokens):
+        argv = _unwrap_command(segment)
+        if not argv or not _is_recursive_reader(argv):
+            continue
+        operands = _operands(argv[1:])
+        if not operands and Path(argv[0]).name in _CWD_SEARCHERS:
+            if _contains_data(workspace, root):
+                return True
+            continue
+        for token in operands:
+            if _token_is_private(token, workspace) or _token_contains_data(token, workspace, root):
+                return True
+    return False
+
+
+def _command_segments(tokens: list[str]) -> list[list[str]]:
+    parts: list[list[str]] = []
+    current: list[str] = []
+    for token in tokens:
+        if token in _SHELL_SEPARATORS:
+            if current:
+                parts.append(current)
+                current = []
+            continue
+        current.append(token)
+    if current:
+        parts.append(current)
+    return parts
+
+
+def _unwrap_command(argv: list[str]) -> list[str]:
+    args = list(argv)
+    while args and Path(args[0]).name in _RECURSIVE_WRAPPERS:
+        args = args[1:]
+        while args and "=" in args[0] and not args[0].startswith("-"):
+            args = args[1:]
+    return args
+
+
+def _is_recursive_reader(argv: list[str]) -> bool:
+    name = Path(argv[0]).name
+    rest = argv[1:]
+    if name in {"rg", "ripgrep", "rsync", "tar"}:
+        return True
+    if name == "find":
+        return any(arg in {"-exec", "-execdir", "-ok", "-okdir"} for arg in rest)
+    if name in {"grep", "egrep", "fgrep"}:
+        return _short_flag(rest, "rR") or "--recursive" in rest or _directories_recurse(rest)
+    if name == "cp":
+        return _short_flag(rest, "rRa") or "--recursive" in rest or "--archive" in rest
+    return False
+
+
+def _short_flag(args: list[str], letters: str) -> bool:
+    for arg in args:
+        if len(arg) < 2 or not arg.startswith("-") or arg.startswith("--"):
+            continue
+        if any(ch in letters for ch in arg[1:]):
+            return True
+    return False
+
+
+def _directories_recurse(args: list[str]) -> bool:
+    for index, arg in enumerate(args):
+        if arg in {"-d", "--directories"}:
+            nxt = args[index + 1] if index + 1 < len(args) else ""
+            if nxt == "recurse":
+                return True
+        if arg.startswith("--directories=") and arg.endswith("recurse"):
+            return True
+    return False
+
+
+def _operands(args: list[str]) -> list[str]:
+    skip_value = frozenset(
+        {
+            "-f",
+            "-e",
+            "--file",
+            "--regexp",
+            "--include",
+            "--exclude",
+            "-d",
+            "--directories",
+        }
+    )
+    found: list[str] = []
+    skip = False
+    for arg in args:
+        if skip:
+            skip = False
+            continue
+        if arg == "--":
+            continue
+        if arg.startswith("-") and arg != "-":
+            if arg in skip_value:
+                skip = True
+            continue
+        found.append(arg)
+    return found
+
+
+def _token_is_private(token: str, workspace: Path) -> bool:
+    return _is_private_data(_token_path(token, workspace))
+
+
+def _token_contains_data(token: str, workspace: Path, root: Path) -> bool:
+    return _contains_data(_token_path(token, workspace), root)
+
+
+def _token_path(token: str, workspace: Path) -> Path:
+    candidate = Path(token)
+    if candidate.is_absolute():
+        return candidate
+    return workspace / candidate
+
+
+def _contains_data(candidate: Path, root: Path) -> bool:
+    """True when ``candidate`` is the data dir or a parent of it."""
+    try:
+        resolved = Path(os.path.realpath(candidate, strict=False))
+        data = Path(os.path.realpath(root, strict=False))
+    except (OSError, RuntimeError, ValueError):
+        return True
+    try:
+        data.relative_to(resolved)
+    except ValueError:
+        return False
+    return True
+
+
+def _same_regular_inode(path: Path, target: Path) -> bool:
+    """True when both paths are the same regular file, including a hard link."""
+    try:
+        left = os.stat(path, follow_symlinks=True)
+        right = os.stat(target, follow_symlinks=True)
+    except OSError:
+        return False
+    if not stat.S_ISREG(left.st_mode) or not stat.S_ISREG(right.st_mode):
+        return False
+    return (left.st_dev, left.st_ino) == (right.st_dev, right.st_ino)
+
+
 def _is_secret_path(path: Path) -> bool:
-    if _name_is_secret(path.name) or _components_secret(path.parts) or _special_file(path):
+    if (
+        _is_private_data(path)
+        or _name_is_secret(path.name)
+        or _components_secret(path.parts)
+        or _special_file(path)
+    ):
         return True
     try:
         resolved = path.resolve(strict=False)
@@ -715,7 +1054,8 @@ def _is_secret_path(path: Path) -> bool:
     if resolved == path:
         return False
     return (
-        _name_is_secret(resolved.name)
+        _is_private_data(resolved)
+        or _name_is_secret(resolved.name)
         or _components_secret(resolved.parts)
         or _special_file(resolved)
     )

@@ -32,6 +32,7 @@ from praxis_prime.loop.prompt import FENCE_END, SYSTEM_PROMPT, fence_untrusted
 from praxis_prime.memory.store import SessionStore
 from praxis_prime.policy.boundary import InodeScanCache, ReadAccess, ReadDenied
 from praxis_prime.policy.engine import HookPoint, PolicyContext, PolicyEngine
+from praxis_prime.profiles.policy import ToolAllowlist
 from praxis_prime.router.router import ModelRouter
 from praxis_prime.router.types import (
     AssistantFinal,
@@ -100,6 +101,7 @@ class AgentLoop:
         session_write_approved: bool = False,
         write_scope: Path | None = None,
         main_checkout: Path | None = None,
+        tool_policy: ToolAllowlist | None = None,
     ) -> None:
         self.router = router
         self.registry = registry
@@ -124,6 +126,7 @@ class AgentLoop:
         self.session_write_approved = session_write_approved
         self.write_scope = None if write_scope is None else Path(write_scope)
         self.main_checkout = None if main_checkout is None else Path(main_checkout)
+        self.tool_policy = tool_policy
         self._turn_user = ""
 
     def run_turn(
@@ -172,7 +175,7 @@ class AgentLoop:
             request = ChatRequest(
                 model=self.router.primary.model,
                 messages=self._messages(),
-                tools=tuple(self.registry.schemas()),
+                tools=self._tool_schemas(),
             )
             outcome = _Completion()
             try:
@@ -319,6 +322,23 @@ class AgentLoop:
         outcome.content = outcome.final.content
 
     def _check_and_act(self, call: ToolCall, control: TurnControl) -> Iterator[LoopEvent]:
+        # Profile allowlist is the first gate on this dispatch path, before
+        # prepare, the approval card (including its mount line), and execute.
+        # An approval cannot add a tool the org floor or the profile omitted.
+        if self.tool_policy is not None and not self.tool_policy.permits_call(
+            call.name, call.arguments
+        ):
+            content = (
+                f"Tool {call.name} is not allowed for this profile. It was not run."
+            )
+            self._add_tool(call.id, content)
+            self._audit(
+                "tool_denied",
+                "profile allowlist",
+                {"tool": call.name, "decision": "deny"},
+            )
+            yield StatusEvent("check", f"{call.name} · allowlist · deny")
+            return
         try:
             tool = self.registry.get(call.name)
         except Exception as exc:
@@ -548,6 +568,23 @@ class AgentLoop:
             )
         )
         self.store.append(self.session_id, _stored_message(message, verdict))
+
+    def _tool_schemas(self) -> tuple[dict[str, object], ...]:
+        schemas = self.registry.schemas()
+        policy = self.tool_policy
+        if policy is None:
+            return tuple(schemas)
+        kept: list[dict[str, object]] = []
+        for schema in schemas:
+            function = schema.get("function")
+            name = ""
+            if isinstance(function, dict):
+                raw = function.get("name", "")
+                if isinstance(raw, str):
+                    name = raw
+            if name and policy.permits_tool(name):
+                kept.append(schema)
+        return tuple(kept)
 
     def _audit(self, kind: str, summary: str, payload: dict[str, object]) -> None:
         if self.audit is None:

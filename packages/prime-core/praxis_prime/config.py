@@ -43,6 +43,11 @@ _CONFIG_HEADER = """\
 # tools.fetch_allow is empty, so web_fetch refuses loopback, private,
 # link-local, and cloud-metadata addresses. A relative path in those lists
 # is ignored.
+#
+# gateway.bearer defaults to true. Once an account exists, the loopback
+# bearer token is an owner-equivalent credential. Set bearer = false to
+# refuse it. Cookie sessions still work. With no accounts, the token stays
+# required so the gateway is not left open.
 """
 
 _PROFILE_HEADER = """\
@@ -122,6 +127,7 @@ def default_config_document() -> dict[str, object]:
             "listen": "127.0.0.1:18790",
             "socket": "$XDG_RUNTIME_DIR/praxis-prime/prime.sock",
             "approval_ttl_seconds": 900,
+            "bearer": True,
         },
         "budgets": {"daily_usd": 5.0, "per_task_usd": 1.0},
         "memory": {

@@ -22,6 +22,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from praxis_prime import __version__
+from praxis_prime.accounts.db import AccountStore
 from praxis_prime.approvals.queue import ApprovalQueue
 from praxis_prime.channels.secrets import load_telegram_token
 from praxis_prime.channels.telegram import (
@@ -114,12 +115,23 @@ def serve(
 
     queue = ApprovalQueue(ttl=ttl)
     config_path = Path(config) if config else None
+    root = data_dir(environ)
+    from praxis_prime.profiles.migrate import migration_in_progress
+
+    if migration_in_progress(root):
+        print(
+            "praxis-primed: refusing to start while a profile migration is in progress",
+            file=sys.stderr,
+        )
+        return 2
     try:
         runtime = build_runtime(env=environ, config_path=config_path, approver=queue.authorize)
     except (OSError, ValueError) as exc:
         logger.error("runtime_failed", error=type(exc).__name__)
         print(f"praxis-primed: {exc}", file=sys.stderr)
         return 1
+    queue.profile_id = runtime.profile_id
+    accounts: AccountStore | None = AccountStore(root / "accounts.db")
     agent = Host(runtime, queue)
     adapter = _telegram(environ, agent, queue, logger, telegram_token)
     socket_path = str(runtime_root / "prime.sock")
@@ -132,6 +144,10 @@ def serve(
         logger=logger,
         socket_path=socket_path,
         decider=runtime.engine,
+        accounts=accounts,
+        audit=runtime.audit,
+        data_root=root,
+        bearer_enabled=bearer_auth_enabled(environ),
     )
 
     def on_pending(item: dict[str, object]) -> None:
@@ -169,6 +185,9 @@ def serve(
         logger.error("bind_failed", error=type(exc).__name__)
         print(f"praxis-primed: {exc}", file=sys.stderr)
         agent.close()
+        if accounts is not None:
+            accounts.close()
+            accounts = None
         return 1
     started = datetime.now(UTC).isoformat(timespec="seconds")
     write_discovery(
@@ -207,6 +226,8 @@ def serve(
             adapter.stop()
         agent.close()
         server.shutdown()
+        if accounts is not None:
+            accounts.close()
         clear_discovery(environ)
     return 0
 
@@ -319,6 +340,18 @@ def resolve_ttl(env: Mapping[str, str]) -> float:
     if number <= 0 or number > 86400:
         return 900.0
     return number
+
+
+def bearer_auth_enabled(env: Mapping[str, str]) -> bool:
+    """True unless ``gateway.bearer`` is explicitly off.
+
+    The flag is consulted only after an account exists. The default config
+    leaves it on, so the loopback token stays an owner credential.
+    """
+    raw = _config_value(env, "bearer").strip().lower()
+    if raw in {"false", "0", "no", "off"}:
+        return False
+    return True
 
 
 def _config_value(env: Mapping[str, str], key: str) -> str:

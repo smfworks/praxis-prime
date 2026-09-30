@@ -20,18 +20,38 @@ class SessionStore:
     def __init__(self, db: StateDB) -> None:
         self.db = db
 
-    def create(self, *, model: str, preamble: str) -> str:
+    def create(
+        self,
+        *,
+        model: str,
+        preamble: str,
+        owner_account: str = "",
+        owner_profile: str = "",
+    ) -> str:
         session_id = uuid.uuid4().hex
         now = _now()
         self.db.conn.execute(
             """
-            INSERT INTO sessions (id, created_at, updated_at, model, title, preamble)
-            VALUES (?, ?, ?, ?, '', ?)
+            INSERT INTO sessions (
+                id, created_at, updated_at, model, title, preamble,
+                owner_account, owner_profile
+            )
+            VALUES (?, ?, ?, ?, '', ?, ?, ?)
             """,
-            (session_id, now, now, model, preamble),
+            (session_id, now, now, model, preamble, owner_account, owner_profile),
         )
         self.db.conn.commit()
         return session_id
+
+    def owner(self, session_id: str) -> tuple[str, str] | None:
+        """Account id and profile that opened this session, or None."""
+        row = self.db.conn.execute(
+            "SELECT owner_account, owner_profile FROM sessions WHERE id = ?",
+            (session_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return str(row["owner_account"]), str(row["owner_profile"])
 
     def exists(self, session_id: str) -> bool:
         row = self.db.conn.execute(

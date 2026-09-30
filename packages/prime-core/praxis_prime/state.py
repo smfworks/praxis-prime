@@ -1,8 +1,9 @@
 """SQLite state file under the XDG data directory.
 
-Sessions and the audit log share ``prime.db``. The daemon is the writer
-when it is running. ``check_same_thread`` is off because the daemon
-serializes every use of this connection on one lock.
+Sessions and the audit log share ``prime.db``. Chat writes use this
+connection. The audit log opens its own connection so a chat transaction
+cannot nest inside an audit ``BEGIN IMMEDIATE``. ``check_same_thread`` is
+off because the daemon uses the connection from more than one thread.
 
 TODO: ARCHITECTURE §10 and §18. FTS5, sqlite-vec, and a separate ``audit.db``
 are later work. This module is the MVP store.
@@ -33,6 +34,7 @@ class StateDB:
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA foreign_keys=ON")
+        self.conn.execute("PRAGMA busy_timeout=5000")
         self._migrate()
 
     def _migrate(self) -> None:
@@ -68,7 +70,9 @@ class StateDB:
                 summary TEXT NOT NULL,
                 payload_json TEXT NOT NULL,
                 prev_hash TEXT NOT NULL,
-                hash TEXT NOT NULL
+                hash TEXT NOT NULL,
+                actor_account TEXT NOT NULL DEFAULT '',
+                profile TEXT NOT NULL DEFAULT ''
             );
 
             CREATE TABLE IF NOT EXISTS memory_entries (
@@ -146,7 +150,33 @@ class StateDB:
             );
             """
         )
+        self._ensure_column(
+            "audit_events",
+            "actor_account",
+            "actor_account TEXT NOT NULL DEFAULT ''",
+        )
+        self._ensure_column(
+            "audit_events",
+            "profile",
+            "profile TEXT NOT NULL DEFAULT ''",
+        )
+        self._ensure_column(
+            "sessions",
+            "owner_account",
+            "owner_account TEXT NOT NULL DEFAULT ''",
+        )
+        self._ensure_column(
+            "sessions",
+            "owner_profile",
+            "owner_profile TEXT NOT NULL DEFAULT ''",
+        )
         self.conn.commit()
+
+    def _ensure_column(self, table: str, column: str, declaration: str) -> None:
+        rows = self.conn.execute(f"PRAGMA table_info({table})").fetchall()
+        names = {str(row[1]) for row in rows}
+        if column not in names:
+            self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {declaration}")
 
     def close(self) -> None:
         self.conn.close()

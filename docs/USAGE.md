@@ -67,6 +67,28 @@ praxis-prime approvals deny ap_0123abcd
 
 `shell` uses bubblewrap when `bwrap` is installed. The sandbox has no network, and the workspace is mounted read-only unless a write was approved for that directory. Only `ls`, `cat` (and `head` / `tail`) of concrete workspace paths, `git status`, `git diff` of existing non-secret files or `--stat` / `--name-only` / `--name-status`, and `git log` without `-p` skip approval. `pytest --collect-only` asks, because collection imports the repo's `conftest.py`. A directory or `.` beside a file asks unless the diff is one of those summary flags. A pathspec that starts with `:` is allowlisted only when it names an existing non-secret file. Before a content diff is auto-approved, `git --name-only -z` must list only those files. The sandbox home is an empty directory. Repo git config is an allowlist: auto-approval requires every key in the worktree config, `config.worktree`, a linked worktree's common dir, and any included file to be `core.repositoryformatversion=0`, `core.filemode`, `core.bare`, `core.logallrefupdates`, `core.ignorecase`, `core.precomposeunicode`, `core.symlinks`, `remote.<name>.url`, `remote.<name>.fetch`, `branch.<name>.remote`, `branch.<name>.merge`, `user.name`, `user.email`, or `init.defaultBranch`. Any other key asks, as does an unreadable or oversized config, a `.gitmodules` file, or a `modules` directory. `git status` does not ask on a `HEAD` `filter=` alone, because a filter or driver defined in config already asks. Globs, `rev:path`, and patch output of the whole tree ask. Anything else asks, including deletes, redirects, and interpreters. If bubblewrap is missing, or it fails to start, the command is not silently run on the host: every unsandboxed command needs approval, and a failed sandbox is reported as a failure.
 
+## Accounts and profiles
+
+The first account is the owner. There is no second owner. Admins cover day-to-day management. Passwords are argon2id and are not command arguments:
+
+```bash
+praxis-prime account create ada --password-stdin
+praxis-prime account create bea --role admin --password-stdin
+praxis-prime account list
+praxis-prime account passwd ada --password-stdin
+praxis-prime account transfer-owner bea
+praxis-prime profile create work
+praxis-prime profile list
+praxis-prime profile assign work --account ada --role operator
+praxis-prime profile migrate
+```
+
+`transfer-owner` hands the owner role to an existing admin and makes the previous owner an admin. It writes an `auth.owner_transfer` audit event.
+
+Stop the daemon before that first `account create`. It moves an existing single-user `prime.db` into `profiles/default/` and keeps a copy under `data/backups/`. The command takes a migration lock and refuses while `praxis-primed` is running. `praxis-primed` also refuses to start while that lock exists. If the move is interrupted, `praxis-prime profile migrate` runs it again and is safe to repeat. Later runs see the migration marker and do not copy again. The migrated `default` profile is written with `allow = ["*"]` so the same tools stay available. A profile you create after that starts with an empty allow list, and a missing `profile.toml` allows nothing. An empty `allow` list allows nothing. A profile can only tighten the org tool list and dial floor. Persona text is appended after the fixed safety rules and cannot auto-approve. The gateway stays on `127.0.0.1`. Cookie sessions need the `x-csrf-token` header on changes. `httpx` and `urllib` drop the `Secure` cookie on `http://127.0.0.1`; send the `Cookie` header yourself or use the bearer token. A viewer cannot approve. An auditor gets 403 on `GET /v1/approvals` and can read `GET /v1/approvals/meta` (id, tool, risk, time, decision; no arguments or text) for every profile. Other accounts see meta only for their own profiles. See [SECURITY.md](SECURITY.md).
+
+`account disable USER` disables an account. `account role USER --role admin` changes a server role. Both revoke sessions and tickets. `profile unassign NAME --account USER` removes a membership. The owner is changed only with `account transfer-owner`.
+
 ## Models
 
 The default spec is `ollama:qwen3:32b`. Ollama's native chat API is `http://127.0.0.1:11434`. Override it with `PRAXIS_PRIME_OLLAMA_HOST` or `OLLAMA_HOST`.
@@ -102,7 +124,7 @@ Keys, only in the environment:
 
 ## Daemon
 
-`praxis-primed` hosts the kernel and the gateway on `127.0.0.1:18790`. It refuses any other bind address. HTTP `GET /health` is open. `GET /status` and the approval routes need the bearer token. The token is created at `$XDG_RUNTIME_DIR/praxis-prime/gateway.token` (mode 0600) and is not written to `config.toml` or `gateway.json`. Logs are JSON lines at `$XDG_STATE_HOME/praxis-prime/daemon.log` (or `~/.local/state/praxis-prime/daemon.log`).
+`praxis-primed` hosts the kernel and the gateway on `127.0.0.1:18790`. It refuses any other bind address. HTTP `GET /health` is open. `GET /status` and the approval routes need the bearer token. The token is created at `$XDG_RUNTIME_DIR/praxis-prime/gateway.token` (mode 0600) and is not written to `config.toml` or `gateway.json`. Once an account exists, that token is an owner-equivalent credential. Rotate it with `praxis-prime daemon rotate-token` (the file is replaced atomically), then restart the daemon. Set `gateway.bearer = false` and restart to refuse the token after an account exists. Cookie sessions still work. Logs are JSON lines at `$XDG_STATE_HOME/praxis-prime/daemon.log` (or `~/.local/state/praxis-prime/daemon.log`).
 
 ```bash
 praxis-prime daemon start

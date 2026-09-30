@@ -117,6 +117,12 @@ alias. TypeSafe's MIT SDKs are optional compatibility clients, not a
 dependency. The Jev model weights are proprietary and must not be copied.
 No TypeSafe source is vendored in `praxis_prime.decide`.
 
+## Python packages installed, not vendored
+
+| Package | License | Note |
+|---|---|---|
+| argon2-cffi | MIT | Password hashing for local accounts. The Argon2 reference implementation it binds is CC0 or Apache-2.0. Neither tree is copied into this repository. |
+
 ## Runtime components that are not bundled
 
 These are not shipped here. If a release later vendors source, or if a

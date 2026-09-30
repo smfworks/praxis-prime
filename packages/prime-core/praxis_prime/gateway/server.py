@@ -14,16 +14,34 @@ import re
 import socket
 import threading
 from collections.abc import Callable
+from dataclasses import dataclass
+from pathlib import Path
+from urllib.parse import parse_qs
 
+from praxis_prime.accounts.db import AccountStore
+from praxis_prime.accounts.roles import sees_all_profiles
 from praxis_prime.approvals.queue import ApprovalQueue, parse_decision
+from praxis_prime.audit.log import AuditLog, actor_account_var, profile_var
 from praxis_prime.decide.engine import DecisionEngine
 from praxis_prime.decide.schema import DecideError
 from praxis_prime.gateway.auth import bearer_token, token_ok
+from praxis_prime.gateway.authz import (
+    Denial,
+    Principal,
+    accounts_enforced,
+    authenticate_http,
+    authorize_action,
+    claim_protocol_role,
+    issue_ws_ticket,
+    login,
+    logout,
+    principal_from_ticket,
+)
+from praxis_prime.gateway.guard import host_origin_denial
 from praxis_prime.gateway.protocol import (
     CHAT_ROLES,
     OPERATOR_ONLY,
     PROTOCOL_VERSION,
-    ROLES,
     request_id_var,
 )
 from praxis_prime.gateway.ws import (
@@ -34,9 +52,11 @@ from praxis_prime.gateway.ws import (
 )
 from praxis_prime.host import Host, TurnResult
 from praxis_prime.observe import JsonLogger
+from praxis_prime.statfile import StatKind, lstat_kind
 
 _APPROVAL_PATH = re.compile(r"^/v1/approvals/(ap_[0-9a-f]{8})$")
 _ROUTINE_FIRE = re.compile(r"^/v1/routines/(rt_[0-9a-f]{8})/fire$")
+_PROFILE_PATH = re.compile(r"^/v1/profiles/([a-z][a-z0-9-]{0,63})$")
 RoutineFire = Callable[[str], tuple[int, dict[str, object]]]
 
 
@@ -55,6 +75,10 @@ class GatewayServer:
         socket_path: str | None = None,
         decider: DecisionEngine | None = None,
         routine_fire: RoutineFire | None = None,
+        accounts: AccountStore | None = None,
+        audit: AuditLog | None = None,
+        data_root: Path | None = None,
+        bearer_enabled: bool = True,
     ) -> None:
         self.host = host
         self._port = port
@@ -63,6 +87,10 @@ class GatewayServer:
         self.approvals = approvals
         self.decider = decider
         self.routine_fire = routine_fire
+        self.accounts = accounts
+        self.audit = audit
+        self.data_root = data_root
+        self.bearer_enabled = bearer_enabled
         self.logger = logger
         self.socket_path = socket_path
         self._stopped = threading.Event()
@@ -71,10 +99,10 @@ class GatewayServer:
         self._threads: list[threading.Thread] = []
         self._conns: set[socket.socket] = set()
         self._conn_lock = threading.Lock()
-        self._subs: list[queue.Queue[dict[str, object] | None]] = []
+        self._subs: list[_Subscriber] = []
         self._sub_lock = threading.Lock()
-        self._idem: dict[str, dict[str, object]] = {}
-        self._inflight: set[str] = set()
+        self._idem: dict[tuple[str, str], dict[str, object]] = {}
+        self._inflight: set[tuple[str, str]] = set()
         self._idem_lock = threading.Lock()
         self.bound_port = port
 
@@ -126,10 +154,35 @@ class GatewayServer:
                 pass
 
     def publish(self, frame: dict[str, object]) -> None:
+        """Fan out one event. Each socket is filtered by the principal it connected as.
+
+        Unauthenticated sockets are not in this list. A disabled or revoked
+        account is removed so a later event cannot reach it.
+        """
         with self._sub_lock:
             subscribers = list(self._subs)
+        drop: list[_Subscriber] = []
         for subscriber in subscribers:
-            subscriber.put(frame)
+            refreshed = self._recheck(subscriber.principal)
+            if isinstance(refreshed, Denial):
+                drop.append(subscriber)
+                continue
+            subscriber.principal = refreshed
+            filtered = self._filter_broadcast(frame, refreshed)
+            if filtered is not None:
+                subscriber.outgoing.put(filtered)
+        if not drop:
+            return
+        with self._sub_lock:
+            for subscriber in drop:
+                if subscriber in self._subs:
+                    self._subs.remove(subscriber)
+        for subscriber in drop:
+            subscriber.outgoing.put(None)
+            try:
+                subscriber.conn.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
 
     def _start_unix(self) -> None:
         if not self.socket_path:
@@ -187,13 +240,21 @@ class GatewayServer:
             buffer = ByteBuffer(conn)
             raw = buffer.read_until(b"\r\n\r\n", limit=16384)
             method, path, headers = _parse_head(raw)
+            denied = host_origin_denial(headers, bound_port=self.bound_port)
+            if denied is not None:
+                status, code, message = denied
+                _write_http(conn, status, _error(code, message))
+                if self.logger is not None:
+                    self.logger.warning("host_rejected", code=code)
+                return
             if headers.get("upgrade", "").lower() == "websocket":
-                self._handle_ws(conn, buffer, headers)
+                self._handle_ws(conn, buffer, headers, path)
                 return
             length = _content_length(headers)
             body = buffer.read_exact(length) if length else b""
-            status, payload = self._http(method, path, headers, body)
-            _write_http(conn, status, payload)
+            extras: list[tuple[str, str]] = []
+            status, payload = self._http(method, path, headers, body, extras, _peer_host(conn))
+            _write_http(conn, status, payload, extras)
         except (ConnectionError, OSError, ValueError, WebSocketError):
             if self.logger is not None:
                 self.logger.warning("connection_closed")
@@ -211,18 +272,94 @@ class GatewayServer:
         path: str,
         headers: dict[str, str],
         body: bytes,
+        extras: list[tuple[str, str]],
+        peer: str = "",
     ) -> tuple[int, dict[str, object]]:
         route = path.split("?", 1)[0]
         if method == "GET" and route == "/health":
             return 200, {"ok": True, "service": "praxis-primed"}
-        if not token_ok(bearer_token(headers), self.token):
-            if self.logger is not None:
+        if method == "POST" and route == "/v1/auth/login":
+            if self.accounts is None:
+                return 503, _error("unavailable", "accounts are not configured")
+            status, payload, cookies = login(self.accounts, body, self.audit, peer=peer)
+            extras.extend(cookies)
+            if status != 200 and self.logger is not None:
+                self.logger.warning("auth_fail")
+            return status, payload
+        principal = authenticate_http(
+            self.accounts,
+            headers,
+            method,
+            bootstrap_token=self.token,
+            bearer_enabled=self.bearer_enabled,
+        )
+        if isinstance(principal, Denial):
+            if principal.status == 401 and self.logger is not None:
                 self.logger.warning("http_unauthorized", path=route)
-            return 401, _error("unauthorized", "Bearer token required")
+            return principal.status, _error(principal.code, principal.message)
+        profile_name = headers.get("x-praxis-profile", "").strip()
+        named = _PROFILE_PATH.fullmatch(route)
+        if named is not None:
+            profile_name = named.group(1)
+        action = _http_action(method, route)
+        denial = authorize_action(
+            self.accounts,
+            principal,
+            action=action,
+            profile=profile_name,
+            profile_exists=self._profile_exists,
+            runtime_profile=self._runtime_profile(),
+        )
+        if not denial.ok:
+            return denial.status, _error(denial.code, denial.message)
+        actor_token = actor_account_var.set(principal.account_id)
+        profile_token = profile_var.set(self._runtime_profile())
+        try:
+            return self._authed_http(
+                method, route, headers, body, extras, principal, profile_name
+            )
+        finally:
+            actor_account_var.reset(actor_token)
+            profile_var.reset(profile_token)
+
+    def _authed_http(
+        self,
+        method: str,
+        route: str,
+        headers: dict[str, str],
+        body: bytes,
+        extras: list[tuple[str, str]],
+        principal: Principal,
+        profile_name: str,
+    ) -> tuple[int, dict[str, object]]:
+        if method == "POST" and route == "/v1/auth/logout":
+            if self.accounts is None:
+                return 404, _error("not_found", "no such route")
+            status, payload, cookies = logout(self.accounts, principal, self.audit)
+            extras.extend(cookies)
+            return status, payload
+        if method == "GET" and route == "/v1/auth/session":
+            return 200, {"ok": True, "account": _principal_public(principal)}
+        if method == "POST" and route == "/v1/auth/ws-ticket":
+            if self.accounts is None:
+                return 404, _error("not_found", "no such route")
+            status, payload = issue_ws_ticket(self.accounts, principal, profile_name)
+            return status, payload
+        if method == "GET" and route == "/v1/profiles":
+            return 200, self._list_profiles(principal)
+        named = _PROFILE_PATH.fullmatch(route)
+        if method == "GET" and named is not None:
+            role = ""
+            if self.accounts is not None and principal.account_id:
+                role = self.accounts.membership(principal.account_id, named.group(1)) or ""
+            return 200, {"ok": True, "profile": {"id": named.group(1), "role": role}}
         if method == "GET" and route == "/status":
             return 200, {"ok": True, "status": self._status()}
+        if method == "GET" and route == "/v1/approvals/meta":
+            rows = self._visible_meta(principal)
+            return 200, {"ok": True, "count": len(rows), "approvals": rows}
         if method == "GET" and route == "/v1/approvals":
-            return 200, {"ok": True, "approvals": self.approvals.list_pending()}
+            return 200, {"ok": True, "approvals": self._visible_approvals(principal)}
         match = _APPROVAL_PATH.fullmatch(route)
         if method == "POST" and match is not None:
             try:
@@ -231,9 +368,24 @@ class GatewayServer:
                 return 400, _error("bad_request", "approval body must be JSON")
             if not isinstance(parsed, dict):
                 return 400, _error("bad_request", "approval body must be an object")
+            existing = self.approvals.get(match.group(1))
+            item_profile = _profile_of(existing)
+            target = item_profile or profile_name
+            if target:
+                scoped = authorize_action(
+                    self.accounts,
+                    principal,
+                    action="approve",
+                    profile=target,
+                    profile_exists=self._profile_exists,
+                    runtime_profile=self._runtime_profile(),
+                )
+                if not scoped.ok:
+                    return scoped.status, _error(scoped.code, scoped.message)
             try:
                 decision = parse_decision(parsed.get("decision"))
-                item = self.approvals.decide(match.group(1), decision, actor="operator")
+                actor = principal.account_id or "operator"
+                item = self.approvals.decide(match.group(1), decision, actor=actor)
             except LookupError as exc:
                 return 404, _error("not_found", str(exc))
             except ValueError as exc:
@@ -281,13 +433,15 @@ class GatewayServer:
         conn: socket.socket,
         buffer: ByteBuffer,
         headers: dict[str, str],
+        path: str,
     ) -> None:
         key = headers.get("sec-websocket-key", "")
         if not key:
             _write_http(conn, 400, _error("bad_request", "missing websocket key"))
             return
         header_token = bearer_token(headers)
-        if header_token and not token_ok(header_token, self.token):
+        ticket = _request_ticket(path, headers)
+        if header_token and not token_ok(header_token, self.token) and not ticket:
             if self.logger is not None:
                 self.logger.warning("ws_unauthorized")
             _write_http(conn, 401, _error("unauthorized", "Bearer token required"))
@@ -295,25 +449,40 @@ class GatewayServer:
         conn.sendall(server_upgrade_response(key))
         ws = WebSocketConnection(conn, buffer, client=False)
         outgoing: queue.Queue[dict[str, object] | None] = queue.Queue()
-        with self._sub_lock:
-            self._subs.append(outgoing)
         writer = threading.Thread(target=_write_frames, args=(ws, outgoing), daemon=True)
         writer.start()
         role: str | None = None
+        subscriber: _Subscriber | None = None
         try:
             first = _read_json(ws)
-            role = self._connect(first, header_token, outgoing)
-            if role is None:
+            connected = self._connect(first, header_token, outgoing, path, headers)
+            if connected is None:
                 return
+            role, principal = connected
+            subscriber = _Subscriber(outgoing, principal, conn)
+            with self._sub_lock:
+                self._subs.append(subscriber)
             while not self._stopped.is_set():
                 frame = _read_json(ws)
                 if frame is None:
                     return
-                self._dispatch(frame, role, outgoing)
+                frame_id = str(frame.get("id", ""))
+                refreshed = self._recheck(principal)
+                if isinstance(refreshed, Denial):
+                    outgoing.put(_frame_error(frame_id, refreshed.code, refreshed.message))
+                    return
+                principal = refreshed
+                subscriber.principal = principal
+                claimed = claim_protocol_role(principal, role)
+                if isinstance(claimed, Denial):
+                    outgoing.put(_frame_error(frame_id, claimed.code, claimed.message))
+                    return
+                role = claimed
+                self._dispatch(frame, role, principal, outgoing)
         finally:
             with self._sub_lock:
-                if outgoing in self._subs:
-                    self._subs.remove(outgoing)
+                if subscriber is not None and subscriber in self._subs:
+                    self._subs.remove(subscriber)
             outgoing.put(None)
             writer.join(timeout=1)
 
@@ -322,7 +491,9 @@ class GatewayServer:
         frame: dict[str, object] | None,
         header_token: str,
         outgoing: queue.Queue[dict[str, object] | None],
-    ) -> str | None:
+        path: str,
+        headers: dict[str, str],
+    ) -> tuple[str, Principal] | None:
         if frame is None or frame.get("type") != "connect":
             frame_id = str((frame or {}).get("id", ""))
             outgoing.put(
@@ -330,16 +501,16 @@ class GatewayServer:
             )
             return None
         payload = _payload(frame)
-        presented = str(payload.get("token", "")) or header_token
         frame_id = str(frame.get("id", ""))
-        if not token_ok(presented, self.token):
-            if self.logger is not None:
+        principal = self._ws_principal(payload, header_token, path, headers)
+        if isinstance(principal, Denial):
+            if self.logger is not None and principal.status == 401:
                 self.logger.warning("ws_unauthorized")
-            outgoing.put(_frame_error(frame_id, "unauthorized", "gateway token rejected"))
+            outgoing.put(_frame_error(frame_id, principal.code, principal.message))
             return None
-        role = str(payload.get("role", ""))
-        if role not in ROLES:
-            outgoing.put(_frame_error(frame_id, "bad_role", "unknown role"))
+        claimed = claim_protocol_role(principal, str(payload.get("role", "")))
+        if isinstance(claimed, Denial):
+            outgoing.put(_frame_error(frame_id, claimed.code, claimed.message))
             return None
         outgoing.put(
             {
@@ -349,20 +520,33 @@ class GatewayServer:
                 "payload": {
                     "protocol": PROTOCOL_VERSION,
                     "version": self._status().get("version", ""),
-                    "role": role,
+                    "role": claimed,
                 },
             }
         )
-        return role
+        return claimed, principal
 
     def _dispatch(
         self,
         frame: dict[str, object],
         role: str,
+        principal: Principal,
         outgoing: queue.Queue[dict[str, object] | None],
     ) -> None:
         kind = str(frame.get("type", ""))
         frame_id = str(frame.get("id", ""))
+        profile_name = str(_payload(frame).get("profile", "") or "")
+        denial = authorize_action(
+            self.accounts,
+            principal,
+            action=_frame_action(kind),
+            profile=profile_name,
+            profile_exists=self._profile_exists,
+            runtime_profile=self._runtime_profile(),
+        )
+        if not denial.ok:
+            outgoing.put(_frame_error(frame_id, denial.code, denial.message))
+            return
         if kind in OPERATOR_ONLY and role != "operator":
             outgoing.put(_frame_error(frame_id, "forbidden", f"{role} cannot {kind}"))
             return
@@ -371,13 +555,13 @@ class GatewayServer:
             return
         idem = frame.get("idempotencyKey")
         key = idem if isinstance(idem, str) and idem else ""
-        cached = self._cached(key)
+        cached = self._cached(principal.account_id, key)
         if cached is not None:
             replay = dict(cached)
             replay["id"] = frame_id
             outgoing.put(replay)
             return
-        if key and self._mark_inflight(key):
+        if key and self._mark_inflight(principal.account_id, key):
             outgoing.put(_frame_error(frame_id, "in_progress", "duplicate request"))
             return
         try:
@@ -385,43 +569,71 @@ class GatewayServer:
                 outgoing.put({"type": "pong", "id": frame_id, "ok": True, "payload": {}})
             elif kind == "status":
                 result = {"type": "result", "id": frame_id, "ok": True, "payload": self._status()}
-                self._remember(key, result)
+                self._remember(principal.account_id, key, result)
                 outgoing.put(result)
             elif kind == "approvals.list":
                 result = {
                     "type": "result",
                     "id": frame_id,
                     "ok": True,
-                    "payload": {"approvals": self.approvals.list_pending()},
+                    "payload": {"approvals": self._visible_approvals(principal)},
                 }
                 outgoing.put(result)
             elif kind == "approvals.decide":
-                self._decide(frame, outgoing)
+                self._decide(frame, principal, outgoing)
             elif kind == "chat.send":
-                self._chat(frame, outgoing, key)
+                self._chat(frame, principal, outgoing, key)
             elif kind == "model.set":
                 self._model(frame, outgoing)
             elif kind == "session.drop":
                 session_id = frame.get("sessionId") or _payload(frame).get("sessionId")
-                self.agent.drop_session(session_id if isinstance(session_id, str) else None)
+                try:
+                    self.agent.drop_session(
+                        session_id if isinstance(session_id, str) else None,
+                        account_id=principal.account_id,
+                    )
+                except PermissionError:
+                    outgoing.put(
+                        _frame_error(frame_id, "forbidden", "session belongs to another account")
+                    )
+                    return
+                except LookupError:
+                    outgoing.put(_frame_error(frame_id, "not_found", "no such session"))
+                    return
                 outgoing.put({"type": "result", "id": frame_id, "ok": True, "payload": {}})
             else:
                 outgoing.put(_frame_error(frame_id, "unknown_type", f"unknown frame {kind}"))
         finally:
             if key and kind != "chat.send":
-                self._clear_inflight(key)
+                self._clear_inflight(principal.account_id, key)
 
     def _decide(
         self,
         frame: dict[str, object],
+        principal: Principal,
         outgoing: queue.Queue[dict[str, object] | None],
     ) -> None:
         frame_id = str(frame.get("id", ""))
         payload = _payload(frame)
+        approval_id = str(payload.get("approvalId", ""))
+        existing = self.approvals.get(approval_id)
+        target = _profile_of(existing) or str(payload.get("profile", "") or "")
+        if target:
+            scoped = authorize_action(
+                self.accounts,
+                principal,
+                action="approve",
+                profile=target,
+                profile_exists=self._profile_exists,
+                runtime_profile=self._runtime_profile(),
+            )
+            if not scoped.ok:
+                outgoing.put(_frame_error(frame_id, scoped.code, scoped.message))
+                return
         try:
             decision = parse_decision(payload.get("decision"))
-            approval_id = str(payload.get("approvalId", ""))
-            item = self.approvals.decide(approval_id, decision, actor="operator")
+            actor = principal.account_id or "operator"
+            item = self.approvals.decide(approval_id, decision, actor=actor)
         except LookupError as exc:
             outgoing.put(_frame_error(frame_id, "not_found", str(exc)))
             return
@@ -433,6 +645,7 @@ class GatewayServer:
     def _chat(
         self,
         frame: dict[str, object],
+        principal: Principal,
         outgoing: queue.Queue[dict[str, object] | None],
         idem: str,
     ) -> None:
@@ -440,20 +653,30 @@ class GatewayServer:
         payload = _payload(frame)
         text = payload.get("text")
         if not isinstance(text, str) or not text.strip():
-            self._clear_inflight(idem)
+            self._clear_inflight(principal.account_id, idem)
             outgoing.put(_frame_error(frame_id, "bad_request", "chat text is empty"))
             return
         session = frame.get("sessionId") or payload.get("sessionId")
         session_id = session if isinstance(session, str) and session else None
+        account_id = principal.account_id
+        runtime_profile = self._runtime_profile()
 
         def work() -> None:
             token = request_id_var.set(frame_id)
+            actor_token = actor_account_var.set(account_id)
+            profile_token = profile_var.set(runtime_profile)
 
             def on_event(event: dict[str, object]) -> None:
                 outgoing.put({"type": "event", "id": frame_id, "payload": event})
 
             try:
-                result = self.agent.chat(text, session_id=session_id, on_event=on_event)
+                result = self.agent.chat(
+                    text,
+                    session_id=session_id,
+                    on_event=on_event,
+                    owner_account=account_id,
+                    owner_profile=runtime_profile,
+                )
                 body = _turn_payload(result)
                 done: dict[str, object] = {
                     "type": "result",
@@ -461,13 +684,21 @@ class GatewayServer:
                     "ok": result.error is None and not result.cancelled,
                     "payload": body,
                 }
-                self._remember(idem, done)
+                self._remember(account_id, idem, done)
                 outgoing.put(done)
+            except PermissionError:
+                outgoing.put(
+                    _frame_error(frame_id, "forbidden", "session belongs to another account")
+                )
+            except LookupError:
+                outgoing.put(_frame_error(frame_id, "not_found", "no such session"))
             except Exception as exc:
                 outgoing.put(_frame_error(frame_id, "turn_failed", type(exc).__name__))
             finally:
+                profile_var.reset(profile_token)
+                actor_account_var.reset(actor_token)
                 request_id_var.reset(token)
-                self._clear_inflight(idem)
+                self._clear_inflight(account_id, idem)
 
         threading.Thread(target=work, name="praxis-turn", daemon=True).start()
 
@@ -494,36 +725,287 @@ class GatewayServer:
             body["socket"] = self.socket_path
         return body
 
-    def _cached(self, key: str) -> dict[str, object] | None:
+    def _idem_key(self, account_id: str, key: str) -> tuple[str, str] | None:
         if not key:
             return None
+        return (account_id, key)
+
+    def _cached(self, account_id: str, key: str) -> dict[str, object] | None:
+        scoped = self._idem_key(account_id, key)
+        if scoped is None:
+            return None
         with self._idem_lock:
-            found = self._idem.get(key)
+            found = self._idem.get(scoped)
             return dict(found) if found is not None else None
 
-    def _remember(self, key: str, frame: dict[str, object]) -> None:
-        if not key:
+    def _remember(self, account_id: str, key: str, frame: dict[str, object]) -> None:
+        scoped = self._idem_key(account_id, key)
+        if scoped is None:
             return
         stored = dict(frame)
         stored.pop("id", None)
         with self._idem_lock:
-            self._idem[key] = stored
+            self._idem[scoped] = stored
             while len(self._idem) > 256:
                 self._idem.pop(next(iter(self._idem)))
 
-    def _mark_inflight(self, key: str) -> bool:
-        """Return True when this key is already running."""
+    def _mark_inflight(self, account_id: str, key: str) -> bool:
+        """Return True when this account's key is already running."""
+        scoped = self._idem_key(account_id, key)
+        if scoped is None:
+            return False
         with self._idem_lock:
-            if key in self._inflight:
+            if scoped in self._inflight:
                 return True
-            self._inflight.add(key)
+            self._inflight.add(scoped)
             return False
 
-    def _clear_inflight(self, key: str) -> None:
-        if not key:
+    def _clear_inflight(self, account_id: str, key: str) -> None:
+        scoped = self._idem_key(account_id, key)
+        if scoped is None:
             return
         with self._idem_lock:
-            self._inflight.discard(key)
+            self._inflight.discard(scoped)
+
+    def _profile_exists(self, name: str) -> bool:
+        if self.data_root is None:
+            return False
+        home = self.data_root / "profiles" / name
+        # A symlink or a path we cannot stat still counts as present.
+        # ``Path.is_file`` on Python 3.14 is False for both, and a 404
+        # would hide a profile the caller is not allowed to ignore.
+        for filename in ("profile.toml", "prime.db"):
+            kind = lstat_kind(home / filename)
+            if kind in {StatKind.FILE, StatKind.SYMLINK, StatKind.UNREADABLE}:
+                return True
+        return False
+
+    def _runtime_profile(self) -> str:
+        if self.audit is None:
+            return ""
+        return self.audit.profile
+
+    def _list_profiles(self, principal: Principal) -> dict[str, object]:
+        if self.data_root is None:
+            return {"ok": True, "profiles": []}
+        from praxis_prime.profiles.home import list_profiles
+
+        names = list_profiles(self.data_root)
+        if (
+            accounts_enforced(self.accounts)
+            and self.accounts is not None
+            and principal.account_id
+            and not sees_all_profiles(principal.role)
+        ):
+            allowed = set(self.accounts.profile_ids_for(principal.account_id))
+            names = [name for name in names if name in allowed]
+        return {"ok": True, "profiles": [{"id": name} for name in names]}
+
+    def _filter_broadcast(
+        self,
+        frame: dict[str, object],
+        principal: Principal,
+    ) -> dict[str, object] | None:
+        """Scope one published event. ``None`` means this socket gets nothing.
+
+        Owner and admin see the card, including an unscoped one. A member sees
+        only a card for a profile they belong to. An auditor sees meta fields
+        and not arguments, text, or a session id. A non-member sees nothing.
+        The same split applies to any other broadcast (transcript, status).
+        """
+        if not accounts_enforced(self.accounts):
+            return frame
+        payload = frame.get("payload")
+        if isinstance(payload, dict) and payload.get("kind") == "approval":
+            approval = payload.get("approval")
+            if not isinstance(approval, dict):
+                return None
+            visible = self._approval_broadcast(principal, approval)
+            if visible is None:
+                return None
+            cloned = dict(frame)
+            cloned_payload = dict(payload)
+            cloned_payload["approval"] = visible
+            cloned["payload"] = cloned_payload
+            return cloned
+        return self._scoped_event(principal, frame)
+
+    def _approval_broadcast(
+        self,
+        principal: Principal,
+        item: dict[str, object],
+    ) -> dict[str, object] | None:
+        if principal.role == "auditor":
+            if not principal.account_id:
+                return None
+            return _approval_meta(item)
+        if sees_all_profiles(principal.role):
+            return dict(self._hide_foreign_session(principal, item))
+        if self.accounts is None or not principal.account_id:
+            return None
+        profile = item.get("profileId")
+        if not isinstance(profile, str) or not profile:
+            return None
+        allowed = set(self.accounts.profile_ids_for(principal.account_id))
+        if profile not in allowed:
+            return None
+        return dict(self._hide_foreign_session(principal, item))
+
+    def _scoped_event(
+        self,
+        principal: Principal,
+        frame: dict[str, object],
+    ) -> dict[str, object] | None:
+        """Non-approval broadcasts. Auditors get no body. Members need a profile."""
+        if principal.role == "auditor" or not principal.account_id:
+            return None
+        if sees_all_profiles(principal.role):
+            return frame
+        if self.accounts is None:
+            return None
+        profile = _event_profile(frame)
+        if not profile:
+            return None
+        allowed = set(self.accounts.profile_ids_for(principal.account_id))
+        if profile not in allowed:
+            return None
+        return frame
+
+    def _visible_approvals(self, principal: Principal) -> list[dict[str, object]]:
+        items = self.approvals.list_pending()
+        if (
+            accounts_enforced(self.accounts)
+            and not sees_all_profiles(principal.role)
+            and self.accounts is not None
+            and principal.account_id
+        ):
+            allowed = set(self.accounts.profile_ids_for(principal.account_id))
+            kept: list[dict[str, object]] = []
+            for item in items:
+                profile = item.get("profileId")
+                if isinstance(profile, str) and profile in allowed:
+                    kept.append(item)
+            items = kept
+        return [self._hide_foreign_session(principal, item) for item in items]
+
+    def _visible_meta(self, principal: Principal) -> list[dict[str, object]]:
+        """Metadata for the caller's profiles. Auditors, owners, and admins see all."""
+        if (
+            not accounts_enforced(self.accounts)
+            or principal.role in {"owner", "admin", "auditor"}
+            or self.accounts is None
+            or not principal.account_id
+        ):
+            return self.approvals.list_meta()
+        allowed = frozenset(self.accounts.profile_ids_for(principal.account_id))
+        return self.approvals.list_meta(profiles=allowed)
+
+    def _hide_foreign_session(
+        self,
+        principal: Principal,
+        item: dict[str, object],
+    ) -> dict[str, object]:
+        session_id = item.get("sessionId")
+        if not isinstance(session_id, str) or not session_id or not principal.account_id:
+            return item
+        try:
+            owner = self.agent.runtime.store.owner(session_id)
+        except Exception:
+            owner = None
+        if owner is not None and owner[0] == principal.account_id:
+            return item
+        hidden = dict(item)
+        hidden["sessionId"] = ""
+        return hidden
+
+    def _recheck(self, principal: Principal) -> Principal | Denial:
+        """Reload role, status, and the login session before the next frame."""
+        if principal.kind == "legacy" or self.accounts is None or not principal.account_id:
+            return principal
+        account = self.accounts.get_id(principal.account_id)
+        if account is None or account.status != "active":
+            return Denial(401, "unauthorized", "session expired or revoked")
+        if principal.session_id and not self.accounts.session_is_live(principal.session_id):
+            return Denial(401, "unauthorized", "session expired or revoked")
+        if account.role == principal.role and account.username == principal.username:
+            return principal
+        return Principal(
+            kind=principal.kind,
+            account_id=principal.account_id,
+            username=account.username,
+            role=account.role,
+            session_token=principal.session_token,
+            session_id=principal.session_id,
+        )
+
+    def _ws_principal(
+        self,
+        payload: dict[str, object],
+        header_token: str,
+        path: str,
+        headers: dict[str, str],
+    ) -> Principal | Denial:
+        ticket = str(payload.get("ticket", "") or "") or _request_ticket(path, headers)
+        if ticket and self.accounts is not None:
+            found = principal_from_ticket(self.accounts, ticket)
+            if found is None:
+                return Denial(401, "unauthorized", "websocket ticket rejected")
+            return found
+        presented = str(payload.get("token", "") or "") or header_token
+        if not accounts_enforced(self.accounts):
+            if not token_ok(presented, self.token):
+                return Denial(401, "unauthorized", "gateway token rejected")
+            return Principal(kind="legacy", account_id="", username="", role="operator")
+        if self.bearer_enabled and token_ok(presented, self.token) and self.accounts is not None:
+            owner = self.accounts.owner()
+            if owner is None or owner.status != "active":
+                return Denial(401, "unauthorized", "gateway token rejected")
+            return Principal(
+                kind="bootstrap",
+                account_id=owner.id,
+                username=owner.username,
+                role="owner",
+            )
+        return Denial(401, "unauthorized", "gateway token rejected")
+
+
+@dataclass
+class _Subscriber:
+    outgoing: queue.Queue[dict[str, object] | None]
+    principal: Principal
+    conn: socket.socket
+
+
+def _approval_meta(item: dict[str, object]) -> dict[str, object]:
+    """The content-free fields from ``GET /v1/approvals/meta``. No text."""
+    decision = item.get("decision")
+    if not isinstance(decision, str) or not decision:
+        state = item.get("state")
+        decision = state if isinstance(state, str) and state else "pending"
+    created = item.get("createdAt")
+    return {
+        "id": item.get("id", ""),
+        "tool": item.get("tool", ""),
+        "risk": item.get("risk", ""),
+        "createdAt": created if isinstance(created, str) else "",
+        "decision": decision,
+    }
+
+
+def _event_profile(frame: dict[str, object]) -> str:
+    payload = frame.get("payload")
+    if not isinstance(payload, dict):
+        return ""
+    for key in ("profileId", "profile"):
+        value = payload.get(key)
+        if isinstance(value, str) and value:
+            return value
+        nested = payload.get("approval")
+        if isinstance(nested, dict):
+            inner = nested.get(key)
+            if isinstance(inner, str) and inner:
+                return inner
+    return ""
 
 
 def _write_frames(
@@ -567,7 +1049,10 @@ def _parse_head(raw: bytes) -> tuple[str, str, dict[str, str]]:
         if ":" not in line:
             continue
         name, value = line.split(":", 1)
-        headers[name.strip().lower()] = value.strip()
+        key = name.strip().lower()
+        if key == "host" and "host" in headers:
+            headers["x-duplicate-host"] = "1"
+        headers[key] = value.strip()
     return parts[0].upper(), parts[1], headers
 
 
@@ -582,11 +1067,17 @@ def _content_length(headers: dict[str, str]) -> int:
     return length
 
 
-def _write_http(conn: socket.socket, status: int, payload: dict[str, object]) -> None:
+def _write_http(
+    conn: socket.socket,
+    status: int,
+    payload: dict[str, object],
+    extras: list[tuple[str, str]] | None = None,
+) -> None:
     reasons = {
         200: "OK",
         400: "Bad Request",
         401: "Unauthorized",
+        403: "Forbidden",
         404: "Not Found",
         409: "Conflict",
         429: "Too Many Requests",
@@ -594,14 +1085,19 @@ def _write_http(conn: socket.socket, status: int, payload: dict[str, object]) ->
         503: "Unavailable",
     }
     body = json.dumps(payload).encode("utf-8")
-    head = (
-        f"HTTP/1.1 {status} {reasons.get(status, 'Error')}\r\n"
-        "Content-Type: application/json\r\n"
-        f"Content-Length: {len(body)}\r\n"
-        "Connection: close\r\n"
-        "Cache-Control: no-store\r\n"
-        "\r\n"
-    )
+    lines = [
+        f"HTTP/1.1 {status} {reasons.get(status, 'Error')}",
+        "Content-Type: application/json",
+        f"Content-Length: {len(body)}",
+        "Connection: close",
+        "Cache-Control: no-store",
+        "X-Content-Type-Options: nosniff",
+    ]
+    for name, value in extras or []:
+        if "\r" in value or "\n" in value:
+            continue
+        lines.append(f"{name}: {value}")
+    head = "\r\n".join(lines) + "\r\n\r\n"
     try:
         conn.sendall(head.encode("ascii") + body)
     except OSError:
@@ -635,6 +1131,72 @@ def _turn_payload(result: TurnResult) -> dict[str, object]:
         "error": result.error,
         "cancelled": result.cancelled,
     }
+
+
+def _http_action(method: str, route: str) -> str:
+    if method == "POST" and (_APPROVAL_PATH.fullmatch(route) or route == "/v1/approvals"):
+        return "approve"
+    if method == "GET" and route == "/v1/approvals":
+        return "content"
+    if method == "POST" and route in {"/v1/decide", "/v1/systemone"}:
+        return "chat"
+    if method == "POST" and _ROUTINE_FIRE.fullmatch(route):
+        return "chat"
+    if method == "GET" and route == "/v1/audit":
+        return "audit"
+    return "read"
+
+
+def _frame_action(kind: str) -> str:
+    if kind == "approvals.decide":
+        return "approve"
+    if kind in {"chat.send", "model.set", "session.drop"}:
+        return "chat"
+    if kind == "approvals.list":
+        return "content"
+    return "read"
+
+
+def _profile_of(item: dict[str, object] | None) -> str:
+    if item is None:
+        return ""
+    raw = item.get("profileId", "")
+    if isinstance(raw, str):
+        return raw
+    return ""
+
+
+def _principal_public(principal: Principal) -> dict[str, object]:
+    return {
+        "id": principal.account_id,
+        "username": principal.username,
+        "role": principal.role,
+        "kind": principal.kind,
+    }
+
+
+def _request_ticket(path: str, headers: dict[str, str]) -> str:
+    header = headers.get("x-praxis-ticket", "").strip()
+    if header:
+        return header
+    query = parse_qs(path.split("?", 1)[1] if "?" in path else "", keep_blank_values=False)
+    values = query.get("ticket", [])
+    if len(values) == 1:
+        return values[0]
+    return ""
+
+
+def _peer_host(conn: socket.socket) -> str:
+    try:
+        addr = conn.getpeername()
+    except OSError:
+        return ""
+    if not isinstance(addr, tuple) or not addr or not isinstance(addr[0], str):
+        return ""
+    host = addr[0]
+    if len(host) > 64:
+        return ""
+    return host
 
 
 def _peer_is_loopback(addr: object) -> bool:
