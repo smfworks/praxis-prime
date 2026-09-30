@@ -120,8 +120,8 @@ def test_approved_host_shell_runs_and_bwrap_failure_does_not_fall_back(monkeypat
     assert execute_shell({"command": "echo hi"}, _ctx(tmp_path, host_approved=True)) == "ok"
     assert calls == ["echo hi"]
 
-    def explode(command, cwd, cancelled, timeout=30, env=None):
-        del command, cwd, cancelled, timeout, env
+    def explode(command, cwd, cancelled, timeout=30, env=None, **_kwargs):
+        del command, cwd, cancelled, timeout, env, _kwargs
         raise RuntimeError("sandbox down")
 
     monkeypatch.setattr("praxis_prime.tools.shell.bwrap_available", lambda: True)
@@ -141,7 +141,20 @@ def test_bwrap_argv_drops_network_and_env_scrub_drops_keys(tmp_path):
     assert argv[0] == "bwrap"
     assert "--unshare-all" in argv
     assert "--clearenv" in argv
+    assert "--noprofile" in argv
+    assert "--norc" in argv
+    assert "-lc" not in argv
     assert "echo hi" in argv
+    assert "--bind" not in argv
+    assert _workspace_mount(argv) == "--ro-bind"
+    home = argv[argv.index("HOME") + 1]
+    assert home == "/sandbox-home"
+    assert home != "/workspace"
+    assert argv[argv.index("GIT_CONFIG_NOSYSTEM") + 1] == "1"
+    assert argv[argv.index("GIT_CONFIG_GLOBAL") + 1] == "/dev/null"
+    assert argv[argv.index("GIT_NO_LAZY_FETCH") + 1] == "1"
+    assert "--tmpfs" in argv
+    assert "/sandbox-home" in argv
     cleaned = scrub_env(
         {
             "PATH": "/usr/bin",
@@ -156,5 +169,14 @@ def test_bwrap_argv_drops_network_and_env_scrub_drops_keys(tmp_path):
 
 
 def test_overwrite_redirect_is_destructive():
-    assert classify_command("echo hi > out.txt", sandbox_ready=True).risk.value == "DESTRUCTIVE"
-    assert classify_command("echo hi >> out.txt", sandbox_ready=True).risk.value == "READ"
+    for command in ("echo hi > out.txt", "echo hi >> out.txt"):
+        prepared = classify_command(command, sandbox_ready=True)
+        assert prepared.risk.value == "DESTRUCTIVE"
+        assert prepared.force_approval is True
+
+
+def _workspace_mount(argv: list[str]) -> str:
+    for index, token in enumerate(argv):
+        if token == "/workspace" and index >= 2 and argv[index - 2] in {"--bind", "--ro-bind"}:
+            return argv[index - 2]
+    raise AssertionError("workspace mount missing")

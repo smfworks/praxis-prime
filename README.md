@@ -49,7 +49,7 @@ export PRAXIS_PRIME_FALLBACK_MODELS=openai-compatible:local
 # export PRAXIS_PRIME_XAI_API_KEY=...           # or XAI_API_KEY
 ```
 
-`shell` runs inside bubblewrap when `bwrap` is on `PATH` (no network). Without bubblewrap, every command asks first. Delete, send, spend, and share ask even inside the sandbox. Tool output is wrapped as untrusted data. Sessions and the audit log are SQLite at `$XDG_DATA_HOME/praxis-prime/prime.db` (or `~/.local/share/praxis-prime/prime.db`).
+`shell` runs inside bubblewrap when `bwrap` is on `PATH` (no network). The workspace is mounted read-only unless the command was approved as a write, or a coding session was approved for its own worktree. Commands that are not on the read-only allowlist (`ls`, `cat` in the workspace, `git status` / `diff` / `log`) ask first, including inside the sandbox. Without bubblewrap, every command asks first. A failed sandbox is not rerun on the host. Tool output is wrapped as untrusted data. Sessions and the audit log are SQLite at `$XDG_DATA_HOME/praxis-prime/prime.db` (or `~/.local/share/praxis-prime/prime.db`).
 
 A longer usage note is in [docs/USAGE.md](docs/USAGE.md).
 

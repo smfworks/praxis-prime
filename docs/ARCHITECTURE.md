@@ -568,7 +568,7 @@ The Jury is a **micro-swarm** of judges. Each is a swarm worker with **no tools*
 | Tier | Tech | Default for | Notes |
 |---|---|---|---|
 | T0 in-process | Python | READ tools on allowlisted paths | No shell. |
-| **T1 bubblewrap** | `bwrap` + Landlock (kernel ≥5.13) + seccomp; network namespace off unless allowed; workspace bind-mounted read-write, home read-only or hidden | **all `shell` calls** | Same approach as Codex and Claude Code on Linux. bubblewrap (LGPL-2.0+) is called as an external binary. |
+| **T1 bubblewrap** | `bwrap` + Landlock (kernel ≥5.13) + seccomp; network namespace off unless allowed; workspace bind-mounted read-only unless a write was approved for that worktree; home and the main checkout are never read-write | **all `shell` calls** | Same approach as Codex and Claude Code on Linux. bubblewrap (LGPL-2.0+) is called as an external binary. |
 | T2 container | rootless Podman (Docker optional) with the per-project image `.prime/environment.toml` | builds, untrusted repos, swarm workers | Like Cursor's `.cursor/environment.json` and Hermes's docker backend. |
 | T3 microVM | Firecracker / Cloud Hypervisor (needs KVM) | high-risk code, unknown binaries | Optional; Linux + KVM only. |
 | T4 remote | SSH, Daytona, Modal, Vercel Sandbox | heavy or GPU jobs | Backends follow Hermes `tools/environments/`. Blocked by residency dials unless allowlisted. |
@@ -620,7 +620,7 @@ A first-class mode, not an afterthought, aiming for parity with Claude Code, Cod
 | Praxis Prime mode | Claude Code analogue | Codex analogue | OpenClaw analogue | Behavior |
 |---|---|---|---|---|
 | `plan` | plan | read-only | read-only | read and propose only |
-| `ask` (default) | default | workspace-write + on-request | guarded | edits in the worktree are free; shell in T1 is free when network is off; everything else asks |
+| `ask` (default) | default | workspace-write + on-request | guarded | edits in the worktree are free; shell in T1 asks unless the command is on the read-only allowlist, and the worktree bind stays read-only until a write is approved; everything else asks |
 | `auto` | auto (classifier) | workspace-write + auto-review | workspace (LLM reviewer) | Decision Engine + reviewer model approve low-risk actions; 3 denials escalate to a human (OpenClaw rule) |
 | `full` | bypassPermissions | danger-full-access | full | only inside T2/T3 sandboxes; **the baseline spine still applies to SEND/SPEND/SHARE and protected files** |
 

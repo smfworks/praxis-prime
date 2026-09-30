@@ -123,17 +123,51 @@ def _bind_candidates(command: str, args: tuple[str, ...] | list[str]) -> list[Pa
     venv = _venv_root(Path(command))
     if venv is not None:
         found.append(venv.resolve())
+    found.extend(_interpreter_dirs(Path(command)))
     for raw in (command, *args):
         path = Path(raw)
-        if path.exists():
-            found.append(path.resolve())
+        if not path.exists():
+            continue
+        resolved = path.resolve()
+        found.append(resolved)
+        # The child execs ``raw``. Mounting only the resolved target leaves a
+        # symlink such as ``.../bin/python`` missing inside the sandbox.
+        if path.is_absolute() and resolved != path:
+            found.append(path)
     return found
 
 
+def _interpreter_dirs(executable: Path) -> list[Path]:
+    """``bin`` and ``lib`` for an interpreter that does not live under ``/usr``.
+
+    ``actions/setup-python`` installs a ``python`` symlink next to the real
+    binary. The dynamic linker also needs the sibling ``lib`` directory.
+    """
+    if not executable.exists():
+        return []
+    parent = executable.resolve().parent
+    if parent.name != "bin":
+        return []
+    root = parent.parent
+    dirs: list[Path] = []
+    for name in ("bin", "lib", "lib64"):
+        candidate = root / name
+        if candidate.is_dir():
+            dirs.append(candidate)
+    return dirs
+
+
 def _covered(path: Path, prefixes: list[Path]) -> bool:
+    """True when ``path`` itself, not its symlink target, is already mounted.
+
+    Resolving a venv ``bin/python`` lands on the system interpreter under
+    ``/usr``. That must not drop the symlink the child actually execs.
+    """
+    probe = path if path.is_symlink() else path.resolve()
     for prefix in prefixes:
+        base = prefix if prefix.is_symlink() else prefix.resolve()
         try:
-            path.resolve().relative_to(prefix.resolve())
+            probe.relative_to(base)
         except ValueError:
             continue
         return True
@@ -141,9 +175,19 @@ def _covered(path: Path, prefixes: list[Path]) -> bool:
 
 
 def _venv_root(executable: Path) -> Path | None:
+    """Return the venv root. ``pyvenv.cfg`` lives next to ``bin``, not inside it."""
     if not executable.exists():
         return None
+    checked: list[Path] = []
     for parent in (executable.parent, *executable.resolve().parents):
+        checked.append(parent)
+        if parent.name == "bin":
+            checked.append(parent.parent)
+    seen: set[Path] = set()
+    for parent in checked:
+        if parent in seen:
+            continue
+        seen.add(parent)
         if (parent / "pyvenv.cfg").is_file():
             return parent
     return None

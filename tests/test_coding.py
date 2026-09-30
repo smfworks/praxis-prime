@@ -1,11 +1,12 @@
 """Coding mode: instructions, worktrees, edits, hooks, and push gates."""
 
+import json
 import subprocess
 from pathlib import Path
 
 from tests.fakes import ScriptedProvider
 
-from praxis_prime.approvals.gate import ApprovalGate
+from praxis_prime.approvals.gate import ApprovalDecision, ApprovalGate
 from praxis_prime.cli import build_parser, main
 from praxis_prime.coding.instructions import discover_instructions
 from praxis_prime.coding.session import run_coding_task
@@ -420,6 +421,65 @@ def test_push_force_and_tracked_delete_always_ask(tmp_path: Path, monkeypatch):
     shell_push = classify_command("git push", sandbox_ready=True)
     assert shell_push.risk == Risk.SEND
     assert shell_push.force_approval is True
+
+
+def test_coding_session_write_grant_is_explicit(tmp_path: Path):
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    denied, _provider = _runtime(
+        tmp_path,
+        repo,
+        [_edit_reply("one\n", "two\n"), AssistantFinal(content="edited")],
+    )
+    try:
+        run_coding_task(
+            "change hello",
+            denied,
+            disposition="keep",
+            global_dir=tmp_path / "no-global",
+        )
+        rows = denied.db.conn.execute(
+            "SELECT payload_json FROM audit_events WHERE kind = 'shell_policy'"
+        ).fetchall()
+    finally:
+        denied.close()
+    assert rows
+    payload = json.loads(rows[0]["payload_json"])
+    assert payload["tool"] == "coding_session"
+    assert payload["decision"] == "deny"
+    assert payload["mount"] == "ro"
+    assert Path(payload["worktree"]) != Path(payload["repo"])
+
+    def allow_session(request):
+        assert request.tool == "coding_session"
+        assert request.arguments["worktree"] != request.arguments["repo"]
+        return ApprovalDecision.ALLOW_ONCE
+
+    allowed = build_runtime(
+        env={},
+        config_path=tmp_path / "missing-allow.toml",
+        data_path=tmp_path / "allowed.db",
+        cwd=repo,
+        providers={"ollama": ScriptedProvider([AssistantFinal(content="done")])},
+        approver=allow_session,
+    )
+    try:
+        run_coding_task(
+            "look only",
+            allowed,
+            disposition="keep",
+            global_dir=tmp_path / "no-global-2",
+        )
+        rows = allowed.db.conn.execute(
+            "SELECT payload_json FROM audit_events WHERE kind = 'shell_policy'"
+        ).fetchall()
+    finally:
+        allowed.close()
+    grant = json.loads(rows[0]["payload_json"])
+    assert grant["decision"] == "allow"
+    assert grant["mount"] == "rw"
+    assert Path(grant["worktree"]) != repo.resolve()
+    assert Path(grant["repo"]) == repo.resolve()
 
 
 def test_grep_and_glob_see_the_worktree(tmp_path: Path):

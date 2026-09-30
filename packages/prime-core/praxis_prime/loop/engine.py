@@ -72,6 +72,9 @@ class AgentLoop:
         recall_for: Callable[[str], str] | None = None,
         on_turn_end: Callable[[str, str], None] | None = None,
         read_access: ReadAccess | None = None,
+        session_write_approved: bool = False,
+        write_scope: Path | None = None,
+        main_checkout: Path | None = None,
     ) -> None:
         self.router = router
         self.registry = registry
@@ -92,6 +95,9 @@ class AgentLoop:
         self.on_turn_end = on_turn_end
         self.read_access = read_access or ReadAccess()
         self.inode_cache = InodeScanCache()
+        self.session_write_approved = session_write_approved
+        self.write_scope = None if write_scope is None else Path(write_scope)
+        self.main_checkout = None if main_checkout is None else Path(main_checkout)
         self._turn_user = ""
 
     def run_turn(
@@ -344,6 +350,7 @@ class AgentLoop:
         )
 
         host_approved = False
+        shell_approved = False
         if verdict.decision == "deny":
             content = f"Tool {tool.name} was not run. {verdict.reason}"
             self._add_tool(call.id, content)
@@ -378,6 +385,7 @@ class AgentLoop:
                 yield StatusEvent("result", f"{tool.name} · approval denied")
                 return
             host_approved = not prepared.sandboxed
+            shell_approved = True
             yield StatusEvent("check", f"{tool.name} · approved · {decision.value}")
 
         blocked = self._pre_tool_hook(tool.name, call.arguments, prepared)
@@ -392,6 +400,8 @@ class AgentLoop:
             return
 
         yield StatusEvent("act", f"{tool.name} · {prepared.summary}")
+        from praxis_prime.policy.shellguard import compliance_mode
+
         tool_ctx = ToolContext(
             cwd=str(self.cwd),
             cancelled=lambda: control.cancelled,
@@ -399,6 +409,12 @@ class AgentLoop:
             session_id=self.session_id,
             read_access=self.read_access,
             inode_cache=self.inode_cache,
+            shell_approved=shell_approved,
+            session_write_approved=self.session_write_approved,
+            write_scope="" if self.write_scope is None else str(self.write_scope),
+            main_checkout="" if self.main_checkout is None else str(self.main_checkout),
+            audit=self.audit,
+            dial_mode=compliance_mode(self.policy.positions),
         )
         try:
             raw = tool.execute(dict(call.arguments), tool_ctx)
