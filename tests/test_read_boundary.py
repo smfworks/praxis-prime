@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 import socket
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -15,13 +16,16 @@ from tests.fakes import ScriptedProvider
 from praxis_prime.approvals.gate import ApprovalGate
 from praxis_prime.audit.log import AuditLog
 from praxis_prime.coding.tools import execute_glob, execute_grep
-from praxis_prime.loop.engine import AgentLoop
+from praxis_prime.loop.engine import AgentLoop, _reuses_inode_cache
 from praxis_prime.loop.events import StatusEvent
+from praxis_prime.policy import boundary as boundary_mod
 from praxis_prime.policy.boundary import (
+    _BROWSER_PROFILES,
     InodeScanCache,
     ReadAccess,
     ReadDenied,
     _inode_candidates,
+    _is_unbounded_scan_root,
     fetch_public,
     is_secret_path,
     secret_inode_set,
@@ -204,25 +208,334 @@ def test_hardlink_to_a_known_secret_is_rejected(tmp_path: Path, monkeypatch):
     assert SECRET not in str(denial)
 
 
-def test_inode_scan_cap_denies_the_read(tmp_path: Path, monkeypatch, caplog):
-    ssh = tmp_path / "ssh"
-    ssh.mkdir()
-    for name in ("id_rsa", "id_ed25519", "id_ecdsa", "id_dsa"):
-        (ssh / name).write_text("x", encoding="utf-8")
+def test_named_walk_records_every_secret_past_the_old_file_cap(tmp_path: Path, monkeypatch):
+    """Decoys past the old 500-file cap do not hide a later secret inode.
+
+    A hard link of that inode stored outside the tree is denied, and a normal
+    workspace file stays readable.
+    """
+    profile = tmp_path / "chromium"
+    profile.mkdir()
+    secrets = [profile / f"decoy{index}.pem" for index in range(600)]
+    for path in secrets:
+        path.write_text("x", encoding="utf-8")
+    nested = profile / "Default"
+    nested.mkdir()
+    missed = nested / "Login Data"
+    missed.write_text(SECRET, encoding="utf-8")
+    secrets.append(missed)
+    plain = nested / "Preferences"
+    plain.write_text("plain\n", encoding="utf-8")
     root = tmp_path / "ws"
     root.mkdir()
-    (root / "note.txt").write_text("hello\n", encoding="utf-8")
-    monkeypatch.setattr("praxis_prime.policy.boundary._inode_candidates", lambda: [ssh])
-    monkeypatch.setattr("praxis_prime.policy.boundary._MAX_INODE_FILES", 2)
-    with caplog.at_level(logging.WARNING, logger="praxis_prime.policy.boundary"):
-        denial = _denied(execute_read_file, {"path": "note.txt"}, _ctx(root))
-    assert denial.code == "inode_scan_capped"
-    assert "hello" not in str(denial)
-    assert "cap" in caplog.text.lower()
-    assert "denying the read" in caplog.text.lower()
+    (root / "hello.txt").write_text("hello\n", encoding="utf-8")
+    os.link(missed, root / "notes.txt")
+    monkeypatch.setattr("praxis_prime.policy.boundary._inode_candidates", lambda: [profile])
+    ctx = _ctx(root, ReadAccess(allow_paths=(str(profile),)))
+    found = secret_inode_set()
+    expected = {(path.stat().st_dev, path.stat().st_ino) for path in secrets}
+    assert expected <= found
+    assert execute_read_file({"path": "hello.txt"}, ctx) == "hello\n"
+    assert execute_read_file({"path": str(plain)}, ctx) == "plain\n"
+    denial = _denied(execute_read_file, {"path": "notes.txt"}, ctx)
+    assert denial.code == "secret_path"
+    assert SECRET not in str(denial)
+    assert SECRET not in execute_grep({"pattern": SECRET, "path": "."}, ctx)
 
-    monkeypatch.setattr("praxis_prime.policy.boundary._MAX_INODE_FILES", 4)
-    assert execute_read_file({"path": "note.txt"}, _ctx(root)) == "hello\n"
+
+def _drop_tree(path: Path) -> None:
+    shutil.rmtree(path, ignore_errors=True)
+
+
+def _touch_count(directory: Path, count: int) -> None:
+    directory.mkdir(parents=True, exist_ok=True)
+    flags = os.O_CREAT | os.O_WRONLY
+    for index in range(count):
+        fd = os.open(directory / f"{index:08x}", flags, 0o644)
+        os.close(fd)
+
+
+def _assert_outside_hardlink_denied(ctx: ToolContext, secrets: list[Path]) -> None:
+    found = secret_inode_set()
+    expected = {(path.stat().st_dev, path.stat().st_ino) for path in secrets}
+    assert expected <= found
+    assert execute_read_file({"path": "hello.txt"}, ctx) == "hello\n"
+    denial = _denied(execute_read_file, {"path": "notes.txt"}, ctx)
+    assert denial.code == "secret_path"
+    assert SECRET not in str(denial)
+    assert SECRET not in execute_grep({"pattern": SECRET, "path": "."}, ctx)
+
+
+def test_chrome_pem_decoys_do_not_hide_login_data(tmp_path: Path, monkeypatch):
+    home = tmp_path / "home"
+    chrome = home / ".config" / "google-chrome"
+    decoys = [chrome / f"decoy{index}.pem" for index in range(600)]
+    for path in decoys:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("x", encoding="utf-8")
+    secret = chrome / "Default" / "Login Data"
+    secret.parent.mkdir(parents=True)
+    secret.write_text(SECRET, encoding="utf-8")
+    root = tmp_path / "ws"
+    root.mkdir()
+    (root / "hello.txt").write_text("hello\n", encoding="utf-8")
+    os.link(secret, root / "notes.txt")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    _assert_outside_hardlink_denied(_ctx(root), [*decoys, secret])
+
+
+def test_chrome_profile_dir_decoys_do_not_hide_login_data(tmp_path: Path, monkeypatch):
+    home = tmp_path / "home"
+    chrome = home / ".config" / "google-chrome"
+    secrets: list[Path] = []
+    for index in range(600):
+        cookies = chrome / f"P{index}" / "Cookies"
+        cookies.parent.mkdir(parents=True)
+        cookies.write_text("x", encoding="utf-8")
+        secrets.append(cookies)
+    secret = chrome / "zzzDefault" / "Login Data"
+    secret.parent.mkdir()
+    secret.write_text(SECRET, encoding="utf-8")
+    secrets.append(secret)
+    root = tmp_path / "ws"
+    root.mkdir()
+    (root / "hello.txt").write_text("hello\n", encoding="utf-8")
+    os.link(secret, root / "notes.txt")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    _assert_outside_hardlink_denied(_ctx(root), secrets)
+
+
+def test_gcloud_decoys_do_not_hide_credentials_db(tmp_path: Path, monkeypatch):
+    home = tmp_path / "home"
+    gcloud = home / ".config" / "gcloud"
+    decoys = [gcloud / f"k{index}.key" for index in range(600)]
+    for path in decoys:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("x", encoding="utf-8")
+    secret = gcloud / "sub" / "credentials.db"
+    secret.parent.mkdir()
+    secret.write_text(SECRET, encoding="utf-8")
+    root = tmp_path / "ws"
+    root.mkdir()
+    (root / "hello.txt").write_text("hello\n", encoding="utf-8")
+    os.link(secret, root / "notes.txt")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    _assert_outside_hardlink_denied(_ctx(root), [*decoys, secret])
+
+
+def test_snap_firefox_decoys_do_not_hide_logins(tmp_path: Path, monkeypatch):
+    home = tmp_path / "home"
+    common = home / "snap" / "firefox" / "common"
+    decoys = [common / f"d{index}.pem" for index in range(600)]
+    for path in decoys:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("x", encoding="utf-8")
+    secret = common / ".mozilla" / "firefox" / "x.default" / "logins.json"
+    secret.parent.mkdir(parents=True)
+    secret.write_text(SECRET, encoding="utf-8")
+    root = tmp_path / "ws"
+    root.mkdir()
+    (root / "hello.txt").write_text("hello\n", encoding="utf-8")
+    os.link(secret, root / "notes.txt")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    _assert_outside_hardlink_denied(_ctx(root), [*decoys, secret])
+
+
+@pytest.mark.parametrize(
+    "outside",
+    [False, True],
+    ids=["workspace-inside-home", "workspace-outside-home"],
+)
+def test_ssh_symlink_to_home_decoys_do_not_hide_a_key(
+    tmp_path: Path, monkeypatch, outside: bool
+):
+    home = tmp_path / "home"
+    home.mkdir()
+    decoys = [home / f"decoy{index}.pem" for index in range(600)]
+    for path in decoys:
+        path.write_text("x", encoding="utf-8")
+    secret = home / "keys" / "id_ed25519"
+    secret.parent.mkdir()
+    secret.write_text(SECRET, encoding="utf-8")
+    (home / ".ssh").symlink_to(home, target_is_directory=True)
+    root = tmp_path / "ws" if outside else home / "ws"
+    root.mkdir()
+    (root / "hello.txt").write_text("hello\n", encoding="utf-8")
+    os.link(secret, root / "notes.txt")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    monkeypatch.setattr(
+        "praxis_prime.policy.boundary._inode_candidates", lambda: [home / ".ssh"]
+    )
+    _assert_outside_hardlink_denied(_ctx(root), [*decoys, secret])
+
+
+def test_real_ssh_directory_past_five_hundred_still_denies_the_key(
+    tmp_path: Path, monkeypatch
+):
+    home = tmp_path / "home"
+    ssh = home / ".ssh"
+    ssh.mkdir(parents=True)
+    for index in range(600):
+        (ssh / f"id_decoy{index}").write_text("x", encoding="utf-8")
+    secret = ssh / "z" / "id_ed25519"
+    secret.parent.mkdir()
+    secret.write_text(SECRET, encoding="utf-8")
+    root = tmp_path / "ws"
+    root.mkdir()
+    (root / "hello.txt").write_text("hello\n", encoding="utf-8")
+    os.link(secret, root / "notes.txt")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    monkeypatch.setattr("praxis_prime.policy.boundary._inode_candidates", lambda: [ssh])
+    ctx = _ctx(root)
+    assert execute_read_file({"path": "hello.txt"}, ctx) == "hello\n"
+    denial = _denied(execute_read_file, {"path": "notes.txt"}, ctx)
+    assert denial.code == "secret_path"
+    assert SECRET not in str(denial)
+
+
+def test_real_ssh_directory_over_the_credential_cap_fails_closed(
+    tmp_path: Path, monkeypatch, caplog, request: pytest.FixtureRequest
+):
+    home = tmp_path / "home"
+    request.addfinalizer(lambda: _drop_tree(home))
+    ssh = home / ".ssh"
+    ssh.mkdir(parents=True)
+    _touch_count(ssh, boundary_mod._MAX_CREDENTIAL_FILES + 1)
+    root = tmp_path / "ws"
+    root.mkdir()
+    (root / "hello.txt").write_text("hello\n", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr("praxis_prime.policy.boundary._inode_candidates", lambda: [ssh])
+    with caplog.at_level(logging.WARNING, logger="praxis_prime.policy.boundary"):
+        denial = _denied(execute_read_file, {"path": "hello.txt"}, _ctx(root))
+    assert denial.code == "inode_scan_capped"
+    assert "secret-file cap" in caplog.text
+    assert "hello" not in str(denial)
+
+
+def test_browser_cache_directories_do_not_consume_the_entry_budget(
+    tmp_path: Path, monkeypatch
+):
+    home = tmp_path / "home"
+    firefox = home / "snap" / "firefox" / "common"
+    chrome = home / ".config" / "google-chrome" / "Default"
+    caches = [
+        firefox / ".cache" / "mozilla" / "firefox" / "x" / "cache2" / "entries",
+        firefox / ".mozilla" / "firefox" / "x.default" / "startupCache",
+        chrome / "Cache",
+        chrome / "Code Cache",
+        chrome / "GPUCache",
+        chrome / "Media Cache",
+        chrome / "Service Worker" / "CacheStorage" / "abc",
+        chrome / "Service Worker" / "ScriptCache",
+    ]
+    for cache in caches:
+        _touch_count(cache, 40)
+    login = home / ".config" / "google-chrome" / "Default" / "Login Data"
+    login.write_text(SECRET, encoding="utf-8")
+    cached_cookie = chrome / "Cache" / "Cookies"
+    cached_cookie.write_text(SECRET, encoding="utf-8")
+    logins = firefox / ".mozilla" / "firefox" / "x.default" / "logins.json"
+    logins.write_text(SECRET, encoding="utf-8")
+    root = tmp_path / "ws"
+    root.mkdir()
+    (root / "hello.txt").write_text("hello\n", encoding="utf-8")
+    os.link(login, root / "notes.txt")
+    os.link(logins, root / "logins.txt")
+    os.link(cached_cookie, root / "cookies.txt")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    monkeypatch.setattr("praxis_prime.policy.boundary._MAX_SCAN_ENTRIES", 20)
+    ctx = _ctx(root)
+    assert execute_read_file({"path": "hello.txt"}, ctx) == "hello\n"
+    for name in ("notes.txt", "logins.txt", "cookies.txt"):
+        denial = _denied(execute_read_file, {"path": name}, ctx)
+        assert denial.code == "secret_path"
+        assert SECRET not in str(denial)
+
+
+def test_skipped_cache_names_are_not_credential_paths():
+    credential_paths = (
+        ("Default", "Login Data"),
+        ("Default", "Cookies"),
+        ("Default", "Web Data"),
+        ("Local State",),
+        ("logins.json",),
+        ("key4.db",),
+        ("cookies.sqlite",),
+        ("cert9.db",),
+        ("credentials.db",),
+        ("access_tokens.db",),
+        ("application_default_credentials.json",),
+        ("legacy_credentials", "user", "adc.json"),
+    )
+    skipped = boundary_mod._BROWSER_CACHE_DIRS
+    for parts in credential_paths:
+        assert not any(part.lower() in skipped for part in parts)
+
+
+@pytest.mark.parametrize(
+    ("cache_parts", "secret_parts"),
+    [
+        (
+            (
+                "snap",
+                "firefox",
+                "common",
+                ".cache",
+                "mozilla",
+                "firefox",
+                "x.default",
+                "cache2",
+                "entries",
+            ),
+            ("snap", "firefox", "common", ".mozilla", "firefox", "x.default", "logins.json"),
+        ),
+        (
+            (
+                ".config",
+                "google-chrome",
+                "Default",
+                "Service Worker",
+                "CacheStorage",
+                "abc",
+            ),
+            (".config", "google-chrome", "Default", "Login Data"),
+        ),
+    ],
+    ids=["snap-firefox-cache2", "chrome-service-worker-cache"],
+)
+def test_realistic_browser_cache_stays_under_the_entry_budget(
+    tmp_path: Path,
+    monkeypatch,
+    request: pytest.FixtureRequest,
+    cache_parts: tuple[str, ...],
+    secret_parts: tuple[str, ...],
+):
+    """A stock-sized browser cache does not fail closed a normal read."""
+    home = tmp_path / "home"
+    request.addfinalizer(lambda: _drop_tree(home))
+    _touch_count(home.joinpath(*cache_parts), boundary_mod._MAX_SCAN_ENTRIES + 1)
+    secret = home.joinpath(*secret_parts)
+    secret.parent.mkdir(parents=True, exist_ok=True)
+    secret.write_text(SECRET, encoding="utf-8")
+    root = tmp_path / "ws"
+    root.mkdir()
+    (root / "hello.txt").write_text("hello\n", encoding="utf-8")
+    os.link(secret, root / "notes.txt")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    ctx = _ctx(root)
+    assert execute_read_file({"path": "hello.txt"}, ctx) == "hello\n"
+    denial = _denied(execute_read_file, {"path": "notes.txt"}, ctx)
+    assert denial.code == "secret_path"
+    assert SECRET not in str(denial)
 
 
 def test_profile_cache_does_not_trip_the_inode_cap(tmp_path: Path, monkeypatch):
@@ -238,7 +551,6 @@ def test_profile_cache_does_not_trip_the_inode_cap(tmp_path: Path, monkeypatch):
     (root / "hello.txt").write_text("hello\n", encoding="utf-8")
     os.link(secret, root / "notes.txt")
     monkeypatch.setattr("praxis_prime.policy.boundary._inode_candidates", lambda: [profile])
-    monkeypatch.setattr("praxis_prime.policy.boundary._MAX_INODE_FILES", 3)
     ctx = _ctx(root)
     assert execute_read_file({"path": "hello.txt"}, ctx) == "hello\n"
     denial = _denied(execute_read_file, {"path": "notes.txt"}, ctx)
@@ -246,23 +558,37 @@ def test_profile_cache_does_not_trip_the_inode_cap(tmp_path: Path, monkeypatch):
     assert SECRET not in str(denial)
 
 
-def test_skipped_profile_secret_still_fails_closed(tmp_path: Path, monkeypatch, caplog):
-    profile = tmp_path / "chromium"
-    profile.mkdir()
-    for name in ("Login Data", "Cookies", "Web Data", "key4.db"):
-        (profile / name).write_text("x", encoding="utf-8")
-    for index in range(10):
-        (profile / f"cache-{index}").write_text("x", encoding="utf-8")
+def test_snap_directory_is_entry_budgeted(tmp_path: Path, monkeypatch, caplog):
+    home = tmp_path / "home"
+    snap = home / "snap" / "brave"
+    snap.mkdir(parents=True)
+    for index in range(5):
+        (snap / f"n{index}").write_text("x", encoding="utf-8")
     root = tmp_path / "ws"
     root.mkdir()
-    (root / "note.txt").write_text("hello\n", encoding="utf-8")
-    monkeypatch.setattr("praxis_prime.policy.boundary._inode_candidates", lambda: [profile])
-    monkeypatch.setattr("praxis_prime.policy.boundary._MAX_INODE_FILES", 2)
+    (root / "hello.txt").write_text("hello\n", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    monkeypatch.setattr("praxis_prime.policy.boundary._inode_candidates", lambda: [snap])
+    monkeypatch.setattr("praxis_prime.policy.boundary._MAX_SCAN_ENTRIES", 1)
     with caplog.at_level(logging.WARNING, logger="praxis_prime.policy.boundary"):
-        denial = _denied(execute_read_file, {"path": "note.txt"}, _ctx(root))
+        denial = _denied(execute_read_file, {"path": "hello.txt"}, _ctx(root))
     assert denial.code == "inode_scan_capped"
+    assert "directory-entry cap" in caplog.text
     assert "hello" not in str(denial)
-    assert "secret-file cap" in caplog.text
+
+
+def test_ordinary_directory_has_no_entry_budget(tmp_path: Path, monkeypatch):
+    folder = tmp_path / "notes"
+    folder.mkdir()
+    for index in range(5):
+        (folder / f"n{index}").write_text("x", encoding="utf-8")
+    root = tmp_path / "ws"
+    root.mkdir()
+    (root / "hello.txt").write_text("hello\n", encoding="utf-8")
+    monkeypatch.setattr("praxis_prime.policy.boundary._inode_candidates", lambda: [folder])
+    monkeypatch.setattr("praxis_prime.policy.boundary._MAX_SCAN_ENTRIES", 1)
+    assert execute_read_file({"path": "hello.txt"}, _ctx(root)) == "hello\n"
 
 
 def test_kube_cache_does_not_trip_the_inode_cap(tmp_path: Path, monkeypatch):
@@ -308,49 +634,241 @@ def test_gcloud_logs_do_not_hide_named_credentials(tmp_path: Path, monkeypatch):
     os.link(adc, root / "notes.txt")
     os.link(gcloud / "access_tokens.db", root / "tokens.txt")
     monkeypatch.setattr("praxis_prime.policy.boundary._inode_candidates", lambda: [gcloud])
-    monkeypatch.setattr("praxis_prime.policy.boundary._MAX_INODE_FILES", 4)
     ctx = _ctx(root)
     assert execute_read_file({"path": "hello.txt"}, ctx) == "hello\n"
     assert _denied(execute_read_file, {"path": "notes.txt"}, ctx).code == "secret_path"
     assert _denied(execute_read_file, {"path": "tokens.txt"}, ctx).code == "secret_path"
 
 
-_PACKAGED_BROWSER_ROOTS = (
-    "snap/chromium/common/chromium",
-    "snap/firefox/common/.mozilla",
-    ".var/app/com.google.Chrome/config/google-chrome",
-    ".var/app/org.chromium.Chromium/config/chromium",
-    ".var/app/org.mozilla.firefox/.mozilla",
-    ".config/vivaldi",
-    ".config/opera",
-    ".config/google-chrome-beta",
-)
+def _profile_id(profile: object) -> str:
+    scan = getattr(profile, "scan", ())
+    return "/".join(scan)
 
 
-def test_packaged_browser_roots_are_inode_candidates(tmp_path: Path, monkeypatch):
+def test_every_direct_read_browser_root_has_an_inode_candidate(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
     found = set(_inode_candidates())
-    for relative in _PACKAGED_BROWSER_ROOTS:
-        assert tmp_path.joinpath(*relative.split("/")) in found
+    assert _BROWSER_PROFILES
+    for profile in _BROWSER_PROFILES:
+        assert profile.scan[: len(profile.deny)] == profile.deny
+        scan = tmp_path.joinpath(*profile.scan)
+        assert scan in found, profile.scan
+        marker = tmp_path.joinpath(*profile.deny) / "Login Data"
+        assert is_secret_path(marker), profile.deny
 
 
-@pytest.mark.parametrize("relative", _PACKAGED_BROWSER_ROOTS)
-def test_packaged_browser_root_hardlink_is_denied(tmp_path: Path, monkeypatch, relative: str):
-    profile = tmp_path.joinpath(*relative.split("/"))
-    profile.mkdir(parents=True)
-    secret = profile / "Cookies"
+def test_ordinary_config_file_stays_readable(tmp_path: Path, monkeypatch):
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    ordinary = home / ".config" / "ordinary" / "settings.toml"
+    ordinary.parent.mkdir(parents=True)
+    ordinary.write_text("theme = light\n", encoding="utf-8")
+    root = tmp_path / "ws"
+    root.mkdir()
+    access = ReadAccess(allow_paths=(str(home / ".config"),))
+    ctx = _ctx(root, access)
+    assert execute_read_file({"path": str(ordinary)}, ctx) == "theme = light\n"
+    assert not is_secret_path(ordinary)
+
+
+def test_workspace_snap_and_flatpak_paths_are_not_browser_roots(tmp_path: Path, monkeypatch):
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    real = home / "snap" / "firefox" / "notes.md"
+    real.parent.mkdir(parents=True)
+    real.write_text(SECRET, encoding="utf-8")
+    root = tmp_path / "ws"
+    snap_note = root / "snap" / "firefox" / "notes.md"
+    flatpak_note = root / ".var" / "app" / "com.google.Chrome" / "config" / "notes.md"
+    for path in (snap_note, flatpak_note):
+        path.parent.mkdir(parents=True)
+        path.write_text("hello\n", encoding="utf-8")
+    access = ReadAccess(allow_paths=(str(home / "snap"),))
+    ctx = _ctx(root, access)
+    assert execute_read_file({"path": "snap/firefox/notes.md"}, ctx) == "hello\n"
+    assert execute_read_file({"path": str(flatpak_note)}, ctx) == "hello\n"
+    assert not is_secret_path(snap_note)
+    assert not is_secret_path(flatpak_note)
+    denial = _denied(execute_read_file, {"path": str(real)}, ctx)
+    assert denial.code == "secret_path"
+    assert SECRET not in str(denial)
+
+
+@pytest.mark.parametrize("profile", _BROWSER_PROFILES, ids=_profile_id)
+def test_browser_table_direct_read_is_denied(tmp_path: Path, monkeypatch, profile):
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    secret = home.joinpath(*profile.scan) / "Login Data"
+    secret.parent.mkdir(parents=True)
     secret.write_text(SECRET, encoding="utf-8")
-    (profile / "Cache").mkdir()
+    root = tmp_path / "ws"
+    root.mkdir()
+    access = ReadAccess(
+        allow_paths=(str(home / ".config"), str(home / "snap"), str(home / ".var"))
+    )
+    ctx = _ctx(root, access)
+    assert is_secret_path(secret)
+    denial = _denied(execute_read_file, {"path": str(secret)}, ctx)
+    assert denial.code == "secret_path"
+    assert SECRET not in str(denial)
+
+
+@pytest.mark.parametrize("profile", _BROWSER_PROFILES, ids=_profile_id)
+def test_browser_table_hardlink_is_denied(tmp_path: Path, monkeypatch, profile):
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    profile_dir = home.joinpath(*profile.scan)
+    profile_dir.mkdir(parents=True)
+    secret = profile_dir / "Cookies"
+    secret.write_text(SECRET, encoding="utf-8")
+    cache = profile_dir / "Cache"
+    cache.mkdir()
     for index in range(8):
-        (profile / "Cache" / f"data_{index}").write_text("x", encoding="utf-8")
+        (cache / f"data_{index}").write_text("x", encoding="utf-8")
     root = tmp_path / "ws"
     root.mkdir()
     (root / "hello.txt").write_text("hello\n", encoding="utf-8")
     os.link(secret, root / "notes.txt")
-    monkeypatch.setattr("praxis_prime.policy.boundary._inode_candidates", lambda: [profile])
+    monkeypatch.setattr(
+        "praxis_prime.policy.boundary._inode_candidates",
+        lambda profile_dir=profile_dir: [profile_dir],
+    )
     ctx = _ctx(root)
     assert execute_read_file({"path": "hello.txt"}, ctx) == "hello\n"
+    denial = _denied(execute_read_file, {"path": "notes.txt"}, ctx)
+    assert denial.code == "secret_path"
+    assert SECRET not in str(denial)
+
+
+_SNAP_REVISION_LAYOUTS = (
+    ("brave", ("BraveSoftware", "Brave-Browser")),
+    ("vivaldi", ("vivaldi",)),
+    ("opera", ("opera",)),
+)
+
+
+@pytest.mark.parametrize(("app", "config_parts"), _SNAP_REVISION_LAYOUTS)
+def test_snap_revision_profile_denies_direct_reads_and_hardlinks(
+    tmp_path: Path, monkeypatch, app: str, config_parts: tuple[str, ...]
+):
+    home = tmp_path / "home"
+    profile = home.joinpath("snap", app, "123", ".config", *config_parts, "Default")
+    profile.mkdir(parents=True)
+    login = profile / "Login Data"
+    cookies = profile / "Cookies"
+    login.write_text(SECRET, encoding="utf-8")
+    cookies.write_text(SECRET, encoding="utf-8")
+    current = home / "snap" / app / "current"
+    current.symlink_to("123", target_is_directory=True)
+    via_current = current / ".config"
+    for part in config_parts:
+        via_current = via_current / part
+    via_current = via_current / "Default"
+    root = tmp_path / "ws"
+    root.mkdir()
+    (root / "hello.txt").write_text("hello\n", encoding="utf-8")
+    os.link(login, root / "login.txt")
+    os.link(cookies, root / "cookies.txt")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    recorded: list[Path] = []
+    real_add = boundary_mod._add_inode
+
+    def counting(path: Path, found: set[tuple[int, int]], count: int) -> int:
+        recorded.append(path)
+        return real_add(path, found, count)
+
+    monkeypatch.setattr("praxis_prime.policy.boundary._add_inode", counting)
+    access = ReadAccess(allow_paths=(str(home / "snap"),))
+    ctx = _ctx(root, access)
+    for path in (login, cookies, via_current / "Login Data", via_current / "Cookies"):
+        assert is_secret_path(path), path
+        denial = _denied(execute_read_file, {"path": str(path)}, ctx)
+        assert denial.code == "secret_path"
+        assert SECRET not in str(denial)
+    # The whole snap prefix is a direct-read deny, so a plain file there is
+    # secret by path. ``current`` shares the revision's directory inode, so
+    # one scan records each secret file once.
+    recorded.clear()
+    found = boundary_mod.secret_scan()
+    profile_hits = [path for path in recorded if path.name in {"Login Data", "Cookies"}]
+    assert len(profile_hits) == 2
+    for source in (login, cookies):
+        st = source.stat()
+        assert (st.st_dev, st.st_ino) in found
+    assert execute_read_file({"path": "hello.txt"}, ctx) == "hello\n"
+    for name in ("login.txt", "cookies.txt"):
+        denial = _denied(execute_read_file, {"path": name}, ctx)
+        assert denial.code == "secret_path"
+        assert SECRET not in str(denial)
+
+
+def test_symlinked_home_still_denies_snap_and_flatpak(tmp_path: Path, monkeypatch):
+    real_home = tmp_path / "var" / "home"
+    link_home = tmp_path / "home"
+    real_home.mkdir(parents=True)
+    link_home.symlink_to(real_home, target_is_directory=True)
+    monkeypatch.setenv("HOME", str(link_home))
+    snap = real_home / "snap" / "firefox" / "notes.md"
+    snap.parent.mkdir(parents=True)
+    snap.write_text(SECRET, encoding="utf-8")
+    flatpak = real_home / ".var" / "app" / "com.google.Chrome" / "config" / "Login Data"
+    flatpak.parent.mkdir(parents=True)
+    flatpak.write_text(SECRET, encoding="utf-8")
+    via_link = link_home / "snap" / "vivaldi" / "current" / ".config" / "vivaldi" / "Login Data"
+    workspace = tmp_path / "ws" / "snap" / "firefox" / "notes.md"
+    workspace.parent.mkdir(parents=True)
+    workspace.write_text("hello\n", encoding="utf-8")
+    assert is_secret_path(snap)
+    assert is_secret_path(flatpak)
+    assert is_secret_path(via_link)
+    assert not is_secret_path(workspace)
+
+
+def test_relative_xdg_config_home_is_ignored(tmp_path: Path, monkeypatch):
+    home = tmp_path / "home"
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", "xdg")
+    relative = tmp_path / "xdg" / "vivaldi" / "Default" / "Login Data"
+    relative.parent.mkdir(parents=True)
+    relative.write_text(SECRET, encoding="utf-8")
+    native = home / ".config" / "vivaldi" / "Default" / "Login Data"
+    native.parent.mkdir(parents=True)
+    native.write_text(SECRET, encoding="utf-8")
+    assert not is_secret_path(relative)
+    assert is_secret_path(native)
+    found = set(_inode_candidates())
+    assert tmp_path / "xdg" / "vivaldi" not in found
+    assert home / ".config" / "vivaldi" in found
+
+
+def test_xdg_config_home_browser_profile_is_denied(tmp_path: Path, monkeypatch):
+    home = tmp_path / "home"
+    xdg = tmp_path / "xdg"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
+    secret = xdg / "vivaldi" / "Default" / "Login Data"
+    secret.parent.mkdir(parents=True)
+    secret.write_text(SECRET, encoding="utf-8")
+    ordinary = xdg / "ordinary" / "settings.toml"
+    ordinary.parent.mkdir(parents=True)
+    ordinary.write_text("theme = light\n", encoding="utf-8")
+    root = tmp_path / "ws"
+    root.mkdir()
+    (root / "hello.txt").write_text("hello\n", encoding="utf-8")
+    os.link(secret, root / "notes.txt")
+    found = set(_inode_candidates())
+    for profile in _BROWSER_PROFILES:
+        if profile.deny[0] == ".config" and len(profile.deny) == 2:
+            assert xdg / profile.deny[1] in found
+    assert is_secret_path(secret)
+    assert not is_secret_path(ordinary)
+    ctx = _ctx(root, ReadAccess(allow_paths=(str(xdg),)))
+    assert execute_read_file({"path": "hello.txt"}, ctx) == "hello\n"
+    assert execute_read_file({"path": str(ordinary)}, ctx) == "theme = light\n"
     denial = _denied(execute_read_file, {"path": "notes.txt"}, ctx)
     assert denial.code == "secret_path"
     assert SECRET not in str(denial)
@@ -418,6 +936,108 @@ def test_inode_scan_cache_reuses_until_cleared(monkeypatch):
     assert calls["n"] == 2
 
 
+def test_inode_cache_reuse_skips_tools_that_can_write():
+    assert _reuses_inode_cache("read_file", Risk.READ)
+    assert _reuses_inode_cache("list_dir", Risk.READ)
+    assert _reuses_inode_cache("grep", Risk.READ)
+    assert _reuses_inode_cache("glob", Risk.READ)
+    assert _reuses_inode_cache("web_fetch", Risk.READ)
+    assert not _reuses_inode_cache("shell", Risk.READ)
+    assert not _reuses_inode_cache("run_command", Risk.READ)
+    assert not _reuses_inode_cache("write_file", Risk.DRAFT)
+    assert not _reuses_inode_cache("read_file", Risk.DESTRUCTIVE)
+    assert not _reuses_inode_cache("plant_secret", Risk.READ)
+
+
+def test_readonly_calls_reuse_one_inode_scan_until_a_write(tmp_path: Path, monkeypatch):
+    home = tmp_path / "home"
+    ssh = home / ".ssh"
+    ssh.mkdir(parents=True)
+    root = tmp_path / "ws"
+    root.mkdir()
+    (root / "hello.txt").write_text("hello\n", encoding="utf-8")
+    (root / "other.txt").write_text("other\n", encoding="utf-8")
+    alias = root / "alias.txt"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    monkeypatch.setattr("praxis_prime.policy.boundary._inode_candidates", lambda: [ssh])
+    calls = {"n": 0}
+    real = boundary_mod._scan_secret_inodes
+
+    def counted():
+        calls["n"] += 1
+        return real()
+
+    monkeypatch.setattr(boundary_mod, "_scan_secret_inodes", counted)
+
+    def plant(_arguments, _context):
+        assert calls["n"] == 1
+        secret = ssh / "id_rsa"
+        secret.write_text(SECRET, encoding="utf-8")
+        os.link(secret, alias)
+        return "planted"
+
+    registry = builtin_registry()
+    registry.register(
+        Tool(
+            name="plant_secret",
+            description="Create a secret and hardlink it into the workspace.",
+            parameters={"type": "object", "properties": {}},
+            risk=Risk.READ,
+            execute=plant,
+        )
+    )
+    provider = ScriptedProvider(
+        [
+            AssistantFinal(
+                content="",
+                tool_calls=(
+                    ToolCall(id="c1", name="read_file", arguments={"path": "hello.txt"}),
+                ),
+            ),
+            AssistantFinal(
+                content="",
+                tool_calls=(
+                    ToolCall(id="c2", name="read_file", arguments={"path": "other.txt"}),
+                ),
+            ),
+            AssistantFinal(
+                content="",
+                tool_calls=(ToolCall(id="c3", name="plant_secret", arguments={}),),
+            ),
+            AssistantFinal(
+                content="",
+                tool_calls=(
+                    ToolCall(id="c4", name="read_file", arguments={"path": "alias.txt"}),
+                ),
+            ),
+            AssistantFinal(content="done"),
+        ]
+    )
+    loop = AgentLoop(
+        router=ModelRouter([ModelRef("ollama", "fake")], {"ollama": provider}),
+        registry=registry,
+        policy=PolicyEngine(),
+        gate=ApprovalGate(None),
+        cwd=root,
+        max_iterations=8,
+    )
+    list(loop.run_turn("read twice, plant a secret, read the alias"))
+    assert calls["n"] == 2
+    assert isinstance(loop.inode_cache, InodeScanCache)
+    assert not hasattr(loop.policy, "inode_cache")
+    tool_text = [
+        message.content
+        for message in provider.requests[-1].messages
+        if message.role == "tool"
+    ]
+    assert any("hello" in text for text in tool_text)
+    assert any("other" in text for text in tool_text)
+    assert any("planted" in text for text in tool_text)
+    assert any("alias.txt" in text and "secret" in text.lower() for text in tool_text)
+    assert all(SECRET not in text for text in tool_text)
+
+
 @pytest.mark.parametrize(
     "relative",
     [
@@ -477,7 +1097,6 @@ def test_profile_symlink_outside_home_is_not_walked(tmp_path: Path, monkeypatch)
     (root / "hello.txt").write_text("hello\n", encoding="utf-8")
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setattr("praxis_prime.policy.boundary._inode_candidates", lambda: [opera])
-    monkeypatch.setattr("praxis_prime.policy.boundary._MAX_INODE_FILES", 1)
     real_walk = os.walk
 
     def guarded(top, *args, **kwargs):
@@ -487,6 +1106,200 @@ def test_profile_symlink_outside_home_is_not_walked(tmp_path: Path, monkeypatch)
 
     monkeypatch.setattr("praxis_prime.policy.boundary.os.walk", guarded)
     assert execute_read_file({"path": "hello.txt"}, _ctx(root)) == "hello\n"
+
+
+def test_scan_skips_only_root_proc_and_sys():
+    assert _is_unbounded_scan_root(Path("/"))
+    assert _is_unbounded_scan_root(Path("/proc"))
+    assert _is_unbounded_scan_root(Path("/sys"))
+    assert _is_unbounded_scan_root(Path("/etc/.."))
+    for raw in (
+        "/etc",
+        "/usr",
+        "/dev",
+        "/etc/ssh",
+        "/usr/bin",
+        "/dev/shm",
+        "/proc/self",
+        "/sys/class",
+    ):
+        assert not _is_unbounded_scan_root(Path(raw)), raw
+
+
+@pytest.mark.parametrize("target", ["/etc", "/dev"])
+def test_etc_and_dev_symlinks_use_the_entry_budget(
+    tmp_path: Path, monkeypatch, caplog, target: str
+):
+    home = tmp_path / "home"
+    link = home / ".ssh"
+    link.parent.mkdir()
+    link.symlink_to(target)
+    root = tmp_path / "ws"
+    root.mkdir()
+    (root / "hello.txt").write_text("hello\n", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr("praxis_prime.policy.boundary._inode_candidates", lambda: [link])
+    monkeypatch.setattr("praxis_prime.policy.boundary._MAX_SCAN_ENTRIES", 1)
+    with caplog.at_level(logging.WARNING, logger="praxis_prime.policy.boundary"):
+        denial = _denied(execute_read_file, {"path": "hello.txt"}, _ctx(root))
+    assert denial.code == "inode_scan_capped"
+    assert "hello" not in str(denial)
+    assert "directory-entry cap" in caplog.text
+
+
+@pytest.mark.parametrize("target", ["/", "/proc", "/sys", "/etc/.."])
+def test_root_proc_and_sys_symlinks_are_not_walked(
+    tmp_path: Path, monkeypatch, target: str
+):
+    home = tmp_path / "home"
+    link = home / "chromium"
+    link.parent.mkdir()
+    link.symlink_to(target)
+    root = tmp_path / "ws"
+    root.mkdir()
+    (root / "hello.txt").write_text("hello\n", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr("praxis_prime.policy.boundary._inode_candidates", lambda: [link])
+    real_walk = os.walk
+
+    def guarded(top, *args, **kwargs):
+        posix = Path(top).resolve(strict=False).as_posix()
+        if posix in {"/", "/proc", "/sys"}:
+            raise AssertionError(f"inode scan walked {posix}")
+        return real_walk(top, *args, **kwargs)
+
+    monkeypatch.setattr("praxis_prime.policy.boundary.os.walk", guarded)
+    assert execute_read_file({"path": "hello.txt"}, _ctx(root)) == "hello\n"
+
+
+def test_proc_subdirectory_is_entry_budgeted(tmp_path: Path, monkeypatch, caplog):
+    if not Path("/proc/self").exists():
+        pytest.skip("no /proc/self")
+    home = tmp_path / "home"
+    link = home / ".ssh"
+    link.parent.mkdir()
+    link.symlink_to("/proc/self")
+    root = tmp_path / "ws"
+    root.mkdir()
+    (root / "hello.txt").write_text("hello\n", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr("praxis_prime.policy.boundary._inode_candidates", lambda: [link])
+    monkeypatch.setattr("praxis_prime.policy.boundary._MAX_SCAN_ENTRIES", 1)
+    with caplog.at_level(logging.WARNING, logger="praxis_prime.policy.boundary"):
+        denial = _denied(execute_read_file, {"path": "hello.txt"}, _ctx(root))
+    assert denial.code == "inode_scan_capped"
+    assert "directory-entry cap" in caplog.text
+    assert "hello" not in str(denial)
+
+
+def test_ssh_symlink_to_home_over_budget_denies_top_level_key(
+    tmp_path: Path, monkeypatch, caplog
+):
+    home = tmp_path / "home"
+    home.mkdir()
+    key = home / "id_ed25519"
+    key.write_text(SECRET, encoding="utf-8")
+    budget = boundary_mod._MAX_SCAN_ENTRIES
+    for index in range(budget):
+        fd = os.open(home / f"n{index}", os.O_CREAT | os.O_WRONLY, 0o644)
+        os.close(fd)
+    (home / ".ssh").symlink_to(home, target_is_directory=True)
+    root = tmp_path / "ws"
+    root.mkdir()
+    (root / "hello.txt").write_text("hello\n", encoding="utf-8")
+    os.link(key, root / "alias.txt")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(
+        "praxis_prime.policy.boundary._inode_candidates", lambda: [home / ".ssh"]
+    )
+    ctx = _ctx(root)
+    with caplog.at_level(logging.WARNING, logger="praxis_prime.policy.boundary"):
+        denial = _denied(execute_read_file, {"path": "alias.txt"}, ctx)
+    assert denial.code == "inode_scan_capped"
+    assert "directory-entry cap" in caplog.text
+    assert "skipping inode walk" not in caplog.text
+    assert SECRET not in str(denial)
+
+
+def test_ssh_symlink_to_usr_over_budget_fails_closed(tmp_path: Path, monkeypatch, caplog):
+    home = tmp_path / "home"
+    link = home / ".ssh"
+    link.parent.mkdir()
+    link.symlink_to("/usr")
+    root = tmp_path / "ws"
+    root.mkdir()
+    (root / "hello.txt").write_text("hello\n", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr("praxis_prime.policy.boundary._inode_candidates", lambda: [link])
+    monkeypatch.setattr("praxis_prime.policy.boundary._MAX_SCAN_ENTRIES", 1)
+    with caplog.at_level(logging.WARNING, logger="praxis_prime.policy.boundary"):
+        denial = _denied(execute_read_file, {"path": "hello.txt"}, _ctx(root))
+    assert denial.code == "inode_scan_capped"
+    assert "directory-entry cap" in caplog.text
+    assert "skipping inode walk" not in caplog.text
+    assert "hello" not in str(denial)
+
+
+def test_ssh_symlink_under_usr_over_budget_fails_closed(tmp_path: Path, monkeypatch, caplog):
+    home = tmp_path / "home"
+    link = home / ".ssh"
+    link.parent.mkdir()
+    link.symlink_to("/usr/bin")
+    root = tmp_path / "ws"
+    root.mkdir()
+    (root / "hello.txt").write_text("hello\n", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr("praxis_prime.policy.boundary._inode_candidates", lambda: [link])
+    monkeypatch.setattr("praxis_prime.policy.boundary._MAX_SCAN_ENTRIES", 1)
+    with caplog.at_level(logging.WARNING, logger="praxis_prime.policy.boundary"):
+        denial = _denied(execute_read_file, {"path": "hello.txt"}, _ctx(root))
+    assert denial.code == "inode_scan_capped"
+    assert "directory-entry cap" in caplog.text
+    assert "skipping inode walk" not in caplog.text
+    assert "hello" not in str(denial)
+
+
+def test_generic_symlink_over_budget_still_fails_closed(tmp_path: Path, monkeypatch, caplog):
+    home = tmp_path / "home"
+    link = home / ".config" / "chromium"
+    link.parent.mkdir(parents=True)
+    link.symlink_to("/usr")
+    root = tmp_path / "ws"
+    root.mkdir()
+    (root / "hello.txt").write_text("hello\n", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr("praxis_prime.policy.boundary._inode_candidates", lambda: [link])
+    monkeypatch.setattr("praxis_prime.policy.boundary._MAX_SCAN_ENTRIES", 1)
+    with caplog.at_level(logging.WARNING, logger="praxis_prime.policy.boundary"):
+        denial = _denied(execute_read_file, {"path": "hello.txt"}, _ctx(root))
+    assert denial.code == "inode_scan_capped"
+    assert "directory-entry cap" in caplog.text
+    assert "hello" not in str(denial)
+
+
+def test_ssh_symlink_to_home_still_allows_a_normal_read(tmp_path: Path, monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    for index in range(30):
+        (home / f"notes-{index}.txt").write_text("plain\n", encoding="utf-8")
+    key = home / "id_rsa"
+    key.write_text(SECRET, encoding="utf-8")
+    (home / ".ssh").symlink_to(home, target_is_directory=True)
+    root = home / "ws"
+    root.mkdir()
+    (root / "hello.txt").write_text("hello\n", encoding="utf-8")
+    os.link(key, root / "alias.txt")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    monkeypatch.setattr("praxis_prime.policy.boundary._MAX_CREDENTIAL_FILES", 10)
+    monkeypatch.setattr(
+        "praxis_prime.policy.boundary._inode_candidates", lambda: [home / ".ssh"]
+    )
+    ctx = _ctx(root)
+    assert execute_read_file({"path": "hello.txt"}, ctx) == "hello\n"
+    denial = _denied(execute_read_file, {"path": "alias.txt"}, ctx)
+    assert denial.code == "secret_path"
+    assert SECRET not in str(denial)
 
 
 @pytest.mark.parametrize(

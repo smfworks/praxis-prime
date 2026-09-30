@@ -31,10 +31,12 @@ from praxis_prime.paths import config_dir, runtime_dir
 _log = logging.getLogger(__name__)
 
 MAX_REDIRECTS = 5
-_MAX_INODE_FILES = 500
 _MAX_CREDENTIAL_FILES = 5_000
 _MAX_SCAN_ENTRIES = 20_000
-_SYSTEM_SCAN_ROOTS = ("/usr", "/etc", "/proc", "/sys", "/dev")
+# Exact paths a symlink must not walk. ``/etc``, ``/usr``, and ``/dev`` are
+# walked with the entry budget. A path that resolves to one of these, or to
+# the same inode as ``/``, would scan the whole filesystem or a virtual tree.
+_SKIP_SCAN_ROOTS = frozenset({"/", "/proc", "/sys"})
 _FETCH_ALLOW = frozenset({"loopback", "private", "link_local", "metadata"})
 _BROWSER_FETCH_ALLOW = frozenset({"loopback", "private", "link_local"})
 _REDIRECT_STATUS = frozenset({300, 301, 302, 303, 307, 308})
@@ -75,15 +77,92 @@ _SERVICE_ACCOUNT_SUFFIXES = (
 _KEY_PREFIXES = ("id_rsa", "id_ed25519", "id_ecdsa", "id_dsa")
 _SOURCE_SUFFIXES = frozenset({".py", ".pyi", ".md", ".rst", ".js", ".ts", ".tsx", ".go", ".rs"})
 _SECRET_DIR_PARTS = frozenset({".ssh", ".aws", ".gnupg", ".kube", ".mozilla"})
+
+
+@dataclass(frozen=True, slots=True)
+class _BrowserProfile:
+    """One browser tree shared by direct reads and the inode scan.
+
+    ``scan`` is the directory the inode walk covers, relative to ``$HOME``.
+    ``deny`` is the direct-read prefix, also relative to ``$HOME``. ``scan``
+    is ``deny`` or a directory under it, so the two cannot name different trees.
+    """
+
+    scan: tuple[str, ...]
+    deny: tuple[str, ...]
+
+
+def _profile(
+    scan: tuple[str, ...], deny: tuple[str, ...] | None = None
+) -> _BrowserProfile:
+    prefix = scan if deny is None else deny
+    if scan[: len(prefix)] != prefix:
+        raise ValueError(f"inode scan {scan} is outside direct-read prefix {prefix}")
+    return _BrowserProfile(scan=scan, deny=prefix)
+
+
+# Native ``~/.config`` names use their on-disk spelling. Snap rows scan and
+# deny the whole ``snap/<app>`` tree: Brave, Vivaldi, and Opera keep the
+# profile at ``<rev>/.config/<name>/``, and ``current`` is a symlink to that
+# revision. Chromium and Firefox profiles under ``common/`` are inside the
+# same prefix. Flatpak rows deny the app config prefix and scan the profile
+# directory under it.
+_BROWSER_PROFILES: tuple[_BrowserProfile, ...] = (
+    _profile((".config", "gcloud")),
+    _profile((".config", "google-chrome")),
+    _profile((".config", "google-chrome-beta")),
+    _profile((".config", "google-chrome-unstable")),
+    _profile((".config", "chromium")),
+    _profile((".config", "chromium-browser")),
+    _profile((".config", "BraveSoftware")),
+    _profile((".config", "microsoft-edge")),
+    _profile((".config", "microsoft-edge-beta")),
+    _profile((".config", "microsoft-edge-dev")),
+    _profile((".config", "opera")),
+    _profile((".config", "opera-beta")),
+    _profile((".config", "vivaldi")),
+    _profile((".config", "vivaldi-snapshot")),
+    _profile(("snap", "chromium")),
+    _profile(("snap", "firefox")),
+    _profile(("snap", "brave")),
+    _profile(("snap", "opera")),
+    _profile(("snap", "vivaldi")),
+    _profile(
+        (".var", "app", "com.google.Chrome", "config", "google-chrome"),
+        (".var", "app", "com.google.Chrome", "config"),
+    ),
+    _profile(
+        (".var", "app", "org.chromium.Chromium", "config", "chromium"),
+        (".var", "app", "org.chromium.Chromium", "config"),
+    ),
+    _profile((".var", "app", "org.mozilla.firefox", ".mozilla")),
+    _profile((".var", "app", "org.mozilla.firefox", "config")),
+    _profile(
+        (".var", "app", "com.brave.Browser", "config", "BraveSoftware"),
+        (".var", "app", "com.brave.Browser", "config"),
+    ),
+    _profile(
+        (".var", "app", "com.microsoft.Edge", "config", "microsoft-edge"),
+        (".var", "app", "com.microsoft.Edge", "config"),
+    ),
+    _profile(
+        (".var", "app", "com.opera.Opera", "config", "opera"),
+        (".var", "app", "com.opera.Opera", "config"),
+    ),
+    _profile(
+        (".var", "app", "com.vivaldi.Vivaldi", "config", "vivaldi"),
+        (".var", "app", "com.vivaldi.Vivaldi", "config"),
+    ),
+)
 _BROWSER_CONFIG = frozenset(
-    {
-        "gcloud",
-        "google-chrome",
-        "chromium",
-        "bravesoftware",
-        "microsoft-edge",
-        "opera",
-    }
+    profile.deny[1].lower()
+    for profile in _BROWSER_PROFILES
+    if profile.deny[0] == ".config" and len(profile.deny) == 2
+)
+_HOME_BROWSER_PREFIXES = tuple(
+    tuple(part.lower() for part in profile.deny)
+    for profile in _BROWSER_PROFILES
+    if profile.deny[0] in {"snap", ".var"}
 )
 # Browser and gcloud trees contribute these filenames, plus the denylist
 # patterns. Credential directories count every file instead.
@@ -115,6 +194,33 @@ _GCLOUD_SECRET_NAMES = frozenset(
 )
 _PROFILE_SIDECAR_SUFFIXES = ("-journal", "-wal", "-shm")
 _SKIP_WALK = frozenset({".git", "node_modules", ".venv", "__pycache__"})
+# Disk-cache directory names skipped inside a browser scan root. Chrome stores
+# these beside Login Data / Cookies (Cache, Code Cache, GPUCache, Service
+# Worker/CacheStorage). Firefox stores them beside logins.json / key4.db
+# (cache2, and snap ``common/.cache``). None of those credential names live in
+# the skipped directories. A secret-named file placed directly in one is still
+# recorded; the walk does not descend, so cache entries do not use the budget.
+_BROWSER_CACHE_DIRS = frozenset(
+    {
+        ".cache",
+        "cache",
+        "cache2",
+        "code cache",
+        "gpucache",
+        "media cache",
+        "shadercache",
+        "grshadercache",
+        "dawncache",
+        "dawnwebgpucache",
+        "dawngraphitecache",
+        "startupcache",
+        "offlinecache",
+        "shader-cache",
+        "jumplistcache",
+        "scriptcache",
+        "cachestorage",
+    }
+)
 
 Resolver = Callable[..., list[tuple[object, ...]]]
 Exchange = Callable[[str, str, float, str, int], tuple[int, Mapping[str, str], bytes]]
@@ -272,12 +378,19 @@ def inode_is_secret(
         return False
     if not stat.S_ISREG(st.st_mode):
         return False
-    known = secret_inode_set(cache) if inodes is None else inodes
-    return (st.st_dev, st.st_ino) in known
+    if inodes is None:
+        inodes = _load_secret_scan(cache)
+    return (st.st_dev, st.st_ino) in inodes
 
 
 class InodeScanCache:
-    """One loop's inode scan. The loop owns it and passes it into policy."""
+    """One loop's inode scan. The loop owns it and passes it on each policy call.
+
+    A finished scan may be reused across read-only tools in that loop. The
+    loop clears it at the start of a turn and after any tool that can write,
+    so a set from before that write cannot allow a read a fresh scan would
+    deny. ``found`` is published before ``ready``.
+    """
 
     def __init__(self) -> None:
         self.ready = False
@@ -290,15 +403,26 @@ class InodeScanCache:
         self.error = None
 
 
+def secret_scan(cache: InodeScanCache | None = None) -> set[tuple[int, int]]:
+    """Inodes of well-known secret files from one finished scan."""
+    return _load_secret_scan(cache)
+
+
 def secret_inode_set(cache: InodeScanCache | None = None) -> set[tuple[int, int]]:
     """Inodes of well-known secret files, so a hard link can be recognized.
 
     Credential directories contribute every file except ``.kube/cache`` and
     ``.kube/http-cache`` directly under ``.kube``. Browser and gcloud trees
-    contribute secret-named files. A root that cannot be finished denies the
-    read. ``cache`` reuses one scan until the loop clears it. ``found`` is
-    published before ``ready``.
+    contribute every secret-named file, with no secret-file count cap.
+    Browser disk-cache directories are not descended into. A root that cannot
+    be finished under the entry budget, or a credential directory that hits
+    the credential-file cap, denies every read. ``cache`` reuses one scan
+    until the loop clears it. ``found`` is published before ``ready``.
     """
+    return _load_secret_scan(cache)
+
+
+def _load_secret_scan(cache: InodeScanCache | None) -> set[tuple[int, int]]:
     if cache is not None and cache.ready:
         if cache.error is not None:
             raise cache.error
@@ -323,8 +447,7 @@ def _scan_secret_inodes() -> set[tuple[int, int]]:
     for path in _inode_candidates():
         hit = _collect_inodes(path, found)
         if hit is not None:
-            limit, kind = hit
-            _refuse_capped_inode_scan(limit, kind)
+            _refuse_capped_inode_scan(hit.limit, hit.kind)
     return found
 
 
@@ -365,7 +488,8 @@ def read_confined_bytes(
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):
             raise ReadDenied("refusing to read a non-regular file", "outside_workspace")
-        if (st.st_dev, st.st_ino) in secret_inode_set(cache):
+        found = _load_secret_scan(cache)
+        if (st.st_dev, st.st_ino) in found:
             raise ReadDenied(
                 f"refusing to read secret file {path.name}",
                 "secret_path",
@@ -596,6 +720,80 @@ def _components_secret(parts: Sequence[str]) -> bool:
             return True
         if part == ".local" and nxt == "share" and "keyrings" in lower[index + 2 :]:
             return True
+    if _xdg_config_browser(lower):
+        return True
+    return _home_browser_prefix(lower)
+
+
+def _path_part_prefixes(path: Path) -> tuple[tuple[str, ...], ...]:
+    """Lowercased parts of ``path`` and of ``path.resolve()``, without duplicates."""
+    found: list[tuple[str, ...]] = []
+    seen: set[tuple[str, ...]] = set()
+    candidates = [path]
+    try:
+        candidates.append(path.resolve(strict=False))
+    except (OSError, RuntimeError, ValueError):
+        pass
+    for candidate in candidates:
+        parts = tuple(part.lower() for part in candidate.parts)
+        if parts and parts not in seen:
+            seen.add(parts)
+            found.append(parts)
+    return tuple(found)
+
+
+def _home_browser_prefix(parts: Sequence[str]) -> bool:
+    """True for ``$HOME/snap/<browser>`` and ``$HOME/.var/app/<id>/...`` only.
+
+    Compares both ``Path.home()`` and ``Path.home().resolve()``, so a home
+    that is a symlink (``/home`` -> ``/var/home``) still matches. A workspace
+    file such as ``ws/snap/firefox/notes.md`` is not under ``$HOME``.
+    """
+    for home in _path_part_prefixes(Path.home()):
+        if len(parts) < len(home) or parts[: len(home)] != home:
+            continue
+        relative = parts[len(home) :]
+        if any(relative[: len(prefix)] == prefix for prefix in _HOME_BROWSER_PREFIXES):
+            return True
+    return False
+
+
+def _absolute_xdg_config_home() -> Path | None:
+    """Absolute ``$XDG_CONFIG_HOME``, or None when unset, empty, or relative.
+
+    The XDG base directory spec says a relative value is invalid and must be
+    ignored. Native ``~/.config/<name>`` rows cover that fallback.
+    """
+    raw = os.environ.get("XDG_CONFIG_HOME")
+    if not raw:
+        return None
+    try:
+        path = Path(raw).expanduser()
+    except (OSError, RuntimeError, ValueError):
+        return None
+    if not path.is_absolute():
+        return None
+    return path
+
+
+def _xdg_config_browser(parts: Sequence[str]) -> bool:
+    """True when ``parts`` is a native browser dir under ``$XDG_CONFIG_HOME``.
+
+    Unset, empty, or relative ``XDG_CONFIG_HOME`` stays on the ``~/.config``
+    rows. An absolute value is checked both as given and resolved.
+    """
+    config_home = _absolute_xdg_config_home()
+    if config_home is None:
+        return False
+    try:
+        prefixes = _path_part_prefixes(config_home)
+    except (OSError, RuntimeError, ValueError):
+        return False
+    for prefix in prefixes:
+        if len(parts) <= len(prefix) or parts[: len(prefix)] != prefix:
+            continue
+        if parts[len(prefix)] in _BROWSER_CONFIG:
+            return True
     return False
 
 
@@ -606,35 +804,41 @@ def _special_file(path: Path) -> bool:
     return _PROC_ENVIRON.match(posix) is not None
 
 
+def _xdg_browser_roots(home: Path) -> list[Path]:
+    """Native browser dirs under an absolute ``$XDG_CONFIG_HOME`` other than ``~/.config``."""
+    config_home = _absolute_xdg_config_home()
+    if config_home is None:
+        return []
+    if _same_resolved(config_home, home / ".config"):
+        return []
+    return [
+        config_home / profile.deny[1]
+        for profile in _BROWSER_PROFILES
+        if profile.deny[0] == ".config" and len(profile.deny) == 2
+    ]
+
+
 def _inode_candidates() -> list[Path]:
     home = Path.home()
-    config = home / ".config"
     paths = [
         home / ".ssh",
         home / ".aws",
-        config / "gcloud",
         home / ".kube",
         home / ".gnupg",
         home / ".local" / "share" / "keyrings",
         home / ".mozilla",
-        config / "google-chrome",
-        config / "google-chrome-beta",
-        config / "chromium",
-        config / "BraveSoftware",
-        config / "microsoft-edge",
-        config / "vivaldi",
-        config / "opera",
-        home / "snap" / "chromium" / "common" / "chromium",
-        home / "snap" / "firefox" / "common" / ".mozilla",
-        home / ".var" / "app" / "com.google.Chrome" / "config" / "google-chrome",
-        home / ".var" / "app" / "org.chromium.Chromium" / "config" / "chromium",
-        home / ".var" / "app" / "org.mozilla.firefox" / ".mozilla",
-        home / ".netrc",
-        home / ".boto",
-        home / ".git-credentials",
-        home / ".docker" / "config.json",
-        Path("/etc/shadow"),
     ]
+    paths.extend(home.joinpath(*profile.scan) for profile in _BROWSER_PROFILES)
+    paths.extend(_xdg_browser_roots(home))
+    paths.extend(
+        [
+            home / ".netrc",
+            home / ".boto",
+            home / ".git-credentials",
+            home / ".docker" / "config.json",
+            Path("/etc/shadow"),
+        ]
+    )
     try:
         paths.append(runtime_dir() / "gateway.token")
         paths.append(config_dir() / "secrets.env")
@@ -683,22 +887,55 @@ def _prune_scan_dirs(
     dirnames: list[str],
     directory: Path,
     kube_root: Path | None,
+    root: Path,
+    found: set[tuple[int, int]],
+    *,
+    skip_browser_caches: bool,
 ) -> None:
-    """Skip symlink children. Skip kube cache dirs only as direct children."""
+    """Skip kube caches, browser disk caches, and symlinks that leave the root.
+
+    A symlink that stays inside the root (snap ``current`` -> a revision) is
+    kept. The walk records directory inodes and skips one it has already
+    seen, so ``current`` is not walked twice. Browser disk-cache directories
+    are not descended into. A secret-named file directly inside one is still
+    recorded.
+    """
     direct_kube = kube_root is not None and _same_dir(directory, kube_root)
     kept: list[str] = []
     for name in dirnames:
         child = directory / name
-        if child.is_symlink():
-            continue
         if direct_kube and name.lower() in _KUBE_SKIP_DIRS:
+            continue
+        if child.is_symlink() and not _contains(root, child):
+            continue
+        if skip_browser_caches and name.lower() in _BROWSER_CACHE_DIRS:
+            _record_direct_secret_inodes(child, found)
             continue
         kept.append(name)
     dirnames[:] = kept
 
 
+def _record_direct_secret_inodes(directory: Path, found: set[tuple[int, int]]) -> None:
+    """Record secret-named files sitting directly in a skipped cache directory."""
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        return
+    for name in names:
+        if _inode_file_is_secret(name, directory):
+            _add_inode(directory / name, found, 0)
+
+
 def _same_dir(left: Path, right: Path) -> bool:
     return os.path.normcase(os.path.abspath(left)) == os.path.normcase(os.path.abspath(right))
+
+
+@dataclass(frozen=True, slots=True)
+class _CapHit:
+    """A scan root that stopped early. The caller fails every read closed."""
+
+    limit: int
+    kind: str
 
 
 def _refuse_capped_inode_scan(limit: int, kind: str) -> None:
@@ -710,42 +947,100 @@ def _refuse_capped_inode_scan(limit: int, kind: str) -> None:
     raise ReadDenied(message, "inode_scan_capped")
 
 
-def _inside_home(path: Path, home: Path) -> bool:
+def _contains(root: Path, path: Path) -> bool:
+    """True when ``path`` resolves to ``root`` or a path under it."""
     try:
-        path.resolve(strict=False).relative_to(home.resolve(strict=False))
+        path.resolve(strict=False).relative_to(root.resolve(strict=False))
     except (OSError, RuntimeError, ValueError):
         return False
     return True
 
 
-def _is_system_scan_root(path: Path) -> bool:
-    """True for ``/`` and the other system trees a symlink must not walk."""
+def _inside_home(path: Path, home: Path) -> bool:
+    return _contains(home, path)
+
+
+def _dir_inode(path: Path) -> tuple[int, int] | None:
+    try:
+        st = os.stat(path, follow_symlinks=True)
+    except OSError:
+        return None
+    if not stat.S_ISDIR(st.st_mode):
+        return None
+    return st.st_dev, st.st_ino
+
+
+def _is_unbounded_scan_root(path: Path) -> bool:
+    """True when a walk would be ``/``, ``/proc``, ``/sys``, or the same inode as ``/``.
+
+    ``/etc``, ``/usr``, and ``/dev`` are walked with the entry budget. A path
+    that resolves to ``/`` (for example ``/etc/..``) is the whole filesystem
+    and is skipped. A resolve failure skips the root.
+    """
     try:
         posix = path.resolve(strict=False).as_posix()
     except (OSError, RuntimeError, ValueError):
         return True
-    if posix == "/":
+    if posix in _SKIP_SCAN_ROOTS:
         return True
-    return any(posix == root or posix.startswith(root + "/") for root in _SYSTEM_SCAN_ROOTS)
+    try:
+        root_stat = os.stat("/")
+        here = os.stat(posix)
+    except OSError:
+        return False
+    return (here.st_dev, here.st_ino) == (root_stat.st_dev, root_stat.st_ino)
+
+
+def _is_browser_scan_root(path: Path) -> bool:
+    """True for a native, snap, flatpak, or ``$XDG_CONFIG_HOME`` browser root."""
+    home = Path.home()
+    candidates = [home.joinpath(*profile.scan) for profile in _BROWSER_PROFILES]
+    candidates.extend(_xdg_browser_roots(home))
+    candidates.append(home / ".mozilla")
+    return any(_same_resolved(path, candidate) for candidate in candidates)
 
 
 def _resolve_scan_root(path: Path) -> tuple[Path, bool] | None:
     """Return the path to scan, and whether the walk has an entry budget.
 
     A top-level symlink is followed in the same mode as the link name.
-    ``/``, ``/usr``, ``/etc``, ``/proc``, ``/sys``, and ``/dev`` are skipped
-    so a profile link to ``/`` cannot trip the cap. Any other symlink that
-    resolves outside ``$HOME`` is walked with ``_MAX_SCAN_ENTRIES``.
+    ``/``, ``/proc``, and ``/sys`` are skipped. ``/etc``, ``/usr``, and
+    ``/dev`` are walked with ``_MAX_SCAN_ENTRIES``, as is any other symlink
+    outside ``$HOME``. A symlink that resolves to ``$HOME`` itself uses that
+    budget too, so ``~/.ssh -> $HOME`` does not walk the home directory
+    without a cap. Browser scan roots use the same entry budget even when
+    they are real directories, so ``~/snap/<app>`` cannot walk without a cap.
+    Browser roots record every secret-named inode and have no secret-file
+    count cap. Hitting the entry budget or the credential-file cap fails
+    every read closed, including a credential root that fell back to named
+    matching because it resolved to ``$HOME``.
     """
     try:
+        browser = _is_browser_scan_root(path)
         if not path.is_symlink():
-            return path, False
+            return path, browser
         resolved = path.resolve(strict=False)
-        if _is_system_scan_root(resolved):
+        if _is_unbounded_scan_root(resolved):
             return None
-        return resolved, not _inside_home(resolved, Path.home())
+        return resolved, browser or _scan_root_needs_budget(resolved, Path.home())
     except (OSError, RuntimeError, ValueError):
         return None
+
+
+def _scan_root_needs_budget(resolved: Path, home: Path) -> bool:
+    """True for a symlink outside ``$HOME`` or one that resolves to ``$HOME``."""
+    if not _inside_home(resolved, home):
+        return True
+    return _same_resolved(resolved, home)
+
+
+def _same_resolved(left: Path, right: Path) -> bool:
+    try:
+        return os.path.normcase(str(left.resolve(strict=False))) == os.path.normcase(
+            str(right.resolve(strict=False))
+        )
+    except (OSError, RuntimeError, ValueError):
+        return False
 
 
 def _file_counts(name: str, directory: Path, mode: str) -> bool:
@@ -754,17 +1049,27 @@ def _file_counts(name: str, directory: Path, mode: str) -> bool:
     return _inode_file_is_secret(name, directory)
 
 
-def _collect_inodes(
-    path: Path, found: set[tuple[int, int]]
-) -> tuple[int, str] | None:
-    """Scan one candidate. Return ``(limit, kind)`` when a candidate was skipped."""
-    mode = _scan_mode(path)
-    cap = _MAX_CREDENTIAL_FILES if mode == "all" else _MAX_INODE_FILES
+def _collect_inodes(path: Path, found: set[tuple[int, int]]) -> _CapHit | None:
+    """Scan one candidate.
+
+    Return a hit when the walk stops early. The caller fails every read
+    closed. Named browser and gcloud walks record every secret-named inode.
+    Only an entry-budget or credential-file cap stops the scan.
+    """
     resolved = _resolve_scan_root(path)
     if resolved is None:
         return None
     root, budget_entries = resolved
+    mode = _scan_mode(path)
+    if mode == "all" and budget_entries and _same_resolved(root, Path.home()):
+        # Counting every file under $HOME trips the credential cap and marks
+        # ordinary files secret. Keep the entry budget and record secret
+        # names. This fallback has no secret-file cap: a budget hit fails
+        # every read closed, and every secret-named inode is recorded.
+        mode = "named"
+    file_cap = _MAX_CREDENTIAL_FILES if mode == "all" else None
     kube_root = root if path.name.lower() == ".kube" else None
+    skip_browser_caches = _is_browser_scan_root(path)
     try:
         if root.is_file():
             _add_inode(root, found, 0)
@@ -774,24 +1079,39 @@ def _collect_inodes(
     except OSError:
         return None
     try:
-        walker = os.walk(root, followlinks=False)
+        # followlinks so snap ``current`` is entered. Directory inodes are
+        # recorded below; a second path to the same revision is not walked.
+        walker = os.walk(root, followlinks=True)
     except OSError:
         return None
     count = 0
     entries = 0
+    seen_dirs: set[tuple[int, int]] = set()
     budget = _MAX_SCAN_ENTRIES if budget_entries else None
     for dirpath, dirnames, filenames in walker:
         directory = Path(dirpath)
-        _prune_scan_dirs(dirnames, directory, kube_root)
+        inode = _dir_inode(directory)
+        if inode is None or inode in seen_dirs:
+            dirnames[:] = []
+            continue
+        seen_dirs.add(inode)
+        _prune_scan_dirs(
+            dirnames,
+            directory,
+            kube_root,
+            root,
+            found,
+            skip_browser_caches=skip_browser_caches,
+        )
         if budget is not None:
             entries += len(dirnames) + len(filenames)
             if entries > budget:
-                return budget, "directory-entry"
+                return _CapHit(budget, "directory-entry")
         for name in filenames:
             if not _file_counts(name, directory, mode):
                 continue
-            if count >= cap:
-                return cap, "secret-file"
+            if file_cap is not None and count >= file_cap:
+                return _CapHit(file_cap, "secret-file")
             count = _add_inode(directory / name, found, count)
     return None
 

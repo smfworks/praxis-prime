@@ -42,10 +42,34 @@ from praxis_prime.router.types import (
     TextDelta,
     ToolCall,
 )
-from praxis_prime.tools.registry import PreparedCall, ToolContext, ToolRegistry
+from praxis_prime.tools.registry import PreparedCall, Risk, ToolContext, ToolRegistry
 
 _OUTPUT_LIMIT = 16_000
 _SECRET_KEY = re.compile(r"(?i)(api[_-]?key|token|secret|password|authorization)")
+# Tools that cannot create a file or hard link. Anything else drops the
+# inode scan before the next check. A read-risk shell can still ``ln``.
+_INODE_CACHE_REUSE_TOOLS = frozenset(
+    {
+        "read_file",
+        "list_dir",
+        "grep",
+        "glob",
+        "web_fetch",
+    }
+)
+
+
+def _reuses_inode_cache(name: str, risk: Risk) -> bool:
+    """True when this tool cannot change the set of secret inodes.
+
+    The loop keeps one cache and passes it on each ``PolicyContext``. A
+    finished scan is reused only while every tool since the scan is in
+    ``_INODE_CACHE_REUSE_TOOLS``. Any other tool marks the cache dirty.
+    Reusing a set from before one of our tools wrote would allow a read a
+    fresh scan would deny. Another process, or a project hook, can still
+    add a file between two reads; this cache is not a lock against that.
+    """
+    return name in _INODE_CACHE_REUSE_TOOLS and risk == Risk.READ
 
 
 class AgentLoop:
@@ -95,6 +119,7 @@ class AgentLoop:
         self.on_turn_end = on_turn_end
         self.read_access = read_access or ReadAccess()
         self.inode_cache = InodeScanCache()
+        self._inode_cache_dirty = False
         self.session_write_approved = session_write_approved
         self.write_scope = None if write_scope is None else Path(write_scope)
         self.main_checkout = None if main_checkout is None else Path(main_checkout)
@@ -107,6 +132,7 @@ class AgentLoop:
     ) -> Iterator[LoopEvent]:
         """Run one user turn, yielding text and timeline events as they happen."""
         self.inode_cache.clear()
+        self._inode_cache_dirty = False
         yield from self._run_turn(user_text, control)
 
     def _run_turn(
@@ -329,7 +355,9 @@ class AgentLoop:
             fetch_allow=tuple(sorted(self.read_access.fetch_allow)),
             inode_cache=self.inode_cache,
         )
-        self.inode_cache.clear()
+        if self._inode_cache_dirty:
+            self.inode_cache.clear()
+            self._inode_cache_dirty = False
         verdict = self.policy.evaluate(ctx)
         if self.screener is not None:
             verdict = self.screener.apply(verdict, ctx)
@@ -436,6 +464,8 @@ class AgentLoop:
         except Exception as exc:
             raw = f"{type(exc).__name__}: {exc}"
             ok = False
+        if not _reuses_inode_cache(tool.name, prepared.risk):
+            self._inode_cache_dirty = True
         raw, ok = self._post_tool_hook(tool.name, call.arguments, raw, ok=ok)
         post = self.policy.evaluate(
             PolicyContext(
