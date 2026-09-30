@@ -11,6 +11,8 @@ are later work. This module is the MVP store.
 
 from __future__ import annotations
 
+import fcntl
+import os
 import sqlite3
 from collections.abc import Mapping
 from pathlib import Path
@@ -20,22 +22,108 @@ from praxis_prime.paths import data_dir
 DB_FILENAME = "prime.db"
 
 
+class DatabaseBusy(RuntimeError):
+    """Another process holds the shared lock on this database."""
+
+    def __init__(self, db_path: Path) -> None:
+        self.db_path = Path(db_path)
+        self.lock_path = db_lock_path(self.db_path)
+        super().__init__(
+            f"{self.db_path.name} is open in another process ({self.lock_path}). "
+            "Stop praxis-primed and any local chat before migrating. "
+            "--force does not override an open database."
+        )
+
+
+def db_lock_path(path: Path) -> Path:
+    """Sidecar flock held for as long as ``path`` is open."""
+    return Path(f"{path}.lock")
+
+
+def _open_lock_fd(db_path: Path) -> int:
+    lock = db_lock_path(db_path)
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    flags = os.O_CREAT | os.O_RDWR
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    return os.open(lock, flags, 0o600)
+
+
+def acquire_exclusive_db_locks(paths: list[Path]) -> list[int]:
+    """Non-blocking exclusive locks. The caller closes every returned fd.
+
+    A shared lock from ``StateDB`` in another process makes this raise
+    ``DatabaseBusy`` and drops any locks already taken.
+    """
+    held: list[int] = []
+    try:
+        for db_path in paths:
+            fd = _open_lock_fd(db_path)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                os.close(fd)
+                raise DatabaseBusy(db_path) from None
+            except OSError:
+                os.close(fd)
+                raise
+            held.append(fd)
+    except Exception:
+        release_db_locks(held)
+        raise
+    return held
+
+
+def release_db_locks(fds: list[int]) -> None:
+    for fd in fds:
+        if fd < 0:
+            continue
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
 def default_db_path(env: Mapping[str, str] | None = None) -> Path:
     return data_dir(env) / DB_FILENAME
 
 
 class StateDB:
-    """One WAL connection and the schema for sessions plus the audit chain."""
+    """One WAL connection and the schema for sessions plus the audit chain.
+
+    The process holds a shared flock on ``<path>.lock`` until ``close``.
+    Migration takes that file exclusively and refuses when it is held.
+    """
 
     def __init__(self, path: Path) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(self.path, check_same_thread=False)
+        self._lock_fd = _open_lock_fd(self.path)
+        try:
+            fcntl.flock(self._lock_fd, fcntl.LOCK_SH)
+        except OSError:
+            os.close(self._lock_fd)
+            self._lock_fd = -1
+            raise
+        try:
+            self.conn = sqlite3.connect(self.path, check_same_thread=False)
+        except sqlite3.Error:
+            self._release_lock()
+            raise
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA foreign_keys=ON")
         self.conn.execute("PRAGMA busy_timeout=5000")
-        self._migrate()
+        try:
+            self._migrate()
+        except sqlite3.Error:
+            self.conn.close()
+            self._release_lock()
+            raise
 
     def _migrate(self) -> None:
         self.conn.executescript(
@@ -180,3 +268,18 @@ class StateDB:
 
     def close(self) -> None:
         self.conn.close()
+        self._release_lock()
+
+    def _release_lock(self) -> None:
+        fd = self._lock_fd
+        self._lock_fd = -1
+        if fd < 0:
+            return
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        try:
+            os.close(fd)
+        except OSError:
+            pass
