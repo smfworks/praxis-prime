@@ -34,7 +34,10 @@ MAX_REDIRECTS = 5
 _MAX_INODE_FILES = 500
 _MAX_CREDENTIAL_FILES = 5_000
 _MAX_SCAN_ENTRIES = 20_000
-_SYSTEM_SCAN_ROOTS = ("/usr", "/etc", "/proc", "/sys", "/dev")
+# Exact paths a symlink must not walk. ``/etc``, ``/usr``, and ``/dev`` are
+# walked with the entry budget. A path that resolves to one of these, or to
+# the same inode as ``/``, would scan the whole filesystem or a virtual tree.
+_SKIP_SCAN_ROOTS = frozenset({"/", "/proc", "/sys"})
 _FETCH_ALLOW = frozenset({"loopback", "private", "link_local", "metadata"})
 _BROWSER_FETCH_ALLOW = frozenset({"loopback", "private", "link_local"})
 _REDIRECT_STATUS = frozenset({300, 301, 302, 303, 307, 308})
@@ -79,12 +82,26 @@ _BROWSER_CONFIG = frozenset(
     {
         "gcloud",
         "google-chrome",
+        "google-chrome-beta",
+        "google-chrome-unstable",
         "chromium",
         "bravesoftware",
         "microsoft-edge",
         "opera",
+        "vivaldi",
     }
 )
+# Snap and flatpak profile trees the inode scan already walks. Flatpak keeps
+# config under ``config/``, not ``.config/``. Ids are compared lowercase.
+_SNAP_BROWSERS = frozenset({"chromium", "firefox"})
+_FLATPAK_BROWSERS = frozenset(
+    {
+        "com.google.chrome",
+        "org.chromium.chromium",
+        "org.mozilla.firefox",
+    }
+)
+_FLATPAK_PROFILE_DIRS = frozenset({"config", ".mozilla"})
 # Browser and gcloud trees contribute these filenames, plus the denylist
 # patterns. Credential directories count every file instead.
 _PROFILE_SECRET_NAMES = frozenset(
@@ -277,7 +294,13 @@ def inode_is_secret(
 
 
 class InodeScanCache:
-    """One loop's inode scan. The loop owns it and passes it into policy."""
+    """One loop's inode scan. The loop owns it and passes it on each policy call.
+
+    A finished scan may be reused across read-only tools in that loop. The
+    loop clears it at the start of a turn and after any tool that can write,
+    so a set from before that write cannot allow a read a fresh scan would
+    deny. ``found`` is published before ``ready``.
+    """
 
     def __init__(self) -> None:
         self.ready = False
@@ -594,9 +617,24 @@ def _components_secret(parts: Sequence[str]) -> bool:
             return True
         if part == ".config" and nxt in _BROWSER_CONFIG:
             return True
+        if part == "snap" and nxt in _SNAP_BROWSERS:
+            return True
+        if _flatpak_profile(lower, index):
+            return True
         if part == ".local" and nxt == "share" and "keyrings" in lower[index + 2 :]:
             return True
     return False
+
+
+def _flatpak_profile(parts: Sequence[str], index: int) -> bool:
+    """True for ``.var/app/<id>/config`` and ``.var/app/<id>/.mozilla``."""
+    if index + 3 >= len(parts):
+        return False
+    if parts[index] != ".var" or parts[index + 1] != "app":
+        return False
+    if parts[index + 2] not in _FLATPAK_BROWSERS:
+        return False
+    return parts[index + 3] in _FLATPAK_PROFILE_DIRS
 
 
 def _special_file(path: Path) -> bool:
@@ -718,34 +756,62 @@ def _inside_home(path: Path, home: Path) -> bool:
     return True
 
 
-def _is_system_scan_root(path: Path) -> bool:
-    """True for ``/`` and the other system trees a symlink must not walk."""
+def _is_unbounded_scan_root(path: Path) -> bool:
+    """True when a walk would be ``/``, ``/proc``, ``/sys``, or the same inode as ``/``.
+
+    ``/etc``, ``/usr``, and ``/dev`` are walked with the entry budget. A path
+    that resolves to ``/`` (for example ``/etc/..``) is the whole filesystem
+    and is skipped. A resolve failure skips the root.
+    """
     try:
         posix = path.resolve(strict=False).as_posix()
     except (OSError, RuntimeError, ValueError):
         return True
-    if posix == "/":
+    if posix in _SKIP_SCAN_ROOTS:
         return True
-    return any(posix == root or posix.startswith(root + "/") for root in _SYSTEM_SCAN_ROOTS)
+    try:
+        root_stat = os.stat("/")
+        here = os.stat(posix)
+    except OSError:
+        return False
+    return (here.st_dev, here.st_ino) == (root_stat.st_dev, root_stat.st_ino)
 
 
 def _resolve_scan_root(path: Path) -> tuple[Path, bool] | None:
     """Return the path to scan, and whether the walk has an entry budget.
 
     A top-level symlink is followed in the same mode as the link name.
-    ``/``, ``/usr``, ``/etc``, ``/proc``, ``/sys``, and ``/dev`` are skipped
-    so a profile link to ``/`` cannot trip the cap. Any other symlink that
-    resolves outside ``$HOME`` is walked with ``_MAX_SCAN_ENTRIES``.
+    ``/``, ``/proc``, and ``/sys`` are skipped. ``/etc``, ``/usr``, and
+    ``/dev`` are walked with ``_MAX_SCAN_ENTRIES``, as is any other symlink
+    outside ``$HOME``. A symlink that resolves to ``$HOME`` itself uses that
+    budget too, so ``~/.ssh -> $HOME`` does not walk the home directory
+    without a cap.
     """
     try:
         if not path.is_symlink():
             return path, False
         resolved = path.resolve(strict=False)
-        if _is_system_scan_root(resolved):
+        if _is_unbounded_scan_root(resolved):
             return None
-        return resolved, not _inside_home(resolved, Path.home())
+        return resolved, _scan_root_needs_budget(resolved, Path.home())
     except (OSError, RuntimeError, ValueError):
         return None
+
+
+def _scan_root_needs_budget(resolved: Path, home: Path) -> bool:
+    """True for a symlink outside ``$HOME`` or one that resolves to ``$HOME``."""
+    if not _inside_home(resolved, home):
+        return True
+    return _same_resolved(resolved, home)
+
+
+def _same_resolved(left: Path, right: Path) -> bool:
+    try:
+        return os.path.normcase(str(left.resolve(strict=False))) == os.path.normcase(
+            str(right.resolve(strict=False))
+        )
+    except (OSError, RuntimeError, ValueError):
+        return False
 
 
 def _file_counts(name: str, directory: Path, mode: str) -> bool:
@@ -758,12 +824,16 @@ def _collect_inodes(
     path: Path, found: set[tuple[int, int]]
 ) -> tuple[int, str] | None:
     """Scan one candidate. Return ``(limit, kind)`` when a candidate was skipped."""
-    mode = _scan_mode(path)
-    cap = _MAX_CREDENTIAL_FILES if mode == "all" else _MAX_INODE_FILES
     resolved = _resolve_scan_root(path)
     if resolved is None:
         return None
     root, budget_entries = resolved
+    mode = _scan_mode(path)
+    if mode == "all" and budget_entries and _same_resolved(root, Path.home()):
+        # Counting every file under $HOME trips the credential cap and marks
+        # ordinary files secret. Keep the entry budget; record secret names.
+        mode = "named"
+    cap = _MAX_CREDENTIAL_FILES if mode == "all" else _MAX_INODE_FILES
     kube_root = root if path.name.lower() == ".kube" else None
     try:
         if root.is_file():
