@@ -81,7 +81,7 @@ def run_coding_task(
         raise CodingError("coding task is empty")
     root = git_root(Path(repo) if repo is not None else runtime.cwd)
     data = runtime.db.path.parent
-    work = create_worktree(root, text, data)
+    work = create_worktree(root, text, data, profile=runtime.profile_id)
     emit = write or (lambda _chunk: None)
     try:
         instructions = discover_instructions(

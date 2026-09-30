@@ -18,6 +18,7 @@ from praxis_prime.coding.tools import (
     execute_glob,
     execute_grep,
 )
+from praxis_prime.coding.worktree import create_worktree
 from praxis_prime.loop.engine import AgentLoop
 from praxis_prime.loop.events import StatusEvent
 from praxis_prime.loop.prompt import SYSTEM_PROMPT
@@ -78,6 +79,43 @@ def _edit_reply(old: str, new: str) -> AssistantFinal:
             ),
         ),
     )
+
+
+def test_profile_worktree_is_created_on_the_data_root(tmp_path: Path):
+    from praxis_prime.profiles.home import create_profile
+
+    data = tmp_path / "data"
+    create_profile(data, "default")
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    placed = create_worktree(repo, "fix thing", data / "profiles" / "default")
+    relative = placed.path.relative_to(data)
+    assert relative.parts[0] == "worktrees"
+    assert relative.parts[1] == "default"
+    assert "profiles" not in relative.parts
+    runtime = build_runtime(
+        env={},
+        config_path=tmp_path / "missing.toml",
+        data_path=data / "unused.db",
+        cwd=repo,
+        profile="default",
+        providers={"ollama": ScriptedProvider([AssistantFinal(content="ok")])},
+    )
+    try:
+        result = run_coding_task(
+            "leave the checkout",
+            runtime,
+            disposition="discard",
+            global_dir=tmp_path / "no-global",
+        )
+    finally:
+        runtime.close()
+    added = next(
+        command for command in result.commands if "worktree" in command and "add" in command
+    )
+    session_path = Path(added[-2]).resolve()
+    assert session_path.is_relative_to((data / "worktrees" / "default").resolve())
+    assert not session_path.is_relative_to((data / "profiles").resolve())
 
 
 def test_instruction_precedence_and_cap(tmp_path: Path):

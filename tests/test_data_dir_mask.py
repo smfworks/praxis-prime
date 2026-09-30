@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from praxis_prime.approvals.card import HOST_FULL_WRITE, HOST_NEEDS_BWRAP
-from praxis_prime.policy.boundary import bind_data_root, private_data_command
+from praxis_prime.policy.boundary import account_data_present, bind_data_root, private_data_command
 from praxis_prime.sandbox.bwrap import SandboxError, build_bwrap_argv, bwrap_available, run_bwrap
 from praxis_prime.tools.registry import ToolContext
 from praxis_prime.tools.shell import execute_shell
@@ -247,8 +247,13 @@ def test_bind_inside_the_data_dir_is_refused(
         )
     worktree = private / "worktrees" / "repo" / "task"
     worktree.mkdir(parents=True)
+    (worktree / ".git").write_text("gitdir: /tmp/unused\n", encoding="utf-8")
     argv = build_bwrap_argv("echo hi", worktree)
     assert "/workspace" in argv
+    with pytest.raises(SandboxError, match="inside the account data directory"):
+        build_bwrap_argv("echo hi", private / "worktrees")
+    with pytest.raises(SandboxError, match="inside the account data directory"):
+        build_bwrap_argv("echo hi", private / "worktrees" / "repo")
 
 
 def test_inode_alias_of_home_is_masked(
@@ -269,3 +274,100 @@ def test_inode_alias_of_home_is_masked(
     argv = build_bwrap_argv("echo hi", alias)
     masked = "/workspace/.local/share/praxis-prime"
     assert argv[argv.index(masked) - 1] == "--tmpfs"
+
+
+def test_cd_inside_a_worktree_is_allowed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home, private = _tree(tmp_path, monkeypatch)
+    worktree = private / "worktrees" / "repo" / "task"
+    source = worktree / "src"
+    source.mkdir(parents=True)
+    (source / "m.py").write_text("x=1\n", encoding="utf-8")
+    (worktree / ".git").write_text("gitdir: /tmp/unused\n", encoding="utf-8")
+    assert not private_data_command("cd src && cat m.py", worktree)
+    assert not private_data_command("cd src; cat m.py", worktree)
+    assert private_data_command("cd .. && cat src/m.py", worktree)
+    assert private_data_command("cd ../../profiles/work && cat SOUL.md", worktree)
+    if not bwrap_available():
+        return
+    context = ToolContext(
+        cwd=str(worktree),
+        cancelled=lambda: False,
+        shell_approved=True,
+    )
+    assert execute_shell({"command": "cd src && cat m.py"}, context).strip() == "x=1"
+    with pytest.raises(RuntimeError, match="protected"):
+        execute_shell({"command": "cd .. && pwd"}, context)
+
+
+def test_migrated_worktree_path_can_run_shell(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _home, private = _tree(tmp_path, monkeypatch)
+    worktree = private / "worktrees" / "default" / "repo" / "task"
+    source = worktree / "src"
+    source.mkdir(parents=True)
+    (source / "m.py").write_text("x=1\n", encoding="utf-8")
+    (worktree / ".git").write_text("gitdir: /tmp/unused\n", encoding="utf-8")
+    argv = build_bwrap_argv("cat src/m.py", worktree)
+    assert "/workspace" in argv
+    assert not private_data_command("cd src && cat m.py", worktree)
+    nested = private / "profiles" / "default" / "worktrees" / "repo" / "task"
+    nested.mkdir(parents=True)
+    (nested / ".git").write_text("gitdir: /tmp/unused\n", encoding="utf-8")
+    with pytest.raises(SandboxError, match="inside the account data directory"):
+        build_bwrap_argv("echo hi", nested)
+    if not bwrap_available():
+        return
+    context = ToolContext(
+        cwd=str(worktree),
+        cancelled=lambda: False,
+        shell_approved=True,
+    )
+    assert execute_shell({"command": "cd src && cat m.py"}, context).strip() == "x=1"
+
+
+def test_symlink_bind_cannot_mount_profiles(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home, private = _tree(tmp_path, monkeypatch)
+    link = private / "worktrees" / "lnk"
+    link.parent.mkdir(parents=True)
+    link.symlink_to(private / "profiles", target_is_directory=True)
+    with pytest.raises(SandboxError, match="inside the account data directory"):
+        build_bwrap_argv("cat work/SOUL.md", link)
+    project = home / "proj"
+    project.mkdir()
+    with pytest.raises(SandboxError, match="inside the account data directory"):
+        build_bwrap_argv(
+            "cat /opt/p/work/SOUL.md",
+            project,
+            ro_binds=[(str(link), "/opt/p")],
+        )
+    if not bwrap_available():
+        return
+    try:
+        out = run_bwrap("cat work/SOUL.md", link, lambda: False)
+    except SandboxError:
+        out = ""
+    assert _SECRET not in out
+
+
+def test_fresh_data_dir_still_checks_the_default_data_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home, _private = _tree(tmp_path, monkeypatch)
+    fresh = tmp_path / "fresh-data"
+    fresh.mkdir()
+    bind_data_root(fresh)
+    assert account_data_present() is True
+    monkeypatch.setattr("praxis_prime.tools.shell.bwrap_available", lambda: False)
+    context = ToolContext(
+        cwd=str(home),
+        cancelled=lambda: False,
+        shell_approved=True,
+        host_shell_approved=True,
+    )
+    with pytest.raises(RuntimeError, match="install bubblewrap to run shell commands"):
+        execute_shell({"command": "echo hello"}, context)

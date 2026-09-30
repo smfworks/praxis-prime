@@ -6,6 +6,8 @@ merges that branch. Discard deletes the branch. Keep leaves the branch
 and removes the worktree. None of these paths run ``git push``.
 
 ARCHITECTURE §14. The layout follows ``~/.local/share/praxis-prime/worktrees/``.
+After a profile exists the task is ``worktrees/<profile>/<repo>/<task>``,
+still on the data root and not under ``profiles/``.
 """
 
 from __future__ import annotations
@@ -17,6 +19,7 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from praxis_prime.profiles.ids import profile_id
 from praxis_prime.sandbox.bwrap import scrub_env
 
 _DIFF_LIMIT = 20_000
@@ -46,14 +49,30 @@ def git_root(start: Path) -> Path:
     return Path(completed.stdout.strip()).resolve()
 
 
-def create_worktree(repo: Path, task: str, data_dir: Path) -> TaskWorktree:
-    """Add ``prime/<slug>`` at ``data_dir/worktrees/<repo>/<slug>`` from HEAD."""
+def create_worktree(
+    repo: Path,
+    task: str,
+    data_dir: Path,
+    *,
+    profile: str = "",
+) -> TaskWorktree:
+    """Add ``prime/<slug>`` under the data-root ``worktrees/`` directory.
+
+    ``data_dir`` may be the account data root or, after migration,
+    ``profiles/<id>`` (the parent of that profile's ``prime.db``). The
+    worktree is never created inside ``profiles/``.
+    """
     root = Path(repo).resolve()
     base = _head(root)
     slug = slugify(task)
     branch = _unique_branch(root, slug)
     leaf = branch.split("/", 1)[1]
-    destination = data_dir / "worktrees" / _repo_key(root) / leaf
+    data_root, implied = _data_root_and_profile(Path(data_dir))
+    chosen = profile_id(profile) or implied
+    destination = data_root / "worktrees"
+    if chosen:
+        destination = destination / chosen
+    destination = destination / _repo_key(root) / leaf
     destination.parent.mkdir(parents=True, exist_ok=True)
     if destination.exists():
         destination = destination.with_name(destination.name + "-" + base[:7])
@@ -211,6 +230,18 @@ def _head(repo: Path) -> str:
     if completed.returncode != 0 or not completed.stdout.strip():
         raise CodingError("repository has no commits yet")
     return completed.stdout.strip()
+
+
+def _data_root_and_profile(data_dir: Path) -> tuple[Path, str]:
+    """Account data root, and a profile id when ``data_dir`` is a profile home."""
+    path = Path(data_dir)
+    if path.name == "prime.db" and path.parent.parent.name == "profiles":
+        return path.parent.parent.parent, profile_id(path.parent.name) or ""
+    if path.parent.name == "profiles":
+        name = profile_id(path.name) or ""
+        if name:
+            return path.parent.parent, name
+    return path, ""
 
 
 def _repo_key(repo: Path) -> str:

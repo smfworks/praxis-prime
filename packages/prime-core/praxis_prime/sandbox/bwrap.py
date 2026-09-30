@@ -90,7 +90,7 @@ def build_bwrap_argv(
     ``scope`` is exactly ``cwd``, and that directory is not ``$HOME`` or
     ``main_checkout``.
     """
-    work = cwd.resolve()
+    work = _bind_source(cwd)
     mount = "--ro-bind"
     if writable:
         if not writable_scope_ok(work, scope, main_checkout):
@@ -146,9 +146,12 @@ def build_bwrap_argv(
             argv.extend(["--ro-bind", optional, optional])
             mounts.append((Path(optional), optional))
     for src, dest in ro_binds or []:
-        if Path(src).exists():
-            argv.extend(["--ro-bind", src, dest])
-            mounts.append((Path(src), dest))
+        source = Path(src)
+        if not source.exists():
+            continue
+        resolved = _bind_source(source)
+        argv.extend(["--ro-bind", str(resolved), dest])
+        mounts.append((resolved, dest))
     argv.extend(_data_dir_mask(mounts))
     argv.extend(["--", "bash", "--noprofile", "--norc", "-c", command])
     return argv
@@ -230,21 +233,43 @@ def _data_relative_to_mount(mount: Path, data: Path) -> Path | None:
     return relative
 
 
+def _bind_source(path: Path) -> Path:
+    """Real path of a bind. A symlink is the target, not the link path."""
+    try:
+        return Path(os.path.realpath(path, strict=False))
+    except OSError as exc:
+        raise SandboxError(
+            "refusing to bind a directory inside the account data directory"
+        ) from exc
+
+
 def _refuse_bind_inside_data(mount: Path, data: Path) -> None:
     """Refuse a bind of the data directory or a path inside it.
 
-    ``data/worktrees`` is where coding tasks run. That tree does not contain
-    ``profiles/``, ``backups/``, or ``accounts.db``, and bubblewrap does not
-    mount the parent, so the bind stays. Every other path inside the data
-    directory is refused: a tmpfs cannot hide a directory from a mount that
-    is already inside it.
+    The source is already resolved, so ``worktrees/lnk -> ../profiles`` is
+    the profile tree and is refused. A coding task may be bound only when
+    it is one worktree: ``worktrees/<repo>/<task>`` or
+    ``worktrees/<profile>/<repo>/<task>``. ``worktrees/`` itself, a repo
+    directory that holds several tasks, and every other path inside the
+    data directory are refused. A tmpfs cannot hide a directory from a
+    mount that is already inside it.
     """
     relative = _path_inside(mount, data)
     if relative is None:
         return
-    if relative.parts and relative.parts[0] == "worktrees":
+    if _is_task_worktree(mount, relative):
         return
     raise SandboxError("refusing to bind a directory inside the account data directory")
+
+
+def _is_task_worktree(mount: Path, relative: Path) -> bool:
+    """True for one git worktree, not ``worktrees/`` or a parent of several."""
+    parts = relative.parts
+    if not parts or parts[0] != "worktrees" or len(parts) not in {3, 4}:
+        return False
+    from praxis_prime.statfile import StatKind, lstat_kind
+
+    return lstat_kind(mount / ".git") in {StatKind.FILE, StatKind.DIR}
 
 
 def _path_inside(child: Path, parent: Path) -> Path | None:

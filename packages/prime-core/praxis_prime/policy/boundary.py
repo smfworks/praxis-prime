@@ -726,7 +726,10 @@ def private_data_command(command: str, workspace: Path) -> bool:
     Quotes are parsed with ``shlex`` and ``punctuation_chars``, so ``;`` and
     ``&&`` split even when they are not surrounded by spaces. ``cd`` changes
     the directory later tokens are judged against, and globs are expanded on
-    the filesystem. ``cd -`` fails closed. A recursive reader (``grep -r``,
+    the filesystem. A ``cd`` whose target stays inside ``workspace`` is
+    allowed, including a coding worktree that lives under the data directory.
+    A ``cd`` that leaves that workspace and enters the data directory is
+    refused. ``cd -`` fails closed. A recursive reader (``grep -r``,
     ``rg``, ``git grep``, ``ag``, ``ack``, ``find -exec``, ``tar``, ``cp -r``,
     ``rsync``, ``zip -r``) is refused when a path it walks contains the data
     directory. Bubblewrap also hides that directory. Without bubblewrap,
@@ -750,10 +753,30 @@ def account_data_present() -> bool:
 
     A missing or empty data directory is a fresh install. Host shell is
     allowed only in that case, and only when bubblewrap is unavailable.
+    ``--data-dir`` does not hide account data in the default XDG directory:
+    both are checked.
     """
     root = _data_root()
     if root is None:
         return True
+    if _directory_has_account_data(root):
+        return True
+    default = _xdg_data_root()
+    if default is None:
+        return True
+    if default == root:
+        return False
+    return _directory_has_account_data(default)
+
+
+def _xdg_data_root() -> Path | None:
+    try:
+        return Path(data_dir()).resolve(strict=False)
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
+def _directory_has_account_data(root: Path) -> bool:
     kind = lstat_kind(root)
     if kind is StatKind.MISSING:
         return False
@@ -1057,7 +1080,7 @@ def _command_reaches_data(tokens: list[str], workspace: Path, root: Path) -> boo
             return True
         if destination is not None:
             cwd = destination
-            if _inside_data(cwd, root):
+            if _inside_data(cwd, root) and not _inside_workspace(cwd, workspace):
                 return True
     return False
 
@@ -1132,6 +1155,22 @@ def _cd_destination(argv: list[str], cwd: Path) -> tuple[Path | None, bool]:
         return Path(os.path.realpath(path, strict=False)), False
     except OSError:
         return None, True
+
+
+def _inside_workspace(cwd: Path, workspace: Path) -> bool:
+    """True when ``cwd`` is ``workspace`` or a directory inside it."""
+    try:
+        here = Path(os.path.realpath(cwd, strict=False))
+        root = Path(os.path.realpath(workspace, strict=False))
+    except OSError:
+        return False
+    if here == root:
+        return True
+    try:
+        here.relative_to(root)
+    except ValueError:
+        return False
+    return True
 
 
 def _inside_data(cwd: Path, root: Path) -> bool:
