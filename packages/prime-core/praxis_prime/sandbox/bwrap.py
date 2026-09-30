@@ -8,7 +8,8 @@ cwd. It is never ``$HOME`` and never the main checkout when one is named.
 Bash is started with ``--noprofile --norc`` so a login alias cannot rewrite
 an allowlisted command. ``HOME`` is an empty tmpfs, not the workspace, so a
 repo ``.gitconfig`` is not git's global config. System and global git
-config are disabled.
+config are disabled, and ``GIT_NO_LAZY_FETCH`` stops a partial clone from
+fetching during an allowlisted command.
 
 If the binary is missing, callers must not run the command on the host unless
 a person has approved that command. A failed sandbox does not fall back to an
@@ -117,6 +118,9 @@ def build_bwrap_argv(
         "GIT_CONFIG_GLOBAL",
         "/dev/null",
         "--setenv",
+        "GIT_NO_LAZY_FETCH",
+        "1",
+        "--setenv",
         "LANG",
         "C.UTF-8",
         "--setenv",
@@ -156,6 +160,7 @@ def run_bwrap(
     writable: bool = False,
     scope: Path | None = None,
     main_checkout: Path | None = None,
+    ro_binds: list[tuple[str, str]] | None = None,
 ) -> str:
     """Run ``command`` inside bubblewrap. Never falls back to the host."""
     if not bwrap_available():
@@ -168,6 +173,7 @@ def run_bwrap(
         writable=writable,
         scope=scope,
         main_checkout=main_checkout,
+        ro_binds=ro_binds,
     )
     source = os.environ if env is None else env
     try:
@@ -195,6 +201,7 @@ def run_bwrap_status(
     writable: bool = False,
     scope: Path | None = None,
     main_checkout: Path | None = None,
+    ro_binds: list[tuple[str, str]] | None = None,
 ) -> CommandStatus:
     """Run ``command`` inside bubblewrap and return its exit code."""
     if not bwrap_available():
@@ -207,6 +214,7 @@ def run_bwrap_status(
         writable=writable,
         scope=scope,
         main_checkout=main_checkout,
+        ro_binds=ro_binds,
     )
     source = os.environ if env is None else env
     try:

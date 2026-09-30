@@ -9,17 +9,20 @@ approval too.
 The allowlist is small on purpose: ``ls``, ``cat`` / ``head`` / ``tail`` of
 concrete paths inside the workspace, ``git status``, ``git diff`` of existing
 non-secret files (or ``--stat`` / ``--name-only`` / ``--name-status``),
-``git log`` without ``-p``, and ``pytest --collect-only`` (check mode,
-including ``python -m pytest``). A directory, ``.``, or other on-disk non-file
+``git log`` without ``-p``. A directory, ``.``, or other on-disk non-file
 beside those files asks unless a summary flag is present. An operand that
 starts with ``:`` is a pathspec, allowlisted only when it is an existing
 non-secret file. A repo whose git config (including a linked worktree's
 common dir and ``config.worktree``) sets a diff driver, a filter,
 ``core.fsmonitor``, ``extensions.worktreeConfig``, or ``core.attributesFile``
 asks, as does an unreadable or oversized config, a ``.gitmodules`` file, or a
-``modules`` directory under the git dir. ``info/attributes`` and
-``.gitattributes`` (including ``HEAD:.gitattributes`` when ``--attr-source``
-is available) that assign ``diff=`` or ``filter=`` are not allowlisted.
+``modules`` directory under the git dir. Any other config key asks. Repo
+config is an allowlist: core layout keys, ``remote`` url/fetch, ``branch``
+remote/merge, ``user.name``, ``user.email``, and ``init.defaultBranch``.
+``info/attributes`` and ``.gitattributes`` (including ``HEAD:.gitattributes``
+when ``--attr-source`` is available) that assign ``diff=`` or ``filter=``
+are not allowlisted. ``git status`` does not ask on a ``HEAD`` ``filter=``
+alone; a filter or driver defined in config already asks.
 Secret filenames use
 :func:`praxis_prime.policy.boundary.is_secret_path`, including git pathspecs.
 Globs, ``rev:path``, case-folding magic, and exclude or stacked pathspec
@@ -32,11 +35,11 @@ import os
 import re
 import shlex
 import stat
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
 from praxis_prime.policy.boundary import is_secret_path
+from praxis_prime.sandbox.bwrap import CommandStatus
 from praxis_prime.tools.registry import Risk
 
 _RANK = {
@@ -92,8 +95,8 @@ _SHARE = (
     re.compile(r"(?i)(?:^|[;&|(`\n])\s*(?:sudo\s+)?(?:chmod|chown|chgrp)\b"),
     re.compile(r"(?i)\bgit\s+remote\s+add\b"),
 )
-# Applied only after the allowlist misses, so ``python -m pytest --collect-only``
-# stays a read. An interpreter that is not that check mode can delete files.
+# Applied only after the allowlist misses. Pytest collection imports the
+# repo's ``conftest.py``, so it is not on the allowlist.
 _INTERPRETER = re.compile(
     r"(?i)(?:^|[;&|(`\n])\s*(?:sudo\s+)?(?:python|python3|perl|ruby|node|php|sh|bash|zsh|dash)\b"
 )
@@ -185,8 +188,29 @@ _GIT_CONFIG_LOCKS = (
     # Submodule git does not inherit -c or --attr-source. Skipping submodules
     # keeps a nested clean filter from running during status or diff.
     "diff.ignoreSubmodules=all",
+    "log.showSignature=false",
+    "gpg.program=false",
+    "gpg.ssh.program=false",
+    "gpg.x509.program=false",
+    "protocol.allow=never",
+    "core.sshCommand=false",
+    "remote.origin.uploadpack=false",
+    "core.askPass=false",
 )
-_GIT_FALSE_VALUES = frozenset({"", "0", "false", "no", "off"})
+_SAFE_CONFIG_SECTIONS = frozenset({"core", "remote", "branch", "user", "init"})
+_SAFE_CORE_KEYS = frozenset(
+    {
+        "filemode",
+        "bare",
+        "logallrefupdates",
+        "ignorecase",
+        "precomposeunicode",
+        "symlinks",
+    }
+)
+_SAFE_REMOTE_KEYS = frozenset({"url", "fetch"})
+_SAFE_BRANCH_KEYS = frozenset({"remote", "merge"})
+_SAFE_USER_KEYS = frozenset({"name", "email"})
 _CONFIG_MAX_BYTES = 1_000_000
 _GIT_VERSION = re.compile(r"(\d+)\.(\d+)")
 _attr_source_support: bool | None = None
@@ -195,9 +219,6 @@ _CONFIG_SECTION = re.compile(
 )
 _SEPARATORS = frozenset({"&&", "||", "|", ";"})
 _SAFE_PATHSPEC_MAGIC = frozenset({"literal", "top"})
-_PYTEST_FLAGS = frozenset(
-    {"--collect-only", "--co", "-q", "--quiet", "--disable-warnings"}
-)
 _METACHAR_RISK = frozenset(
     {
         "redirection requires approval",
@@ -412,15 +433,6 @@ def _allowlisted_segment(segment: str, workspace: Path | None) -> tuple[bool, Gi
     if command == "git":
         decision = _git(tokens, workspace)
         return decision.allowed, decision.probe
-    if command in {"pytest", "py.test"}:
-        return _pytest(tokens[1:], workspace), None
-    if (
-        command in {"python", "python3"}
-        and len(tokens) >= 3
-        and tokens[1] == "-m"
-        and tokens[2] == "pytest"
-    ):
-        return _pytest(tokens[3:], workspace), None
     return False, None
 
 
@@ -526,9 +538,6 @@ def _git(tokens: list[str], workspace: Path | None) -> _GitView:
             ):
                 index += 1
                 continue
-            if sub == "log" and arg.startswith("--pretty=") and _safe_value(arg.split("=", 1)[1]):
-                index += 1
-                continue
             if sub == "log" and arg in {"--since", "--until", "--author", "--grep"}:
                 if index + 1 >= len(tokens) or not _safe_value(tokens[index + 1]):
                     return _GitView(False)
@@ -594,25 +603,34 @@ def _allow_git(
     return _GitView(True, probe)
 
 
+def _pinned_git_argv(*rest: str) -> list[str]:
+    """Git argv with the config locks, without the attr-source pin.
+
+    The version check uses this so it does not call ``_git_config_args``
+    while that function is deciding whether ``--attr-source`` is safe.
+    """
+    argv = ["git"]
+    for item in _GIT_CONFIG_LOCKS:
+        argv.extend(["-c", item])
+    argv.extend(rest)
+    return argv
+
+
 def _git_supports_attr_source() -> bool:
-    """True when this git accepts ``--attr-source`` (2.40 and newer)."""
+    """True when this git accepts ``--attr-source`` (2.40 and newer).
+
+    The version check runs inside bubblewrap. The classifier does not
+    execute git on the host.
+    """
     global _attr_source_support
     if _attr_source_support is not None:
         return _attr_source_support
     supported = False
-    try:
-        proc = subprocess.run(
-            ["git", "--version"],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        match = _GIT_VERSION.search(proc.stdout)
+    status = _bwrap_git_raw(shlex.join(_pinned_git_argv("--version")), Path("/tmp"))
+    if status is not None and status.code == 0:
+        match = _GIT_VERSION.search(status.stdout or status.output)
         if match is not None:
             supported = (int(match.group(1)), int(match.group(2))) >= (2, 40)
-    except (OSError, subprocess.TimeoutExpired):
-        supported = False
     _attr_source_support = supported
     return supported
 
@@ -702,15 +720,20 @@ class _GitLayout:
 
 
 def _git_layout(workspace: Path) -> _GitLayout:
-    """Resolve the worktree git dir and, when linked, its common dir."""
-    git = workspace / ".git"
+    """Resolve the worktree git dir and, when linked, its common dir.
+
+    A workspace that is a subdirectory still uses the repo toplevel, so
+    config and attributes above that subdirectory are part of the scan.
+    """
+    root = _repo_toplevel(workspace)
+    git = root / ".git"
     try:
         if not os.path.lexists(git):
             return _GitLayout()
         if git.is_dir():
             gitdir = git
         elif git.is_file():
-            pointed = _gitdir_from_pointer(workspace, git)
+            pointed = _gitdir_from_pointer(root, git)
             if pointed is None:
                 return _GitLayout(hostile=True)
             gitdir = pointed
@@ -787,10 +810,9 @@ def _git_config_is_hostile(workspace: Path) -> bool:
         return True
     seen: set[str] = set()
     for directory in layout.dirs:
-        if _exists_or_unreadable(directory / "config.worktree"):
-            return True
-        if _config_file_is_hostile(directory / "config", seen, 0):
-            return True
+        for name in ("config", "config.worktree"):
+            if _config_file_is_hostile(directory / name, seen, 0):
+                return True
     return False
 
 
@@ -800,7 +822,7 @@ def _submodules_present(workspace: Path) -> bool:
     A submodule process does not inherit the parent's ``-c`` pins, so any
     sign of one asks. ``.gitmodules`` may be absent while ``modules/`` remains.
     """
-    if _exists_or_unreadable(workspace / ".gitmodules"):
+    if _exists_or_unreadable(_repo_toplevel(workspace) / ".gitmodules"):
         return True
     layout = _git_layout(workspace)
     if layout.hostile:
@@ -854,7 +876,7 @@ def _config_file_is_hostile(path: Path, seen: set[str], depth: int) -> bool:
             if parsed is None:
                 return True
             section, _subsection = parsed
-            if section in {"include", "includeif"}:
+            if section not in _SAFE_CONFIG_SECTIONS:
                 return True
             continue
         if line.endswith("\\"):
@@ -864,7 +886,7 @@ def _config_file_is_hostile(path: Path, seen: set[str], depth: int) -> bool:
         value = value.strip()
         if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
             value = value[1:-1]
-        if _config_key_is_hostile(section, name, value):
+        if not _config_key_is_allowed(section, name, value):
             return True
     return False
 
@@ -876,20 +898,20 @@ def _config_section(line: str) -> tuple[str, str] | None:
     return match.group(1).lower(), match.group(2) or ""
 
 
-def _config_key_is_hostile(section: str, key: str, value: str) -> bool:
-    if section in {"include", "includeif"}:
+def _config_key_is_allowed(section: str, key: str, value: str) -> bool:
+    """True only for keys that cannot point git at a program."""
+    if section == "core" and key == "repositoryformatversion":
+        return value == "0"
+    if section == "core" and key in _SAFE_CORE_KEYS:
         return True
-    if section == "filter" and key:
+    if section == "remote" and key in _SAFE_REMOTE_KEYS:
         return True
-    if section == "extensions" and key == "worktreeconfig":
+    if section == "branch" and key in _SAFE_BRANCH_KEYS:
         return True
-    if section == "core" and key == "attributesfile" and value != "":
+    if section == "user" and key in _SAFE_USER_KEYS:
         return True
-    lowered = value.lower()
-    if section == "core" and key == "fsmonitor":
-        return lowered not in _GIT_FALSE_VALUES
-    if section == "diff" and key in {"external", "command", "textconv"}:
-        return lowered not in _GIT_FALSE_VALUES
+    if section == "init" and key == "defaultbranch":
+        return True
     return False
 
 
@@ -903,7 +925,7 @@ def _attributes_assign_driver(workspace: Path) -> bool:
             return True
     seen = 0
     try:
-        for path in workspace.rglob(".gitattributes"):
+        for path in _repo_toplevel(workspace).rglob(".gitattributes"):
             if ".git" in path.parts:
                 continue
             seen += 1
@@ -945,61 +967,120 @@ def _attribute_line_assigns_driver(line: str) -> bool:
     return False
 
 
+def _repo_toplevel(workspace: Path) -> Path:
+    """Walk parents for ``.git``. A subdirectory scan starts at that root."""
+    try:
+        current = workspace.resolve()
+    except OSError:
+        return workspace
+    for candidate in (current, *current.parents):
+        try:
+            if os.path.lexists(candidate / ".git"):
+                return candidate
+        except OSError:
+            return workspace
+        if candidate.parent == candidate:
+            break
+    return workspace
+
+
+def _external_git_binds(workspace: Path) -> list[tuple[str, str]]:
+    """Read-only binds for a git dir that lives outside the worktree mount."""
+    root = _repo_toplevel(workspace)
+    try:
+        root = root.resolve()
+    except OSError:
+        return []
+    binds: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for directory in _git_layout(workspace).dirs:
+        try:
+            resolved = directory.resolve()
+        except OSError:
+            continue
+        if resolved == root or root in resolved.parents:
+            continue
+        text = str(resolved)
+        if text in seen:
+            continue
+        seen.add(text)
+        binds.append((text, text))
+    return binds
+
+
+def _bwrap_git_raw(
+    command: str,
+    cwd: Path,
+    stdin: str = "",
+    *,
+    binds: list[tuple[str, str]] | None = None,
+) -> CommandStatus | None:
+    """Run one git command inside bubblewrap. Never invokes host git."""
+    from praxis_prime.sandbox.bwrap import SandboxError, bwrap_available, run_bwrap_status
+
+    if not bwrap_available():
+        return None
+    try:
+        return run_bwrap_status(
+            command,
+            cwd,
+            lambda: False,
+            timeout=5,
+            stdin=stdin,
+            ro_binds=binds,
+        )
+    except (SandboxError, OSError):
+        return None
+
+
 def _head_attributes_assign_driver(workspace: Path) -> bool:
     """True when ``HEAD:.gitattributes`` assigns a diff or filter driver.
 
     ``--attr-source=HEAD`` reads those blobs instead of the worktree files.
-    Git older than 2.40 does not take that option, so this scan stays off.
+    The listing runs in the read-only sandbox from the repo toplevel, with
+    ``--full-tree``, so a subdirectory workspace still sees root attributes.
+    A missing blob asks. Git older than 2.40 does not take ``--attr-source``,
+    so this scan stays off. ``git status`` does not call this: a filter or
+    driver key in config already asks.
     """
     if not _git_supports_attr_source():
         return False
-    listed = _run_git(workspace, ["ls-tree", "-r", "-z", "--name-only", "HEAD"])
+    root = _repo_toplevel(workspace)
+    listed = _bwrap_git_raw(
+        command_for_sandbox("git ls-tree -r -z --full-tree --name-only HEAD"),
+        root,
+        binds=_external_git_binds(workspace),
+    )
     if listed is None:
         return True
-    if listed.returncode != 0:
-        err = listed.stderr.decode("utf-8", "replace").lower()
-        missing = (
-            "invalid object name",
-            "not a git repository",
-            "not a git dir",
-            "ambiguous argument",
-        )
-        return not any(phrase in err for phrase in missing)
-    if len(listed.stdout) > 5_000_000:
+    if listed.code != 0:
+        err = (listed.output or "").lower()
+        if "object name" in err or "not a git repository" in err or "ambiguous argument" in err:
+            return False
         return True
-    names = [part.decode("utf-8", "replace") for part in listed.stdout.split(b"\0") if part]
+    raw = listed.stdout or ""
+    if len(raw) > 5_000_000:
+        return True
+    names = [part for part in raw.split("\0") if part]
     attrs = [name for name in names if name == ".gitattributes" or name.endswith("/.gitattributes")]
     if len(attrs) > 500:
         return True
     if not attrs:
         return False
-    spec = b"".join(f"HEAD:{name}\n".encode() for name in attrs)
-    blobs = _run_git(workspace, ["cat-file", "--batch"], stdin=spec)
-    if blobs is None or blobs.returncode != 0 or not blobs.stdout:
+    spec = "".join(f"HEAD:{name}\n" for name in attrs)
+    blobs = _bwrap_git_raw(
+        command_for_sandbox("git cat-file --batch"),
+        root,
+        spec,
+        binds=_external_git_binds(workspace),
+    )
+    if blobs is None or blobs.code != 0 or not blobs.stdout:
         return True
-    return _batch_assigns_driver(blobs.stdout)
-
-
-def _run_git(
-    workspace: Path,
-    args: list[str],
-    stdin: bytes | None = None,
-) -> subprocess.CompletedProcess[bytes] | None:
-    try:
-        return subprocess.run(
-            ["git", *_git_config_args(), *args],
-            cwd=workspace,
-            check=False,
-            capture_output=True,
-            input=stdin,
-            timeout=5,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return None
+    return _batch_assigns_driver(blobs.stdout.encode("utf-8", "surrogateescape"))
 
 
 def _batch_assigns_driver(payload: bytes) -> bool:
-    """Parse ``git cat-file --batch`` and scan each blob for a driver."""
+    """Parse ``git cat-file --batch``. A missing blob is unsafe."""
     pos = 0
     while pos < len(payload):
         newline = payload.find(b"\n", pos)
@@ -1008,7 +1089,7 @@ def _batch_assigns_driver(payload: bytes) -> bool:
         header = payload[pos:newline]
         pos = newline + 1
         if header.endswith(b" missing"):
-            continue
+            return True
         parts = header.split()
         if len(parts) < 3 or parts[1] != b"blob":
             return True
@@ -1132,17 +1213,6 @@ def _normalized_path(arg: str, workspace: Path | None) -> str:
     if text.startswith("./"):
         text = text[2:]
     return text
-
-
-def _pytest(args: list[str], workspace: Path | None) -> bool:
-    if "--collect-only" not in args and "--co" not in args:
-        return False
-    for arg in args:
-        if arg in _PYTEST_FLAGS:
-            continue
-        if arg.startswith("-") or not _in_workspace(arg, workspace):
-            return False
-    return True
 
 
 def _safe_value(value: str) -> bool:
