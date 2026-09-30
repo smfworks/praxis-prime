@@ -17,6 +17,7 @@ from typing import Literal, Protocol
 
 from praxis_prime.compliance.packs import PolicyPack, load_packs
 from praxis_prime.compliance.providers import ProviderFlags
+from praxis_prime.policy.boundary import ReadAccess, ReadDenied, assess_read
 from praxis_prime.policy.dials import DIALS, default_positions
 from praxis_prime.router.types import ModelRef
 from praxis_prime.tools.registry import CONSEQUENTIAL_RISKS, Risk
@@ -51,6 +52,10 @@ class PolicyContext:
     mode: str = "ask"
     summary: str = ""
     text: str = ""
+    workspace_root: str = ""
+    extra_roots: tuple[str, ...] = ()
+    allow_paths: tuple[str, ...] = ()
+    fetch_allow: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,6 +118,8 @@ class PolicyEngine:
         provider_flags: Mapping[str, ProviderFlags] | None = None,
         config_dir: object | None = None,
         project_root: object | None = None,
+        read_access: ReadAccess | None = None,
+        workspace_root: str = "",
     ) -> None:
         self.positions = dict(default_positions())
         if positions:
@@ -133,9 +140,14 @@ class PolicyEngine:
         self.audit = audit
         self.provider_flags = dict(provider_flags or {})
         self.session_id: str | None = None
+        self.read_access = read_access or ReadAccess()
+        self.workspace_root = workspace_root
 
     def dials_active(self) -> bool:
         return any(position != "off" for position in self.positions.values())
+
+    def enforce_active(self) -> bool:
+        return any(position == "enforce" for position in self.positions.values())
 
     def set_dial(self, dial_id: str, position: str, *, owner: bool) -> None:
         """Change one dial. Hooks, skills, MCP servers, and the Decision Engine cannot."""
@@ -185,7 +197,7 @@ class PolicyEngine:
                 continue
             proposed = hook.apply(ctx, verdict)
             verdict = tighten(verdict, proposed)
-        return verdict
+        return self._deny_blocked_read(ctx, verdict)
 
     def _spine(self, ctx: PolicyContext) -> Verdict:
         if ctx.hook == HookPoint.H3_PRE_TOOL:
@@ -224,6 +236,66 @@ class PolicyEngine:
             ctx.hook.value,
             grant_key=grant_key(ctx),
         )
+
+    def _deny_blocked_read(self, ctx: PolicyContext, verdict: Verdict) -> Verdict:
+        """Enforce mode denies a blocked read and records it. Other modes do not.
+
+        The tool still refuses the read when every dial is off. Enforce mode
+        fails closed before the tool runs, including when the check errors.
+        """
+        if not self.enforce_active() or ctx.hook != HookPoint.H3_PRE_TOOL:
+            return verdict
+        denial = self._read_denial(ctx)
+        if denial is None:
+            return verdict
+        self._audit_read_denied(ctx, denial)
+        denied = Verdict(
+            "deny",
+            str(denial),
+            ctx.hook.value,
+            grant_key=verdict.grant_key or grant_key(ctx),
+        )
+        return tighten(verdict, denied)
+
+    def _read_denial(self, ctx: PolicyContext) -> ReadDenied | None:
+        root, access = self._access_for(ctx)
+        try:
+            return assess_read(
+                ctx.tool,
+                ctx.arguments,
+                workspace_root=root,
+                access=access,
+            )
+        except Exception:
+            return ReadDenied("read boundary check failed closed", "check_failed")
+
+    def _access_for(self, ctx: PolicyContext) -> tuple[str, ReadAccess]:
+        fetch_allow = frozenset(ctx.fetch_allow) or self.read_access.fetch_allow
+        access = ReadAccess(
+            extra_roots=ctx.extra_roots or self.read_access.extra_roots,
+            allow_paths=ctx.allow_paths or self.read_access.allow_paths,
+            fetch_allow=fetch_allow,
+        )
+        return ctx.workspace_root or self.workspace_root, access
+
+    def _audit_read_denied(self, ctx: PolicyContext, denial: ReadDenied) -> None:
+        if self.audit is None:
+            return
+        try:
+            self.audit.append(
+                session_id=self.session_id,
+                kind="read_denied",
+                summary=f"read denied ({denial.code})",
+                payload={
+                    "hook": ctx.hook.value,
+                    "tool": ctx.tool,
+                    "decision": "deny",
+                    "code": denial.code,
+                    "name": denial.display_name,
+                },
+            )
+        except Exception:
+            return
 
     def _ask(self, ctx: PolicyContext, reason: str) -> Verdict:
         return Verdict("ask", reason, ctx.hook.value, grant_key=grant_key(ctx))

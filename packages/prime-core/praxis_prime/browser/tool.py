@@ -25,6 +25,7 @@ from praxis_prime.browser.driver import (
 )
 from praxis_prime.browser.policy import BrowserPolicy, classify_browser
 from praxis_prime.paths import data_dir
+from praxis_prime.policy.boundary import parse_fetch_allow
 from praxis_prime.tools.builtin import execute_web_fetch
 from praxis_prime.tools.registry import Risk, Tool, ToolContext, ToolRegistry
 
@@ -163,7 +164,11 @@ class BrowserSession:
         url = _str(arguments.get("url")) or self.page_url
         if not url:
             raise ValueError(f"{action} needs a url when Playwright is unavailable")
-        body = execute_web_fetch({"url": url}, context)
+        body = execute_web_fetch(
+            {"url": url},
+            context,
+            fetch_allow=self.policy.fetch_allow,
+        )
         self.page_url = url
         text = _html_to_text(body) if action in {"snapshot", "extract"} else body
         return (
@@ -207,6 +212,7 @@ def load_browser_policy(config_path: Path | None) -> BrowserPolicy:
         allow_domains=tuple(_strings(table.get("allow_domains"))),
         deny_domains=tuple(_strings(table.get("deny_domains"))),
         profile=profile,
+        fetch_allow=_fetch_allow(config_path),
     )
 
 
@@ -248,6 +254,18 @@ def _tool(session: BrowserSession) -> Tool:
         execute=session.execute,
         classify=session.classify,
     )
+
+
+def _fetch_allow(config_path: Path | None) -> frozenset[str]:
+    if config_path is None or not config_path.is_file():
+        return frozenset()
+    loaded = tomllib.loads(config_path.read_text(encoding="utf-8"))
+    if not isinstance(loaded, dict):
+        return frozenset()
+    tools = loaded.get("tools")
+    if not isinstance(tools, dict):
+        return frozenset()
+    return parse_fetch_allow(tools.get("fetch_allow"))
 
 
 def _browser_table(config_path: Path | None) -> dict[str, object]:

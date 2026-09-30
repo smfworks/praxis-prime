@@ -47,6 +47,7 @@ class BrowserPolicy:
     allow_domains: tuple[str, ...] = ()
     deny_domains: tuple[str, ...] = ()
     profile: str = "disposable"
+    fetch_allow: frozenset[str] = frozenset()
 
     @property
     def persistent(self) -> bool:
@@ -113,7 +114,7 @@ def classify_browser(
 
 def check_url(url: str, policy: BrowserPolicy) -> str:
     """Return the URL when the host is allowed. Raise ``ValueError`` when it is not."""
-    cleaned = validate_fetch_url(url)
+    cleaned = validate_fetch_url(url, fetch_allow=policy.fetch_allow)
     host = (urlparse(cleaned).hostname or "").lower().rstrip(".")
     if not host:
         raise ValueError("browser URL needs a host")

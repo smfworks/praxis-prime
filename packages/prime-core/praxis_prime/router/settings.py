@@ -14,6 +14,7 @@ from pathlib import Path
 
 from praxis_prime.compliance.providers import ProviderFlags, flags_from_config
 from praxis_prime.paths import config_dir
+from praxis_prime.policy.boundary import absolute_config_paths, parse_fetch_allow
 from praxis_prime.policy.dials import default_positions
 from praxis_prime.router.http import normalize_base
 from praxis_prime.router.types import ModelRef, parse_model_spec
@@ -47,6 +48,9 @@ class Settings:
     memory_half_life_days: float = 14.0
     memory_episodic_ttl_days: int = 90
     provider_flags: dict[str, ProviderFlags] = field(default_factory=dict)
+    read_roots: tuple[str, ...] = ()
+    read_allow: tuple[str, ...] = ()
+    fetch_allow: tuple[str, ...] = ()
 
     def __repr__(self) -> str:
         return (
@@ -118,6 +122,7 @@ def load_settings(
             dials[str(dial_id)] = str(position)
 
     memory = _table(file_data.get("memory"))
+    tools = _table(file_data.get("tools"))
     mode = _first(environ.get("PRAXIS_PRIME_MODE"), _str(core.get("mode")), "ask")
     if mode not in _MODES:
         mode = "ask"
@@ -200,6 +205,9 @@ def load_settings(
         memory_half_life_days=_positive_float(_str(memory.get("episodic_half_life_days")), 14.0),
         memory_episodic_ttl_days=_bounded_int(_str(memory.get("episodic_ttl_days")), 90, 1, 3650),
         provider_flags=provider_flags,
+        read_roots=absolute_config_paths(tools.get("read_roots")),
+        read_allow=absolute_config_paths(tools.get("read_allow")),
+        fetch_allow=tuple(sorted(parse_fetch_allow(tools.get("fetch_allow")))),
     )
 
 

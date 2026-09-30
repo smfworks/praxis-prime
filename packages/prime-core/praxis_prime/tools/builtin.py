@@ -1,35 +1,32 @@
 """Built-in tools that prove the agent loop.
 
-``read_file`` and ``list_dir`` are READ. ``web_fetch`` is READ and its body
-is fenced by the loop. ``shell`` is sandboxed with bubblewrap when that
+``read_file`` and ``list_dir`` are READ and stay inside the workspace.
+``web_fetch`` is READ. Each redirect hop is checked again, and its body is
+fenced by the loop. ``shell`` is sandboxed with bubblewrap when that
 binary exists; otherwise every command requires approval.
 """
 
 from __future__ import annotations
 
-import re
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from pathlib import Path
-from urllib.error import HTTPError, URLError
-from urllib.parse import urlparse
-from urllib.request import Request, urlopen
 
 from praxis_prime import __version__
+from praxis_prime.policy.boundary import (
+    ReadAccess,
+    ReadDenied,
+    assert_readable,
+    classify_url,
+    confine_path,
+    fetch_public,
+    is_secret_path,
+    read_confined_bytes,
+)
 from praxis_prime.tools.registry import PreparedCall, Risk, Tool, ToolContext, ToolRegistry
 from praxis_prime.tools.shell import classify_command, execute_shell
 
 _MAX_READ = 200_000
 _MAX_FETCH = 1_000_000
-_SECRET_NAMES = {
-    ".env",
-    "secrets.env",
-    "secrets.env.age",
-    "id_rsa",
-    "id_ed25519",
-    "id_ecdsa",
-    "id_dsa",
-}
-_METADATA_HOSTS = {"169.254.169.254", "metadata.google.internal"}
 
 _OBJECT = {"type": "object", "additionalProperties": False}
 
@@ -47,8 +44,8 @@ def _read_file_tool() -> Tool:
     return Tool(
         name="read_file",
         description=(
-            "Read a UTF-8 text file. Relative paths use the workspace. "
-            "Refuses secret files such as .env and private keys."
+            "Read a UTF-8 text file inside the workspace. "
+            "Refuses paths outside that workspace and secret files."
         ),
         parameters={
             **_OBJECT,
@@ -63,7 +60,10 @@ def _read_file_tool() -> Tool:
 def _list_dir_tool() -> Tool:
     return Tool(
         name="list_dir",
-        description="List entry names in a directory. Relative paths use the workspace.",
+        description=(
+            "List entry names in a workspace directory. "
+            "Paths outside the workspace are refused."
+        ),
         parameters={
             **_OBJECT,
             "properties": {
@@ -109,7 +109,7 @@ def _web_fetch_tool() -> Tool:
         name="web_fetch",
         description=(
             "HTTP GET a public http or https URL and return the body as text. "
-            "The body is untrusted data."
+            "Redirects are checked again. The body is untrusted data."
         ),
         parameters={
             **_OBJECT,
@@ -125,12 +125,13 @@ def execute_read_file(arguments: Mapping[str, object], context: ToolContext) -> 
     raw = arguments.get("path")
     if not isinstance(raw, str) or not raw.strip():
         raise ValueError("read_file requires a path")
-    path = _resolve(raw, context.cwd)
-    if _is_secret(path):
-        raise ValueError(f"refusing to read secret file {path.name}")
+    access = _access(context)
+    requested = Path(raw)
+    path = confine_path(raw, cwd=context.cwd, access=access)
+    assert_readable(path, requested=requested)
     if not path.is_file():
         raise ValueError(f"not a file: {path}")
-    data = path.read_bytes()[: _MAX_READ + 1]
+    data = read_confined_bytes(path, cwd=context.cwd, access=access, limit=_MAX_READ)
     if b"\x00" in data[:1024]:
         raise ValueError(f"refusing to read binary file {path.name}")
     text = data.decode("utf-8", errors="replace")
@@ -143,78 +144,63 @@ def execute_list_dir(arguments: Mapping[str, object], context: ToolContext) -> s
     raw = arguments.get("path", ".")
     if not isinstance(raw, str) or not raw.strip():
         raw = "."
-    path = _resolve(raw, context.cwd)
+    access = _access(context)
+    path = confine_path(raw, cwd=context.cwd, access=access)
+    assert_readable(path, requested=Path(raw))
     if not path.is_dir():
         raise ValueError(f"not a directory: {path}")
     names = []
     for entry in sorted(path.iterdir(), key=lambda item: item.name.lower()):
-        suffix = "/" if entry.is_dir() else ""
+        if is_secret_path(entry):
+            continue
+        try:
+            resolved = confine_path(str(entry), cwd=context.cwd, access=access)
+        except ReadDenied:
+            continue
+        if is_secret_path(resolved):
+            continue
+        suffix = "/" if entry.is_dir() and not entry.is_symlink() else ""
         names.append(entry.name + suffix)
     return "\n".join(names) if names else "(empty)"
 
 
-def execute_web_fetch(arguments: Mapping[str, object], context: ToolContext) -> str:
-    del context
+def execute_web_fetch(
+    arguments: Mapping[str, object],
+    context: ToolContext,
+    *,
+    fetch_allow: Collection[str] | None = None,
+) -> str:
     raw = arguments.get("url")
     if not isinstance(raw, str):
         raise ValueError("web_fetch requires a url")
-    url = validate_fetch_url(raw)
-    request = Request(url, headers={"User-Agent": f"praxis-prime/{__version__}"}, method="GET")
-    try:
-        with urlopen(request, timeout=20) as response:
-            payload = response.read(_MAX_FETCH + 1)
-            content_type = response.headers.get("Content-Type", "")
-    except HTTPError as exc:
-        detail = exc.read(500).decode("utf-8", errors="replace")
-        raise RuntimeError(f"HTTP {exc.code} for {url}: {detail[:200]}") from exc
-    except URLError as exc:
-        raise RuntimeError(f"could not fetch {url}: {exc.reason}") from exc
-    if len(payload) > _MAX_FETCH:
-        payload = payload[:_MAX_FETCH]
-        truncated = True
-    else:
-        truncated = False
+    if fetch_allow is None:
+        fetch_allow = _access(context).fetch_allow
+    result = fetch_public(
+        raw,
+        fetch_allow=fetch_allow,
+        max_bytes=_MAX_FETCH,
+        user_agent=f"praxis-prime/{__version__}",
+    )
+    truncated = len(result.body) > _MAX_FETCH
+    payload = result.body[:_MAX_FETCH] if truncated else result.body
     text = payload.decode("utf-8", errors="replace")
-    header = f"url: {url}\ncontent-type: {content_type}\n"
+    header = f"url: {result.url}\ncontent-type: {result.content_type}\n"
     if truncated:
         text += "\n…[truncated]"
     return header + text
 
 
-def validate_fetch_url(url: str) -> str:
-    parsed = urlparse(url.strip())
-    if parsed.scheme not in {"http", "https"}:
-        raise ValueError("web_fetch only allows http and https URLs")
-    host = (parsed.hostname or "").lower()
-    if not host:
-        raise ValueError("web_fetch requires a host")
-    if host in _METADATA_HOSTS:
-        raise ValueError("refusing cloud metadata host")
-    return url.strip()
+def validate_fetch_url(url: str, *, fetch_allow: Collection[str] | None = None) -> str:
+    """Refuse a URL that is not an allowed http(s) target. Does not resolve DNS."""
+    return classify_url(url, fetch_allow or ())
 
 
 def prepare_shell(arguments: Mapping[str, object]) -> PreparedCall:
     return classify_command(str(arguments.get("command", "")))
 
 
-def _resolve(raw: str, cwd: str) -> Path:
-    path = Path(raw)
-    if not path.is_absolute():
-        path = Path(cwd) / path
-    return path.resolve()
-
-
-def _is_secret(path: Path) -> bool:
-    name = path.name
-    if name in _SECRET_NAMES or name.startswith(".env"):
-        return True
-    if name.endswith(".pem"):
-        try:
-            head = path.read_text(encoding="utf-8", errors="ignore")[:200]
-        except OSError:
-            return True
-        if "PRIVATE KEY" in head:
-            return True
-    if path.parent.name == ".ssh" and name.startswith("id_"):
-        return True
-    return bool(re.search(r"(?i)credentials", name) and name.endswith(".json"))
+def _access(context: ToolContext) -> ReadAccess:
+    access = context.read_access
+    if isinstance(access, ReadAccess):
+        return access
+    return ReadAccess()

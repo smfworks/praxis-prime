@@ -138,6 +138,7 @@ def _run_loop(
         session_id=session_id,
         hooks=ProjectHooks(work.repo, work.path),
         screener=runtime.screener,
+        read_access=runtime.read_access,
     )
     answer = ""
     error: str | None = None
