@@ -13,6 +13,7 @@ from praxis_prime.clock import dump_time, utcnow
 from praxis_prime.loop.events import StatusEvent, TurnEnded
 from praxis_prime.memory.redact import redact_text
 from praxis_prime.memory.tiers import memory_channel
+from praxis_prime.policy.engine import HookPoint, PolicyContext
 from praxis_prime.runtime import Runtime
 from praxis_prime.scheduler.store import Routine, RoutineRun, RoutineStore
 
@@ -36,6 +37,16 @@ def execute_routine(
 ) -> RoutineRun:
     started = dump_time(utcnow())
     session_id = ""
+    runtime.policy.session_id = None
+    runtime.policy.evaluate(
+        PolicyContext(
+            hook=HookPoint.H1_INGRESS,
+            tool="routine",
+            text=routine.prompt,
+            summary=routine.name,
+            mode=runtime.settings.mode,
+        )
+    )
     summary = ""
     outcome = "error"
     try:

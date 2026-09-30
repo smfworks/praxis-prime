@@ -238,6 +238,25 @@ praxis-prime routines history
 
 Triggers are cron (including `@every`), an interval, a file watch, or `POST /v1/routines/<id>/fire` with the gateway bearer token. The minimum gap is one minute. A missed run is skipped or caught up once (`--missed skip` or `--missed once`). Always-ask actions inside a daemon run wait on the approval queue and on Telegram when the bot is paired. If nobody answers before the TTL, the action is denied. `routines run` from the CLI denies those actions immediately.
 
+## Compliance
+
+Dials stay off until you set one to `monitor` or `enforce` in `config.toml`. Off leaves chat, tools, memory, and model routing as they are. See [COMPLIANCE.md](COMPLIANCE.md). Packs are starter policy, not legal advice.
+
+```bash
+praxis-prime compliance status
+praxis-prime compliance packs
+praxis-prime compliance test "patient MRN AB12345"
+praxis-prime compliance report
+praxis-prime gdpr export --subject ada@example.com
+praxis-prime gdpr erase --subject ada@example.com
+praxis-prime breach record --pack state_nc --summary "laptop lost" --affected 3
+praxis-prime breach list
+```
+
+`monitor` writes an audit warning and does not block. `enforce` may block, ask, redact, or send a protected prompt only to a provider you flagged `local`, `baa`, or `eu_region`. If none of those providers is configured, the model call stops with an explanation. A skill, hook, MCP server, or Decision Engine answer cannot turn enforce off.
+
+Provider flags live under `[models.providers.<name>]` as `local`, `baa`, `eu_region`, and `zero_retention`. Ollama is local without a flag.
+
 ## Memory
 
 Profile facts are copied into the prompt. Past sessions become a short episodic summary. `recall` searches with BM25 unless `models.embed` is an Ollama model. See [MEMORY.md](MEMORY.md).

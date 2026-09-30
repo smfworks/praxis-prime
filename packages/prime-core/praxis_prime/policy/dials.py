@@ -1,11 +1,13 @@
 """Compliance dial catalog.
 
 Every dial defaults to ``off``. The baseline safety spine is not a dial and
-cannot be switched off once the policy engine exists.
+cannot be switched off.
 
-TODO: ARCHITECTURE §17. Positions are ``off``, ``monitor``, and ``enforce``.
-Dials compose by intersection. This module records the catalog only. It does
-not enforce policy, detect PHI, or give legal advice.
+Positions are ``off``, ``monitor``, and ``enforce``. Enforcement lives in
+the policy engine and the packs under ``packs/compliance``. This module is
+the catalog. It does not give legal advice.
+
+ARCHITECTURE §17.
 """
 
 from __future__ import annotations

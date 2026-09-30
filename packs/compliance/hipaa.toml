@@ -1,0 +1,156 @@
+# HIPAA starter pack. Technical controls only. Not a BAA, a certification, or legal advice.
+# Safe-harbor identifier list: 45 CFR 164.514(b)(2). Keyword context limits false positives
+# on weak identifiers (names, phone, email, dates). SSN, MRN, and NPI use checksum or labels.
+
+[pack]
+id = "hipaa"
+dial = "hipaa"
+title = "HIPAA"
+disclaimer = "Starter policy. Technical controls only. Not legal advice, a BAA, or a certification."
+
+[meta]
+starter = true
+not_legal_advice = true
+legal_references = [
+  "45 CFR 164.514(b)(2) (safe-harbor identifiers)",
+  "45 CFR 164.502(b) (minimum necessary)",
+  "45 CFR 164.530(j) (six-year documentation retention, used here as a technical window)",
+  "45 CFR 164.404 (breach notification)",
+]
+
+[retention]
+days = 2190
+
+[audit]
+required_events = ["detection", "block", "redaction", "route", "approval", "retention"]
+
+[[detectors]]
+id = "ssn"
+kind = "ssn"
+data_class = "PHI"
+
+[[detectors]]
+id = "npi"
+kind = "npi"
+data_class = "PHI"
+context = ["npi", "national provider", "provider"]
+
+[[detectors]]
+id = "mrn"
+kind = "mrn"
+data_class = "PHI"
+
+[[detectors]]
+id = "dob"
+kind = "dob"
+data_class = "PHI"
+
+[[detectors]]
+id = "email"
+kind = "email"
+data_class = "PHI"
+context = ["patient", "phi", "medical", "diagnosis", "health"]
+
+[[detectors]]
+id = "phone"
+kind = "phone"
+data_class = "PHI"
+context = ["patient", "phi", "medical", "clinic", "health"]
+
+[[detectors]]
+id = "fax"
+kind = "phone"
+data_class = "PHI"
+context = ["fax"]
+
+[[detectors]]
+id = "patient_name"
+kind = "regex"
+data_class = "PHI"
+pattern = '(?i)\bpatient name\s*[:=]\s*[A-Z][a-z]+(?:\s+[A-Z][a-z]+)+'
+
+[[detectors]]
+id = "street"
+kind = "regex"
+data_class = "PHI"
+context = ["patient", "phi"]
+pattern = '(?i)\b\d{1,5}\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,3}\s+(?:Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd)\b'
+
+[[detectors]]
+id = "beneficiary"
+kind = "regex"
+data_class = "PHI"
+pattern = '(?i)\b(?:health plan )?beneficiary(?:\s+id|\s+number)?\s*[:=#]?\s*[A-Z0-9][A-Z0-9\-]{3,}'
+
+[[detectors]]
+id = "account"
+kind = "account"
+data_class = "PHI"
+context = ["account number", "acct", "health plan"]
+
+[[detectors]]
+id = "certificate"
+kind = "regex"
+data_class = "PHI"
+pattern = '(?i)\b(?:certificate|license)\s*(?:number|no\.?|#)\s*[:=]?\s*[A-Z0-9][A-Z0-9\-]{3,}'
+
+[[detectors]]
+id = "vin"
+kind = "regex"
+data_class = "PHI"
+context = ["vin", "vehicle"]
+pattern = '\b[A-HJ-NPR-Z0-9]{17}\b'
+
+[[detectors]]
+id = "device"
+kind = "regex"
+data_class = "PHI"
+pattern = '(?i)\bdevice\s*(?:id|identifier|serial)\s*[:=#]?\s*[A-Z0-9][A-Z0-9\-]{3,}'
+
+[[detectors]]
+id = "url"
+kind = "regex"
+data_class = "PHI"
+context = ["patient", "phi", "portal"]
+pattern = 'https?://[^\s]+'
+
+[[detectors]]
+id = "ip"
+kind = "regex"
+data_class = "PHI"
+context = ["patient", "phi"]
+pattern = '\b(?:\d{1,3}\.){3}\d{1,3}\b'
+
+[[detectors]]
+id = "biometric"
+kind = "phrase"
+data_class = "PHI"
+terms = ["biometric identifier", "fingerprint", "full-face photograph", "facial photograph"]
+
+[[rules]]
+id = "phi-route"
+action = "route_local"
+data_class = "PHI"
+hooks = ["H2"]
+provider_flags = ["local", "baa"]
+
+[[rules]]
+id = "phi-egress"
+action = "egress_deny"
+data_class = "PHI"
+hooks = ["H3", "H5"]
+tools = ["browser", "mcp", "telegram", "web_fetch"]
+
+[[rules]]
+id = "phi-redact"
+action = "redact"
+data_class = "PHI"
+hooks = ["H4", "H6"]
+style = "mask"
+
+[[rules]]
+id = "phi-send"
+action = "require_approval"
+data_class = "PHI"
+hooks = ["H5"]
+tools = ["telegram"]

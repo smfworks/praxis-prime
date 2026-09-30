@@ -331,14 +331,24 @@ class MemoryStore:
     def export_entries(self) -> list[dict[str, object]]:
         return [entry.public() for entry in self.list_entries()]
 
-    def apply_retention(self) -> int:
+    def apply_retention(self, *, audit: object | None = None) -> int:
         now = dump_time(self.clock())
         cursor = self.db.conn.execute(
             "DELETE FROM memory_entries WHERE expires_at != '' AND expires_at <= ?",
             (now,),
         )
         self.db.conn.commit()
-        return int(cursor.rowcount)
+        removed = int(cursor.rowcount)
+        if audit is not None and removed and any(
+            position == "enforce" for position in self.dials.values()
+        ):
+            audit.append(
+                session_id=None,
+                kind="retention",
+                summary=f"retention sweep removed {removed}",
+                payload={"removed": removed, "hook": "H7"},
+            )
+        return removed
 
     def _clean(self, content: str) -> str:
         cleaned = redact_text(content, mode=self.redact, dials=self.dials).strip()

@@ -1,5 +1,13 @@
 # Regulated packs
 
+TODO: import the private Praxis regulated packs (legal, medical, behavioral
+health, school system, homeschool, forensic) when their license is confirmed.
+Michael approved bundling and modifying them under MIT, but those trees are
+not in this checkout and must not be copied from memory. The compliance engine
+loads TOML from `packs/compliance`, `~/.config/praxis-prime/packs`, and
+`.prime/packs`. A later import can drop pack files into one of those directories
+without changing the engine. See `docs/COMPLIANCE.md`.
+
 This directory is reserved for the Praxis regulated verticals:
 
 - legal and law firm

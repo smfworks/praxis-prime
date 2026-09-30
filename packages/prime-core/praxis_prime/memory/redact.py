@@ -74,6 +74,11 @@ def redact_text(text: str, *, mode: str, dials: Mapping[str, str]) -> str:
     cleaned = text
     for pattern in patterns:
         cleaned = pattern.sub("[redacted]", cleaned)
+    if any(position == "enforce" for position in dials.values()):
+        from praxis_prime.compliance.evaluate import redact_for_memory
+        from praxis_prime.compliance.packs import bundled_packs
+
+        cleaned = redact_for_memory(cleaned, dials, bundled_packs())
     return cleaned
 
 
@@ -92,12 +97,18 @@ def retention_days(
     limits: list[int] = []
     if tier == "episodic":
         limits.append(episodic_ttl_days)
-    if dials.get("gdpr") == "enforce":
-        limits.append(30)
-    if dials.get("ferpa") == "enforce":
-        limits.append(365)
-    if dials.get("hipaa") == "enforce":
-        limits.append(2190)
+    windows = {"gdpr": 30, "ferpa": 365, "hipaa": 2190}
+    try:
+        from praxis_prime.compliance.packs import bundled_packs
+
+        for pack in bundled_packs():
+            if pack.retention_days:
+                windows[pack.dial] = pack.retention_days
+    except (OSError, ValueError):
+        pass
+    for dial_id, days in windows.items():
+        if dials.get(dial_id) == "enforce":
+            limits.append(days)
     if not limits:
         return None
     return min(limits)

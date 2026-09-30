@@ -1,0 +1,606 @@
+# US state starter packs for the 13 dials already in the catalog.
+# Statute names are citations for the owner. The 30-day SLA is an internal
+# policy choice, not a statement of each state's deadline.
+# Starter policy. Not legal advice.
+
+[[pack]]
+id = "state_ct"
+dial = "state_ct"
+title = "Connecticut"
+disclaimer = "Starter policy for Connecticut. Technical controls only. Not legal advice."
+retention_days = 365
+
+[pack.meta]
+starter = true
+not_legal_advice = true
+legal_references = [
+  "Conn. Gen. Stat. § 36a-701b (breach of security)",
+  "Connecticut Data Privacy Act, Public Act 22-15",
+]
+
+[pack.audit]
+required_events = ["detection", "breach", "retention", "approval"]
+
+[pack.breach]
+enabled = true
+sla_days = 30
+sla_is_legal_deadline = false
+
+[[pack.detectors]]
+id = "ssn"
+kind = "ssn"
+data_class = "US_PII"
+
+[[pack.detectors]]
+id = "named_email"
+kind = "named_email"
+data_class = "US_PII"
+
+[[pack.rules]]
+id = "pii-send"
+action = "require_approval"
+data_class = "US_PII"
+hooks = ["H5"]
+tools = ["telegram", "browser", "mcp", "web_fetch"]
+
+[[pack.rules]]
+id = "pii-redact"
+action = "redact"
+data_class = "US_PII"
+hooks = ["H4", "H6"]
+style = "last4"
+
+[[pack]]
+id = "state_fl"
+dial = "state_fl"
+title = "Florida"
+disclaimer = "Starter policy for Florida. Technical controls only. Not legal advice."
+retention_days = 365
+
+[pack.meta]
+starter = true
+not_legal_advice = true
+legal_references = [
+  "Fla. Stat. § 501.171 (Florida Information Protection Act)",
+]
+
+[pack.audit]
+required_events = ["detection", "breach", "retention", "approval"]
+
+[pack.breach]
+enabled = true
+sla_days = 30
+sla_is_legal_deadline = false
+
+[[pack.detectors]]
+id = "ssn"
+kind = "ssn"
+data_class = "US_PII"
+
+[[pack.detectors]]
+id = "named_email"
+kind = "named_email"
+data_class = "US_PII"
+
+[[pack.rules]]
+id = "pii-send"
+action = "require_approval"
+data_class = "US_PII"
+hooks = ["H5"]
+tools = ["telegram", "browser", "mcp", "web_fetch"]
+
+[[pack.rules]]
+id = "pii-redact"
+action = "redact"
+data_class = "US_PII"
+hooks = ["H4", "H6"]
+style = "last4"
+
+[[pack]]
+id = "state_ga"
+dial = "state_ga"
+title = "Georgia"
+disclaimer = "Starter policy for Georgia. Technical controls only. Not legal advice."
+retention_days = 365
+
+[pack.meta]
+starter = true
+not_legal_advice = true
+legal_references = [
+  "O.C.G.A. §§ 10-1-910 to 10-1-915 (Georgia Personal Identity Protection Act)",
+]
+
+[pack.audit]
+required_events = ["detection", "breach", "retention", "approval"]
+
+[pack.breach]
+enabled = true
+sla_days = 30
+sla_is_legal_deadline = false
+
+[[pack.detectors]]
+id = "ssn"
+kind = "ssn"
+data_class = "US_PII"
+
+[[pack.detectors]]
+id = "named_email"
+kind = "named_email"
+data_class = "US_PII"
+
+[[pack.rules]]
+id = "pii-send"
+action = "require_approval"
+data_class = "US_PII"
+hooks = ["H5"]
+tools = ["telegram", "browser", "mcp", "web_fetch"]
+
+[[pack.rules]]
+id = "pii-redact"
+action = "redact"
+data_class = "US_PII"
+hooks = ["H4", "H6"]
+style = "last4"
+
+[[pack]]
+id = "state_ma"
+dial = "state_ma"
+title = "Massachusetts"
+disclaimer = "Starter policy for Massachusetts. Technical controls only. Not legal advice."
+retention_days = 365
+
+[pack.meta]
+starter = true
+not_legal_advice = true
+legal_references = [
+  "M.G.L. c. 93H (security breaches)",
+  "201 CMR 17.00 (standards for the protection of personal information)",
+]
+
+[pack.audit]
+required_events = ["detection", "breach", "retention", "approval"]
+
+[pack.breach]
+enabled = true
+sla_days = 30
+sla_is_legal_deadline = false
+
+[[pack.detectors]]
+id = "ssn"
+kind = "ssn"
+data_class = "US_PII"
+
+[[pack.detectors]]
+id = "named_email"
+kind = "named_email"
+data_class = "US_PII"
+
+[[pack.rules]]
+id = "pii-send"
+action = "require_approval"
+data_class = "US_PII"
+hooks = ["H5"]
+tools = ["telegram", "browser", "mcp", "web_fetch"]
+
+[[pack.rules]]
+id = "pii-redact"
+action = "redact"
+data_class = "US_PII"
+hooks = ["H4", "H6"]
+style = "last4"
+
+[[pack]]
+id = "state_md"
+dial = "state_md"
+title = "Maryland"
+disclaimer = "Starter policy for Maryland. Technical controls only. Not legal advice."
+retention_days = 365
+
+[pack.meta]
+starter = true
+not_legal_advice = true
+legal_references = [
+  "Md. Code, Commercial Law §§ 14-3501 to 14-3508 (Personal Information Protection Act)",
+]
+
+[pack.audit]
+required_events = ["detection", "breach", "retention", "approval"]
+
+[pack.breach]
+enabled = true
+sla_days = 30
+sla_is_legal_deadline = false
+
+[[pack.detectors]]
+id = "ssn"
+kind = "ssn"
+data_class = "US_PII"
+
+[[pack.detectors]]
+id = "named_email"
+kind = "named_email"
+data_class = "US_PII"
+
+[[pack.rules]]
+id = "pii-send"
+action = "require_approval"
+data_class = "US_PII"
+hooks = ["H5"]
+tools = ["telegram", "browser", "mcp", "web_fetch"]
+
+[[pack.rules]]
+id = "pii-redact"
+action = "redact"
+data_class = "US_PII"
+hooks = ["H4", "H6"]
+style = "last4"
+
+[[pack]]
+id = "state_nj"
+dial = "state_nj"
+title = "New Jersey"
+disclaimer = "Starter policy for New Jersey. Technical controls only. Not legal advice."
+retention_days = 365
+
+[pack.meta]
+starter = true
+not_legal_advice = true
+legal_references = [
+  "N.J.S.A. 56:8-161 to 56:8-166 (Identity Theft Prevention Act)",
+]
+
+[pack.audit]
+required_events = ["detection", "breach", "retention", "approval"]
+
+[pack.breach]
+enabled = true
+sla_days = 30
+sla_is_legal_deadline = false
+
+[[pack.detectors]]
+id = "ssn"
+kind = "ssn"
+data_class = "US_PII"
+
+[[pack.detectors]]
+id = "named_email"
+kind = "named_email"
+data_class = "US_PII"
+
+[[pack.rules]]
+id = "pii-send"
+action = "require_approval"
+data_class = "US_PII"
+hooks = ["H5"]
+tools = ["telegram", "browser", "mcp", "web_fetch"]
+
+[[pack.rules]]
+id = "pii-redact"
+action = "redact"
+data_class = "US_PII"
+hooks = ["H4", "H6"]
+style = "last4"
+
+[[pack]]
+id = "state_ny"
+dial = "state_ny"
+title = "New York"
+disclaimer = "Starter policy for New York. Technical controls only. Not legal advice."
+retention_days = 365
+
+[pack.meta]
+starter = true
+not_legal_advice = true
+legal_references = [
+  "N.Y. Gen. Bus. Law § 899-aa (SHIELD Act breach notification)",
+  "N.Y. Gen. Bus. Law § 899-bb (data security protections)",
+]
+
+[pack.audit]
+required_events = ["detection", "breach", "retention", "approval"]
+
+[pack.breach]
+enabled = true
+sla_days = 30
+sla_is_legal_deadline = false
+
+[[pack.detectors]]
+id = "ssn"
+kind = "ssn"
+data_class = "US_PII"
+
+[[pack.detectors]]
+id = "named_email"
+kind = "named_email"
+data_class = "US_PII"
+
+[[pack.rules]]
+id = "pii-send"
+action = "require_approval"
+data_class = "US_PII"
+hooks = ["H5"]
+tools = ["telegram", "browser", "mcp", "web_fetch"]
+
+[[pack.rules]]
+id = "pii-redact"
+action = "redact"
+data_class = "US_PII"
+hooks = ["H4", "H6"]
+style = "last4"
+
+[[pack]]
+id = "state_oh"
+dial = "state_oh"
+title = "Ohio"
+disclaimer = "Starter policy for Ohio. Technical controls only. Not legal advice."
+retention_days = 365
+
+[pack.meta]
+starter = true
+not_legal_advice = true
+legal_references = [
+  "Ohio Rev. Code § 1349.19 (breach of security of computerized data)",
+]
+
+[pack.audit]
+required_events = ["detection", "breach", "retention", "approval"]
+
+[pack.breach]
+enabled = true
+sla_days = 30
+sla_is_legal_deadline = false
+
+[[pack.detectors]]
+id = "ssn"
+kind = "ssn"
+data_class = "US_PII"
+
+[[pack.detectors]]
+id = "named_email"
+kind = "named_email"
+data_class = "US_PII"
+
+[[pack.rules]]
+id = "pii-send"
+action = "require_approval"
+data_class = "US_PII"
+hooks = ["H5"]
+tools = ["telegram", "browser", "mcp", "web_fetch"]
+
+[[pack.rules]]
+id = "pii-redact"
+action = "redact"
+data_class = "US_PII"
+hooks = ["H4", "H6"]
+style = "last4"
+
+[[pack]]
+id = "state_pa"
+dial = "state_pa"
+title = "Pennsylvania"
+disclaimer = "Starter policy for Pennsylvania. Technical controls only. Not legal advice."
+retention_days = 365
+
+[pack.meta]
+starter = true
+not_legal_advice = true
+legal_references = [
+  "73 P.S. §§ 2301–2329 (Breach of Personal Information Notification Act)",
+]
+
+[pack.audit]
+required_events = ["detection", "breach", "retention", "approval"]
+
+[pack.breach]
+enabled = true
+sla_days = 30
+sla_is_legal_deadline = false
+
+[[pack.detectors]]
+id = "ssn"
+kind = "ssn"
+data_class = "US_PII"
+
+[[pack.detectors]]
+id = "named_email"
+kind = "named_email"
+data_class = "US_PII"
+
+[[pack.rules]]
+id = "pii-send"
+action = "require_approval"
+data_class = "US_PII"
+hooks = ["H5"]
+tools = ["telegram", "browser", "mcp", "web_fetch"]
+
+[[pack.rules]]
+id = "pii-redact"
+action = "redact"
+data_class = "US_PII"
+hooks = ["H4", "H6"]
+style = "last4"
+
+[[pack]]
+id = "state_sc"
+dial = "state_sc"
+title = "South Carolina"
+disclaimer = "Starter policy for South Carolina. Technical controls only. Not legal advice."
+retention_days = 365
+
+[pack.meta]
+starter = true
+not_legal_advice = true
+legal_references = [
+  "S.C. Code Ann. § 39-1-90 (breach of security of business data)",
+]
+
+[pack.audit]
+required_events = ["detection", "breach", "retention", "approval"]
+
+[pack.breach]
+enabled = true
+sla_days = 30
+sla_is_legal_deadline = false
+
+[[pack.detectors]]
+id = "ssn"
+kind = "ssn"
+data_class = "US_PII"
+
+[[pack.detectors]]
+id = "named_email"
+kind = "named_email"
+data_class = "US_PII"
+
+[[pack.rules]]
+id = "pii-send"
+action = "require_approval"
+data_class = "US_PII"
+hooks = ["H5"]
+tools = ["telegram", "browser", "mcp", "web_fetch"]
+
+[[pack.rules]]
+id = "pii-redact"
+action = "redact"
+data_class = "US_PII"
+hooks = ["H4", "H6"]
+style = "last4"
+
+[[pack]]
+id = "state_tn"
+dial = "state_tn"
+title = "Tennessee"
+disclaimer = "Starter policy for Tennessee. Technical controls only. Not legal advice."
+retention_days = 365
+
+[pack.meta]
+starter = true
+not_legal_advice = true
+legal_references = [
+  "Tenn. Code Ann. § 47-18-2107 (release of personal information)",
+]
+
+[pack.audit]
+required_events = ["detection", "breach", "retention", "approval"]
+
+[pack.breach]
+enabled = true
+sla_days = 30
+sla_is_legal_deadline = false
+
+[[pack.detectors]]
+id = "ssn"
+kind = "ssn"
+data_class = "US_PII"
+
+[[pack.detectors]]
+id = "named_email"
+kind = "named_email"
+data_class = "US_PII"
+
+[[pack.rules]]
+id = "pii-send"
+action = "require_approval"
+data_class = "US_PII"
+hooks = ["H5"]
+tools = ["telegram", "browser", "mcp", "web_fetch"]
+
+[[pack.rules]]
+id = "pii-redact"
+action = "redact"
+data_class = "US_PII"
+hooks = ["H4", "H6"]
+style = "last4"
+
+[[pack]]
+id = "state_va"
+dial = "state_va"
+title = "Virginia"
+disclaimer = "Starter policy for Virginia. Technical controls only. Not legal advice."
+retention_days = 365
+
+[pack.meta]
+starter = true
+not_legal_advice = true
+legal_references = [
+  "Va. Code § 18.2-186.6 (breach of personal information)",
+  "Va. Code §§ 59.1-575 to 59.1-585 (Consumer Data Protection Act)",
+]
+
+[pack.audit]
+required_events = ["detection", "breach", "retention", "approval"]
+
+[pack.breach]
+enabled = true
+sla_days = 30
+sla_is_legal_deadline = false
+
+[[pack.detectors]]
+id = "ssn"
+kind = "ssn"
+data_class = "US_PII"
+
+[[pack.detectors]]
+id = "named_email"
+kind = "named_email"
+data_class = "US_PII"
+
+[[pack.rules]]
+id = "pii-send"
+action = "require_approval"
+data_class = "US_PII"
+hooks = ["H5"]
+tools = ["telegram", "browser", "mcp", "web_fetch"]
+
+[[pack.rules]]
+id = "pii-redact"
+action = "redact"
+data_class = "US_PII"
+hooks = ["H4", "H6"]
+style = "last4"
+
+[[pack]]
+id = "state_wv"
+dial = "state_wv"
+title = "West Virginia"
+disclaimer = "Starter policy for West Virginia. Technical controls only. Not legal advice."
+retention_days = 365
+
+[pack.meta]
+starter = true
+not_legal_advice = true
+legal_references = [
+  "W. Va. Code §§ 46A-2A-101 to 46A-2A-105 (consumer information security breach)",
+]
+
+[pack.audit]
+required_events = ["detection", "breach", "retention", "approval"]
+
+[pack.breach]
+enabled = true
+sla_days = 30
+sla_is_legal_deadline = false
+
+[[pack.detectors]]
+id = "ssn"
+kind = "ssn"
+data_class = "US_PII"
+
+[[pack.detectors]]
+id = "named_email"
+kind = "named_email"
+data_class = "US_PII"
+
+[[pack.rules]]
+id = "pii-send"
+action = "require_approval"
+data_class = "US_PII"
+hooks = ["H5"]
+tools = ["telegram", "browser", "mcp", "web_fetch"]
+
+[[pack.rules]]
+id = "pii-redact"
+action = "redact"
+data_class = "US_PII"
+hooks = ["H4", "H6"]
+style = "last4"

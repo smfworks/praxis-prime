@@ -127,6 +127,23 @@ class StateDB:
 
             CREATE INDEX IF NOT EXISTS routine_runs_idx
                 ON routine_runs(routine_id, started_at);
+
+            CREATE TABLE IF NOT EXISTS breach_records (
+                id TEXT PRIMARY KEY,
+                created_at TEXT NOT NULL,
+                pack TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                affected_count INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                notice_draft TEXT NOT NULL,
+                payload_json TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS dial_positions (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                positions_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
             """
         )
         self.conn.commit()

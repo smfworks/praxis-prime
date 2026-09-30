@@ -1,13 +1,14 @@
-"""North Carolina jurisdiction pack stub.
+"""North Carolina jurisdiction profile slots.
 
-Not legal advice. This file does not encode statutes, retention periods, or
-notice templates. SOURCE-NOTES §11 marks several rows as secondary (S) or
-unverified (U). Those rows have to be read from the primary source before any
-rule exists.
+Not legal advice. Enforceable ITPA controls (SSN handling, personal-information
+redaction, breach records, disposal retention) live in
+``packs/compliance/state_nc.toml``. This module keeps the professional-overlay
+slots from ARCHITECTURE §17.2. Rows marked S or U in SOURCE-NOTES §11 are not
+encoded as rules.
 
-Default position is off. Monitor and enforce modes are not implemented.
+Default position is off.
 
-TODO: ARCHITECTURE §17.2.
+TODO: import Praxis professional overlays only after their license is confirmed.
 """
 
 PACK_ID = "state:NC"
