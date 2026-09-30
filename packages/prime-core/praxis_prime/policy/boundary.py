@@ -13,6 +13,7 @@ ARCHITECTURE §8, §16, and §25.
 
 from __future__ import annotations
 
+import errno
 import http.client
 import ipaddress
 import logging
@@ -50,6 +51,15 @@ _MAX_CACHE_NAME_ENTRIES = 500_000
 # walked with the entry budget. A path that resolves to one of these, or to
 # the same inode as ``/``, would scan the whole filesystem or a virtual tree.
 _SKIP_SCAN_ROOTS = frozenset({"/", "/proc", "/sys"})
+# ``~/.var/app/*/data/keyrings`` is one scan root per Flatpak app. Each root
+# would otherwise get its own credential-file cap, so a long app list walks
+# without a shared limit. More matches than this fail the scan closed. The
+# matches that are kept share ``_MAX_SCAN_ENTRIES`` for the whole scan.
+_MAX_FLATPAK_KEYRING_ROOTS = 64
+# A directory that vanishes or is replaced while Chrome rewrites IndexedDB
+# or ``blob_storage``. Other listing failures, including EACCES and EPERM,
+# still fail the scan closed.
+_IGNORED_LISTING_ERRNOS = frozenset({errno.ENOENT, errno.ENOTDIR})
 _FETCH_ALLOW = frozenset({"loopback", "private", "link_local", "metadata"})
 _BROWSER_FETCH_ALLOW = frozenset({"loopback", "private", "link_local"})
 _REDIRECT_STATUS = frozenset({300, 301, 302, 303, 307, 308})
@@ -419,8 +429,10 @@ def secret_inode_set(cache: InodeScanCache | None = None) -> set[tuple[int, int]
     contribute every secret-named file, with no secret-file count cap.
     Browser disk-cache directories are not descended into. A root that cannot
     be finished under the entry budget, or a credential directory that hits
-    the credential-file cap, denies every read. ``cache`` reuses one scan
-    until the loop clears it. ``found`` is published before ``ready``.
+    the credential-file cap, denies every read. A directory that disappears
+    during the walk is skipped. A directory that cannot be listed denies
+    every read and names that path. ``cache`` reuses one scan until the loop
+    clears it. ``found`` is published before ``ready``.
     """
     return _load_secret_scan(cache)
 
@@ -447,10 +459,21 @@ def _load_secret_scan(cache: InodeScanCache | None) -> set[tuple[int, int]]:
 
 def _scan_secret_inodes() -> set[tuple[int, int]]:
     found: set[tuple[int, int]] = set()
-    for path in _inode_candidates():
-        hit = _collect_inodes(path, found)
+    candidates = _inode_candidates()
+    keyring_roots = [path for path in candidates if _is_flatpak_keyring_dir(path)]
+    if len(keyring_roots) > _MAX_FLATPAK_KEYRING_ROOTS:
+        _refuse_capped_inode_scan(
+            _MAX_FLATPAK_KEYRING_ROOTS,
+            "keyring-root",
+            str(Path.home() / ".var" / "app"),
+        )
+    shared = _SharedEntries()
+    share_with = {os.path.normcase(os.path.abspath(path)) for path in keyring_roots}
+    for path in candidates:
+        key = os.path.normcase(os.path.abspath(path))
+        hit = _collect_inodes(path, found, shared if key in share_with else None)
         if hit is not None:
-            _refuse_capped_inode_scan(hit.limit, hit.kind)
+            _refuse_capped_inode_scan(hit.limit, hit.kind, hit.path)
     return found
 
 
@@ -835,12 +858,43 @@ def _xdg_browser_roots(home: Path) -> list[Path]:
 
 
 def _flatpak_keyring_dirs(home: Path) -> list[Path]:
-    """Existing ``~/.var/app/*/data/keyrings`` directories."""
+    """Existing ``~/.var/app/*/data/keyrings`` directories.
+
+    Stop after one more than ``_MAX_FLATPAK_KEYRING_ROOTS``. The scan fails
+    closed on that overflow instead of giving every match its own budget.
+    """
     root = home / ".var" / "app"
+    found: list[Path] = []
+    limit = _MAX_FLATPAK_KEYRING_ROOTS + 1
     try:
-        return list(root.glob("*/data/keyrings"))
+        children = list(root.iterdir())
     except OSError:
         return []
+    for child in children:
+        candidate = child / "data" / "keyrings"
+        try:
+            if not candidate.is_dir():
+                continue
+        except OSError:
+            continue
+        found.append(candidate)
+        if len(found) >= limit:
+            break
+    return found
+
+
+def _is_flatpak_keyring_dir(path: Path) -> bool:
+    """True for ``.../.var/app/<id>/data/keyrings`` and not ``~/.local/share/keyrings``."""
+    parts = path.parts
+    if len(parts) < 5:
+        return False
+    tail = parts[-5:]
+    return (
+        tail[0] == ".var"
+        and tail[1] == "app"
+        and tail[3] == "data"
+        and tail[4] == "keyrings"
+    )
 
 
 def _inode_candidates() -> list[Path]:
@@ -954,6 +1008,8 @@ def _record_cache_secret_inodes(
 
     Directory entries are counted only toward ``tally``, not the scan root's
     entry budget. Symlinks that leave the cache directory are not followed.
+    ENOENT and ENOTDIR mean the directory vanished during the scan and are
+    ignored. Any other listing failure fails the scan closed.
     """
     seen_dirs: set[tuple[int, int]] = set()
     pending = [cache_root]
@@ -967,8 +1023,14 @@ def _record_cache_secret_inodes(
         seen_dirs.add(inode)
         try:
             children = list(os.scandir(current))
-        except OSError:
-            return _CapHit(0, "unreadable-directory")
+        except OSError as exc:
+            if _listing_errno_ignored(exc):
+                continue
+            return _CapHit(
+                0,
+                "unreadable-directory",
+                _error_filename(exc) or str(current),
+            )
         tally.examined += len(children)
         if tally.examined > _MAX_CACHE_NAME_ENTRIES:
             return _CapHit(_MAX_CACHE_NAME_ENTRIES, "cache-name")
@@ -1001,19 +1063,52 @@ class _NameTally:
     examined: int = 0
 
 
+@dataclass
+class _SharedEntries:
+    """Directory entries counted across every flatpak keyring root in one scan."""
+
+    count: int = 0
+
+
 @dataclass(frozen=True, slots=True)
 class _CapHit:
     """A scan root that stopped early. The caller fails every read closed."""
 
     limit: int
     kind: str
+    path: str | None = None
 
 
-def _refuse_capped_inode_scan(limit: int, kind: str) -> None:
+def _listing_errno_ignored(exc: OSError) -> bool:
+    """True when a listed directory vanished or was replaced during the scan.
+
+    Chrome rewrites IndexedDB and ``blob_storage`` while a profile is open.
+    ``os.walk`` reports that as ENOENT or ENOTDIR. Those are not a directory
+    hiding a secret. EACCES, EPERM, and any other listing failure still fail
+    closed, and that denial stays cached for the rest of the turn.
+    """
+    return exc.errno in _IGNORED_LISTING_ERRNOS
+
+
+def _error_filename(exc: OSError) -> str | None:
+    filename = exc.filename
+    if isinstance(filename, bytes):
+        return os.fsdecode(filename)
+    if filename is None:
+        return None
+    return str(filename)
+
+
+def _refuse_capped_inode_scan(limit: int, kind: str, path: str | None = None) -> None:
     if kind == "unbounded-root":
         detail = "secret inode scan refused an unbounded root"
     elif kind == "unreadable-directory":
-        detail = "secret inode scan could not list a directory"
+        where = path if path else "a directory"
+        detail = (
+            f"secret inode scan could not list {where} "
+            "(a root-owned dir, e.g. from `sudo gpg`, in ~/.gnupg or a browser "
+            "profile; fix ownership)"
+        )
     else:
         detail = f"secret inode scan hit the {limit} {kind} cap"
     message = f"{detail}; denying the read because a secret file could have been missed"
@@ -1170,13 +1265,18 @@ def _file_counts(name: str, directory: Path, mode: str) -> bool:
     return _inode_file_is_secret(name, directory)
 
 
-def _collect_inodes(path: Path, found: set[tuple[int, int]]) -> _CapHit | None:
+def _collect_inodes(
+    path: Path,
+    found: set[tuple[int, int]],
+    shared: _SharedEntries | None = None,
+) -> _CapHit | None:
     """Scan one candidate.
 
     Return a hit when the walk stops early. The caller fails every read
     closed. Named browser and gcloud walks record every secret-named inode.
     An entry budget, the cache-name cap, or a credential-file cap stops the
-    scan.
+    scan. ``shared`` is the entry total for every flatpak keyring root in
+    this scan; those roots do not each get a fresh budget.
     """
     resolved = _resolve_scan_root(path)
     if isinstance(resolved, _CapHit):
@@ -1208,11 +1308,15 @@ def _collect_inodes(path: Path, found: set[tuple[int, int]]) -> _CapHit | None:
     try:
         # followlinks so snap ``current`` is entered. Directory inodes are
         # recorded below; a second path to the same revision is not walked.
-        # onerror turns an unreadable directory into a closed scan. os.walk
-        # would otherwise skip it and miss a secret inside.
+        # onerror fails closed when a directory cannot be listed. ENOENT and
+        # ENOTDIR are a directory that vanished mid-walk (Chrome IndexedDB
+        # and blob_storage). Those are ignored. os.walk would otherwise skip
+        # an unreadable directory and miss a secret inside it.
         walker = os.walk(root, followlinks=True, onerror=_raise_scan_io)
-    except OSError:
-        return _CapHit(0, "unreadable-directory")
+    except OSError as exc:
+        if _listing_errno_ignored(exc):
+            return None
+        return _CapHit(0, "unreadable-directory", _error_filename(exc) or str(root))
     count = 0
     entries = 0
     seen_dirs: set[tuple[int, int]] = set()
@@ -1236,27 +1340,41 @@ def _collect_inodes(path: Path, found: set[tuple[int, int]]) -> _CapHit | None:
             )
             if hit is not None:
                 return hit
+            added = len(dirnames) + len(filenames)
             if budget is not None:
-                entries += len(dirnames) + len(filenames)
+                entries += added
                 if entries > budget:
                     return _CapHit(budget, "directory-entry")
+            if shared is not None:
+                shared.count += added
+                if shared.count > _MAX_SCAN_ENTRIES:
+                    return _CapHit(_MAX_SCAN_ENTRIES, "directory-entry", str(directory))
             for name in filenames:
                 if not _file_counts(name, directory, mode):
                     continue
                 if file_cap is not None and count >= file_cap:
                     return _CapHit(file_cap, "secret-file")
                 count = _add_inode(directory / name, found, count)
-    except _ScanIOError:
-        return _CapHit(0, "unreadable-directory")
+    except _ScanIOError as exc:
+        return _CapHit(0, "unreadable-directory", exc.path or str(root))
     return None
 
 
 class _ScanIOError(Exception):
     """os.walk could not list a directory inside a scan root."""
 
+    def __init__(self, message: str, *, path: str | None) -> None:
+        super().__init__(message)
+        self.path = path
+
 
 def _raise_scan_io(exc: OSError) -> None:
-    raise _ScanIOError(exc.strerror or "unreadable directory") from exc
+    if _listing_errno_ignored(exc):
+        return
+    raise _ScanIOError(
+        exc.strerror or "unreadable directory",
+        path=_error_filename(exc),
+    ) from exc
 
 
 def _add_inode(path: Path, found: set[tuple[int, int]], count: int) -> int:

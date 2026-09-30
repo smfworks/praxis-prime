@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import logging
 import os
 import shutil
@@ -765,6 +766,202 @@ def test_unreadable_cache_dir_fails_closed(tmp_path: Path, monkeypatch):
         assert SECRET not in str(denied)
     finally:
         os.chmod(nested, 0o700)
+
+
+def _listing_error(code: int, path: object) -> OSError:
+    text = os.strerror(code)
+    raw = os.fspath(path)
+    if code == errno.ENOENT:
+        return FileNotFoundError(code, text, raw)
+    if code == errno.ENOTDIR:
+        return NotADirectoryError(code, text, raw)
+    return OSError(code, text, raw)
+
+
+@pytest.mark.parametrize("code", [errno.ENOENT, errno.ENOTDIR])
+def test_vanished_directory_during_scan_stays_readable(
+    tmp_path: Path, monkeypatch, code: int
+):
+    """A directory that disappears mid-walk is not a closed scan.
+
+    Chrome replaces IndexedDB and cache entries while a profile is open.
+    That must not stick a denial on the turn's inode cache. A secret that
+    is still there, including one beside the vanished cache directory, is
+    still denied.
+    """
+    home = tmp_path / "home"
+    profile = home / ".config" / "google-chrome" / "Default"
+    indexed = profile / "IndexedDB" / "blob_storage"
+    indexed.mkdir(parents=True)
+    (indexed / "data").write_text("blob", encoding="utf-8")
+    login = profile / "Login Data"
+    login.write_text(SECRET, encoding="utf-8")
+    gone = profile / "Cache" / "gone"
+    gone.mkdir(parents=True)
+    (gone / "part").write_text("x", encoding="utf-8")
+    cached = profile / "Cache" / "x" / "Login Data"
+    cached.parent.mkdir(parents=True)
+    cached.write_text(SECRET, encoding="utf-8")
+    root = tmp_path / "ws"
+    root.mkdir()
+    (root / "hello.txt").write_text("hello\n", encoding="utf-8")
+    os.link(login, root / "notes.txt")
+    os.link(cached, root / "cached.txt")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    real_scandir = os.scandir
+    finished = {"scan": False}
+    vanished = {"IndexedDB", "gone"}
+
+    def flaky(target, *args, **kwargs):
+        name = Path(target).name
+        if finished["scan"] and name in vanished:
+            raise AssertionError(f"inode scan listed {target} again")
+        if name in vanished:
+            raise _listing_error(code, target)
+        return real_scandir(target, *args, **kwargs)
+
+    monkeypatch.setattr(os, "scandir", flaky)
+    cache = InodeScanCache()
+    ctx = replace(_ctx(root), inode_cache=cache)
+    assert execute_read_file({"path": "hello.txt"}, ctx) == "hello\n"
+    assert cache.error is None
+    assert cache.ready
+    finished["scan"] = True
+    assert execute_read_file({"path": "hello.txt"}, ctx) == "hello\n"
+    for name in ("notes.txt", "cached.txt"):
+        denial = _denied(execute_read_file, {"path": name}, ctx)
+        assert denial.code == "secret_path", name
+
+
+def test_listing_io_error_fails_closed_and_stays_cached(tmp_path: Path, monkeypatch):
+    home = tmp_path / "home"
+    indexed = home / ".config" / "google-chrome" / "Default" / "IndexedDB"
+    indexed.mkdir(parents=True)
+    (indexed / "data").write_text("x", encoding="utf-8")
+    root = tmp_path / "ws"
+    root.mkdir()
+    (root / "hello.txt").write_text("hello\n", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    real_scandir = os.scandir
+
+    def flaky(target, *args, **kwargs):
+        if Path(target).name == "IndexedDB":
+            raise _listing_error(errno.EIO, target)
+        return real_scandir(target, *args, **kwargs)
+
+    monkeypatch.setattr(os, "scandir", flaky)
+    cache = InodeScanCache()
+    ctx = replace(_ctx(root), inode_cache=cache)
+    denial = _denied(execute_read_file, {"path": "hello.txt"}, ctx)
+    assert denial.code == "inode_scan_capped"
+    assert str(indexed) in str(denial)
+    assert "could not list" in str(denial)
+    assert cache.error is denial
+    calls = {"n": 0}
+
+    def counting(target, *args, **kwargs):
+        calls["n"] += 1
+        return flaky(target, *args, **kwargs)
+
+    monkeypatch.setattr(os, "scandir", counting)
+    again = _denied(execute_read_file, {"path": "hello.txt"}, ctx)
+    assert again is cache.error
+    assert calls["n"] == 0
+
+
+def test_unreadable_directory_names_the_path(tmp_path: Path, monkeypatch):
+    home = tmp_path / "home"
+    private = home / ".gnupg" / "private-keys-v1.d"
+    private.mkdir(parents=True)
+    key = private / "key"
+    key.write_text(SECRET, encoding="utf-8")
+    root = tmp_path / "ws"
+    root.mkdir()
+    (root / "hello.txt").write_text("hello\n", encoding="utf-8")
+    os.link(key, root / "notes.txt")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    os.chmod(private, 0)
+    try:
+        cache = InodeScanCache()
+        ctx = replace(_ctx(root), inode_cache=cache)
+        denial = _denied(execute_read_file, {"path": "hello.txt"}, ctx)
+        assert denial.code == "inode_scan_capped"
+        assert str(private) in str(denial)
+        assert "could not list" in str(denial)
+        assert "sudo gpg" in str(denial)
+        assert "~/.gnupg" in str(denial)
+        assert "fix ownership" in str(denial)
+        again = _denied(execute_read_file, {"path": "notes.txt"}, ctx)
+        assert again is cache.error
+        assert str(private) in str(again)
+    finally:
+        os.chmod(private, 0o700)
+
+
+def test_too_many_flatpak_keyring_roots_fail_closed(tmp_path: Path, monkeypatch):
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    monkeypatch.setattr(boundary_mod, "_MAX_FLATPAK_KEYRING_ROOTS", 2)
+    secret = None
+    for name in ("one", "two", "three"):
+        keyring = home / ".var" / "app" / f"com.example.{name}" / "data" / "keyrings"
+        keyring.mkdir(parents=True)
+        secret = keyring / "default.keyring"
+        secret.write_text(SECRET, encoding="utf-8")
+    root = tmp_path / "ws"
+    root.mkdir()
+    (root / "hello.txt").write_text("hello\n", encoding="utf-8")
+    assert secret is not None
+    os.link(secret, root / "notes.txt")
+    denial = _denied(execute_read_file, {"path": "hello.txt"}, _ctx(root))
+    assert denial.code == "inode_scan_capped"
+    assert "keyring-root" in str(denial)
+    denied = _denied(execute_read_file, {"path": "notes.txt"}, _ctx(root))
+    assert denied.code == "inode_scan_capped"
+
+
+def test_flatpak_keyring_cap_still_denies_a_hardlink(tmp_path: Path, monkeypatch):
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    monkeypatch.setattr(boundary_mod, "_MAX_FLATPAK_KEYRING_ROOTS", 2)
+    first = home / ".var" / "app" / "com.example.one" / "data" / "keyrings"
+    second = home / ".var" / "app" / "com.example.two" / "data" / "keyrings"
+    first.mkdir(parents=True)
+    second.mkdir(parents=True)
+    secret = first / "default.keyring"
+    secret.write_text(SECRET, encoding="utf-8")
+    (second / "readme.txt").write_text("plain\n", encoding="utf-8")
+    root = tmp_path / "ws"
+    root.mkdir()
+    (root / "hello.txt").write_text("hello\n", encoding="utf-8")
+    os.link(secret, root / "notes.txt")
+    ctx = _ctx(root)
+    assert execute_read_file({"path": "hello.txt"}, ctx) == "hello\n"
+    denial = _denied(execute_read_file, {"path": "notes.txt"}, ctx)
+    assert denial.code == "secret_path"
+
+
+def test_flatpak_keyring_roots_share_one_entry_budget(tmp_path: Path, monkeypatch):
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    monkeypatch.setattr(boundary_mod, "_MAX_SCAN_ENTRIES", 4)
+    for name in ("one", "two"):
+        keyring = home / ".var" / "app" / f"com.example.{name}" / "data" / "keyrings"
+        keyring.mkdir(parents=True)
+        for index in range(3):
+            (keyring / f"item-{index}").write_text("x", encoding="utf-8")
+    root = tmp_path / "ws"
+    root.mkdir()
+    (root / "hello.txt").write_text("hello\n", encoding="utf-8")
+    denial = _denied(execute_read_file, {"path": "hello.txt"}, _ctx(root))
+    assert denial.code == "inode_scan_capped"
+    assert "directory-entry" in str(denial)
 
 
 def test_edit_and_write_reuse_the_loop_inode_cache(tmp_path: Path, monkeypatch):
