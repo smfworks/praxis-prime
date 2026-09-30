@@ -47,9 +47,14 @@ def test_allowlist_intersection_cannot_loosen_the_org_floor():
     assert effective.tools == frozenset({"shell"})
     assert effective.mcp == frozenset({"docs"})
     assert effective.permits_tool("delete_file") is False
-    assert effective.permits_tool("mcp__docs__search") is True
-    assert effective.permits_tool("mcp__other__search") is False
-    assert effective.permits_call("mcp_find_tools", {"server": "other"}) is False
+    assert effective.permits_tool("mcp__docs__search") is False
+    opened = effective_allowlist(
+        LayerAllow(tools=None, mcp=frozenset({"docs"}), dials={}),
+        LayerAllow(tools=None, mcp=None, dials={}),
+    )
+    assert opened.permits_tool("mcp__docs__search") is True
+    assert opened.permits_tool("mcp__other__search") is False
+    assert opened.permits_call("mcp_find_tools", {"server": "other"}) is False
     raised = clamp_dials(org.dials, profile.dials)
     assert raised["hipaa"] == "monitor"
     assert set(clamp_dials({}, {}).values()) == {"off"}
