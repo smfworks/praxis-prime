@@ -130,6 +130,7 @@ def serve(
         approvals=queue,
         logger=logger,
         socket_path=socket_path,
+        decider=runtime.engine,
     )
 
     def on_pending(item: dict[str, object]) -> None:

@@ -22,6 +22,7 @@ from praxis_prime.approvals.gate import (
     approval_session_id,
 )
 from praxis_prime.audit.log import AuditLog
+from praxis_prime.decide.screen import ActionScreener
 from praxis_prime.loop.control import TurnControl
 from praxis_prime.loop.events import LoopEvent, StatusEvent, TurnEnded
 from praxis_prime.loop.hooks import HookDecision, HookResult, LoopHooks
@@ -65,6 +66,7 @@ class AgentLoop:
         audit: AuditLog | None = None,
         session_id: str | None = None,
         hooks: LoopHooks | None = None,
+        screener: ActionScreener | None = None,
     ) -> None:
         self.router = router
         self.registry = registry
@@ -80,6 +82,7 @@ class AgentLoop:
         self.audit = audit
         self.session_id = session_id
         self.hooks = hooks
+        self.screener = screener
 
     def run_turn(
         self,
@@ -235,6 +238,8 @@ class AgentLoop:
             summary=prepared.summary,
         )
         verdict = self.policy.evaluate(ctx)
+        if self.screener is not None:
+            verdict = self.screener.apply(verdict, ctx)
         self._audit(
             "policy",
             verdict.reason,

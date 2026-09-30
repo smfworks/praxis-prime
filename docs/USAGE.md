@@ -1,6 +1,6 @@
 # Using Praxis Prime
 
-This milestone runs the agent loop in a loopback daemon and in the terminal. Compliance dials still do nothing while they are off. The Decision Engine, TUI, and web UI are not in this build.
+This milestone runs the agent loop in a loopback daemon and in the terminal, plus a local Decision Engine. Compliance dials still do nothing while they are off. The approval pre-screener is off until you set `decide.prescreen`. The TUI and web UI are not in this build.
 
 ## Install
 
@@ -209,6 +209,23 @@ command = "python3 .prime/hooks/guard.py"
 
 Hooks run inside bubblewrap when `bwrap` is installed (no network). Without bubblewrap they run with a scrubbed environment. HTTP and MCP hook handlers are not implemented.
 
+## Decision Engine
+
+The engine runs locally. It does not call a hosted decision service. See [DECISION-ENGINE.md](DECISION-ENGINE.md).
+
+```bash
+praxis-prime decide "Is this urgent?"
+praxis-prime decide "Which team?" --options billing,technical --max-tier 2 --explain
+praxis-prime decide feedback dec_0123abcd --correct
+praxis-prime decide report
+```
+
+`POST /v1/decide` and `POST /v1/systemone` are the same handler. Both need the gateway bearer token.
+
+`decide.prescreen` defaults to false. Turn it on only if you want the engine to auto-deny clearly unsafe commands or to attach an approve/deny recommendation. It will not auto-approve git push, force operations, deletes of tracked files, or writes outside the task worktree. Those still wait on the approval queue, including Telegram.
+
+Every decision is appended to the hash-chained audit log. Dial rules stay quiet while every dial is off.
+
 ## Not in this milestone
 
-Decision Engine, MCP, skills, semantic memory (including a coding embedding index), regulatory dial enforcement, the TUI, and the web UI are still stubs. Per-hunk diff review, the `auto` coding classifier, background cloud coding, Ed25519 device pairing, an approval Edit button, and channels other than Telegram are not in this build. See [ARCHITECTURE.md](ARCHITECTURE.md) §29 for the rest of the roadmap.
+MCP, skills, semantic memory (including a coding embedding index), regulatory dial enforcement beyond the Tier 0 detectors, the TUI, and the web UI are still stubs. ONNX classifiers, parallel jury calls, nightly recalibration, and the decision eval suites are not in this build. Per-hunk diff review, the `auto` coding classifier, background cloud coding, Ed25519 device pairing, an approval Edit button, and channels other than Telegram are not either. See [ARCHITECTURE.md](ARCHITECTURE.md) §29 for the rest of the roadmap.

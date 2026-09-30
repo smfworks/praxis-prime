@@ -11,4 +11,4 @@ The blueprint is the source of truth for layout, names, and stack.
 
 These files were approved as the design. The repository still points at later sections with `TODO: ARCHITECTURE §…` notes.
 
-[USAGE.md](USAGE.md) is the operator note for the first running milestone: `praxis-prime chat`, `praxis-prime ask`, the model router, tools, and the session database.
+[USAGE.md](USAGE.md) is the operator note for chat, ask, the daemon, coding mode, and `praxis-prime decide`. [DECISION-ENGINE.md](DECISION-ENGINE.md) describes the local cascade.

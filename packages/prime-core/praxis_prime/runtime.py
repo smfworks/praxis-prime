@@ -2,15 +2,20 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
 from praxis_prime.approvals.gate import ApprovalGate, Approver
 from praxis_prime.audit.log import AuditLog
+from praxis_prime.decide.engine import DecisionEngine, build_engine
+from praxis_prime.decide.screen import ActionScreener
+from praxis_prime.decide.tool import install_decide_tool
 from praxis_prime.loop.engine import AgentLoop
 from praxis_prime.loop.prompt import session_preamble
 from praxis_prime.memory.store import SessionStore
+from praxis_prime.paths import config_dir
 from praxis_prime.policy.engine import PolicyEngine
 from praxis_prime.router.factory import build_router
 from praxis_prime.router.router import ChatProvider, ModelRouter
@@ -31,9 +36,12 @@ class Runtime:
     db: StateDB
     store: SessionStore
     audit: AuditLog
+    engine: DecisionEngine
+    screener: ActionScreener
     cwd: Path
 
     def close(self) -> None:
+        self.engine.labels.close()
         self.db.close()
 
     def set_model(self, spec: str) -> str:
@@ -71,6 +79,7 @@ class Runtime:
             store=self.store,
             audit=self.audit,
             session_id=session_id,
+            screener=self.screener,
         )
         return session_id, loop
 
@@ -99,14 +108,32 @@ def build_runtime(
         router.use_primary(ref)
     path = data_path or default_db_path(env)
     db = StateDB(path)
+    audit = AuditLog(db)
+    tools = registry or builtin_registry()
+    environ = os.environ if env is None else env
+    if config_path is not None:
+        resolved_config = config_path
+    else:
+        resolved_config = config_dir(environ) / "config.toml"
+    engine = build_engine(
+        config_path=resolved_config,
+        data_root=path.parent,
+        router=router,
+        audit=audit,
+        approver=approver,
+        dials=settings.dials,
+    )
+    install_decide_tool(tools, engine)
     return Runtime(
         settings=settings,
         router=router,
-        registry=registry or builtin_registry(),
+        registry=tools,
         policy=PolicyEngine(settings.dials),
         gate=ApprovalGate(approver),
         db=db,
         store=SessionStore(db),
-        audit=AuditLog(db),
+        audit=audit,
+        engine=engine,
+        screener=ActionScreener(engine, enabled=engine.config.prescreen),
         cwd=cwd or Path.cwd(),
     )

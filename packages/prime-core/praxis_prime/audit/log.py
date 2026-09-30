@@ -44,6 +44,14 @@ class AuditLog:
         self.db.conn.commit()
         return digest
 
+    def last_id(self) -> int | None:
+        row = self.db.conn.execute(
+            "SELECT id FROM audit_events ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        if row is None:
+            return None
+        return int(row["id"])
+
     def last_hash(self) -> str:
         row = self.db.conn.execute(
             "SELECT hash FROM audit_events ORDER BY id DESC LIMIT 1"
