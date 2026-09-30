@@ -7,6 +7,7 @@ paths now fail closed.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from praxis_prime.audit.log import AuditLog
@@ -21,6 +22,7 @@ from praxis_prime.sandbox.bwrap import (
 from praxis_prime.state import StateDB
 from praxis_prime.tools.registry import Risk, ToolContext
 from praxis_prime.tools.shell import classify_command, execute_shell
+from praxis_prime.tools.shellclass import classify_shell
 
 # Delete and overwrite forms that the old denylist did not force into approval
 # when bubblewrap was present. Interpreter bodies, append redirects, find -exec,
@@ -63,6 +65,31 @@ _DELETE_VARIANTS = (
 
 def _ctx(tmp_path: Path, **kwargs: object) -> ToolContext:
     return ToolContext(cwd=str(tmp_path), cancelled=lambda: False, **kwargs)  # type: ignore[arg-type]
+
+
+def _live_bwrap() -> bool:
+    """Run the bubblewrap section. In CI, missing bubblewrap is a failure."""
+    in_ci = os.environ.get("CI") == "true" or os.environ.get("GITHUB_ACTIONS") == "true"
+    if bwrap_available():
+        return True
+    if in_ci:
+        raise AssertionError("bubblewrap must be installed in CI")
+    return False
+
+
+def _note_live_bwrap(section: str) -> None:
+    """Record that a live bubblewrap assertion passed, for the CI log."""
+    line = f"live bwrap: {section}"
+    print(line, flush=True)
+    path = os.environ.get("PRAXIS_PRIME_BWRAP_LOG")
+    if not path and (
+        os.environ.get("CI") == "true" or os.environ.get("GITHUB_ACTIONS") == "true"
+    ):
+        root = os.environ.get("RUNNER_TEMP", "/tmp")
+        path = str(Path(root) / "live-bwrap.txt")
+    if path:
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(line + "\n")
 
 
 def _workspace_mount(argv: list[str]) -> tuple[str, str]:
@@ -120,6 +147,37 @@ def test_read_only_allowlist_skips_approval_inside_the_workspace(tmp_path: Path)
     assert secret.force_approval is True
 
 
+def test_git_operands_use_the_shared_secret_denylist(tmp_path: Path):
+    (tmp_path / "note.txt").write_text("alpha\n", encoding="utf-8")
+    (tmp_path / "README").write_text("hi\n", encoding="utf-8")
+    blocked = (
+        "git diff secrets.env",
+        "git log -p .env",
+        "git diff -- secrets.env",
+        "git log -p -- .env",
+        "git diff -- .env.local",
+        "git status -- id_rsa",
+        "git diff -- subdir/credentials.json",
+        "git log -p -- :(literal).env",
+        "git diff -- .ssh/config",
+    )
+    for command in blocked:
+        prepared = classify_command(command, sandbox_ready=True, workspace=tmp_path)
+        assert prepared.force_approval is True, command
+        assert classify_shell(command, workspace=tmp_path).allowlisted is False, command
+    allowed = (
+        "git diff note.txt",
+        "git log -p README",
+        "git diff -- note.txt",
+        "git log -p -- README",
+        "git diff HEAD -- note.txt",
+    )
+    for command in allowed:
+        prepared = classify_command(command, sandbox_ready=True, workspace=tmp_path)
+        assert prepared.force_approval is False, command
+        assert classify_shell(command, workspace=tmp_path).allowlisted is True, command
+
+
 def test_unapproved_delete_does_not_run_and_ro_bind_blocks_the_write(tmp_path: Path):
     target = tmp_path / "note.txt"
     target.write_text("safe\n", encoding="utf-8")
@@ -141,7 +199,7 @@ def test_unapproved_delete_does_not_run_and_ro_bind_blocks_the_write(tmp_path: P
     assert "--bind" not in argv
     assert "--noprofile" in argv
 
-    if not bwrap_available():
+    if not _live_bwrap():
         return
     run_bwrap(
         "python3 -c 'import os; os.remove(\"note.txt\")'",
@@ -149,6 +207,7 @@ def test_unapproved_delete_does_not_run_and_ro_bind_blocks_the_write(tmp_path: P
         lambda: False,
     )
     assert target.read_text(encoding="utf-8") == "safe\n"
+    _note_live_bwrap("read-only bind blocked the delete")
 
 
 def test_approved_write_is_rw_only_for_that_worktree(tmp_path: Path):
@@ -189,7 +248,7 @@ def test_approved_write_is_rw_only_for_that_worktree(tmp_path: Path):
         else:
             raise AssertionError(f"read-write bind was allowed for {bad_cwd}")
 
-    if not bwrap_available():
+    if not _live_bwrap():
         return
     run_bwrap(
         "python3 -c 'open(\"note.txt\",\"w\").write(\"changed\\n\")'",
@@ -201,6 +260,7 @@ def test_approved_write_is_rw_only_for_that_worktree(tmp_path: Path):
     )
     assert target.read_text(encoding="utf-8") == "changed\n"
     assert not (main / "note.txt").exists()
+    _note_live_bwrap("approved write changed only the worktree")
 
 
 def test_approved_write_does_not_mount_the_main_checkout(tmp_path: Path):

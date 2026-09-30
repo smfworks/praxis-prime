@@ -21,11 +21,41 @@ jobs:
       - name: Install package and dev tools
         run: python -m pip install -e ".[dev]"
 
+      - name: Install bubblewrap
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap
+          if [ -f /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+            sysctl kernel.apparmor_restrict_unprivileged_userns
+          fi
+          command -v bwrap
+          bwrap --version
+          args=(bwrap --unshare-all --die-with-parent --proc /proc --dev /dev --tmpfs /tmp)
+          for optional in /usr /bin /lib /lib64 /etc; do
+            if [ -e "$optional" ]; then
+              args+=(--ro-bind "$optional" "$optional")
+            fi
+          done
+          args+=(--chdir / -- /bin/true)
+          "${args[@]}"
+          echo "bubblewrap unprivileged sandbox started"
+
       - name: Ruff
         run: ruff check .
 
       - name: Pytest
-        run: pytest
+        env:
+          PRAXIS_PRIME_BWRAP_LOG: ${{ runner.temp }}/live-bwrap.txt
+        run: pytest -s
+
+      - name: Confirm live bubblewrap sections
+        run: |
+          log="${{ runner.temp }}/live-bwrap.txt"
+          echo "----- live bwrap sections -----"
+          cat "$log"
+          grep -qx 'live bwrap: read-only bind blocked the delete' "$log"
+          grep -qx 'live bwrap: approved write changed only the worktree' "$log"
 
       - name: CLI smoke
         run: |

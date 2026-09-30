@@ -9,6 +9,8 @@ approval too.
 The allowlist is small on purpose: ``ls``, ``cat`` / ``head`` / ``tail`` of
 paths inside the workspace, ``git status``, ``git diff``, ``git log``, and
 ``pytest --collect-only`` (check mode, including ``python -m pytest``).
+Secret filenames use :func:`praxis_prime.policy.boundary.is_secret_path`,
+including git pathspecs.
 """
 
 from __future__ import annotations
@@ -18,6 +20,7 @@ import shlex
 from dataclasses import dataclass
 from pathlib import Path
 
+from praxis_prime.policy.boundary import is_secret_path
 from praxis_prime.tools.registry import Risk
 
 _RANK = {
@@ -380,7 +383,9 @@ def _reader(tokens: list[str], workspace: Path | None, *, flags: bool) -> bool:
     if len(tokens) == 1:
         return True
     for arg in tokens[1:]:
-        if arg.startswith("-") or _secret_name(arg) or not _in_workspace(arg, workspace):
+        if arg.startswith("-") or _operand_is_secret(arg, workspace):
+            return False
+        if not _in_workspace(arg, workspace):
             return False
     return True
 
@@ -397,7 +402,9 @@ def _head_tail(tokens: list[str], workspace: Path | None) -> bool:
         if re.fullmatch(r"-[nc]\d+", arg) or re.fullmatch(r"-\d+", arg):
             index += 1
             continue
-        if arg.startswith("-") or _secret_name(arg) or not _in_workspace(arg, workspace):
+        if arg.startswith("-") or _operand_is_secret(arg, workspace):
+            return False
+        if not _in_workspace(arg, workspace):
             return False
         index += 1
     return True
@@ -504,25 +511,57 @@ def _safe_git_operand(arg: str, workspace: Path | None) -> bool:
         return False
     if arg.endswith("/.."):
         return False
+    if _operand_is_secret(arg, workspace):
+        return False
     if arg.startswith("/"):
         return _in_workspace(arg, workspace)
     return True
 
 
-def _secret_name(token: str) -> bool:
-    name = Path(token).name.lower()
-    if name.startswith(".env"):
-        return True
-    return name in {
-        "secrets.env",
-        "secrets.env.age",
-        "id_rsa",
-        "id_ed25519",
-        "id_ecdsa",
-        "id_dsa",
-        "prime.db",
-        "audit.db",
-    }
+def _operand_is_secret(token: str, workspace: Path | None) -> bool:
+    """True when an operand matches the shared secret denylist.
+
+    Git pathspecs may carry a magic signature (``:(literal)name`` or ``:/name``).
+    The signature is stripped and the path is checked with
+    :func:`praxis_prime.policy.boundary.is_secret_path`.
+    """
+    for body in _pathspec_bodies(token):
+        if _path_is_secret(body, workspace):
+            return True
+    return False
+
+
+def _pathspec_bodies(token: str) -> tuple[str, ...]:
+    bodies = [token]
+    if not token.startswith(":") or len(token) == 1:
+        return (token,)
+    rest = token[1:]
+    if rest.startswith("("):
+        close = rest.find(")")
+        if close == -1:
+            return (token,)
+        rest = rest[close + 1 :]
+    else:
+        rest = rest.lstrip("!/^")
+    if rest and rest != token:
+        bodies.append(rest)
+    return tuple(bodies)
+
+
+def _path_is_secret(token: str, workspace: Path | None) -> bool:
+    path = Path(token)
+    targets = [path]
+    if workspace is not None and not path.is_absolute():
+        targets.append(workspace / path)
+    for target in targets:
+        if is_secret_path(target):
+            return True
+        for part in target.parts:
+            if part in {"", ".", ".."}:
+                continue
+            if is_secret_path(Path(part)):
+                return True
+    return False
 
 
 def _in_workspace(token: str, workspace: Path | None) -> bool:
