@@ -13,9 +13,12 @@ non-secret files (or ``--stat`` / ``--name-only`` / ``--name-status``),
 including ``python -m pytest``). A directory, ``.``, or other on-disk non-file
 beside those files asks unless a summary flag is present. An operand that
 starts with ``:`` is a pathspec, allowlisted only when it is an existing
-non-secret file. A repo whose ``.git/config`` (or an include it names) sets
-a diff driver, a filter, or ``core.fsmonitor``, and a ``.gitattributes``
-that assigns ``diff=`` or ``filter=``, is not allowlisted. Secret filenames use
+non-secret file. A repo whose git config (including a linked worktree's
+common dir and ``config.worktree``) sets a diff driver, a filter,
+``core.fsmonitor``, ``extensions.worktreeConfig``, or ``core.attributesFile``
+asks, as does an unreadable or oversized config. ``info/attributes`` and
+``.gitattributes`` that assign ``diff=`` or ``filter=`` are not allowlisted.
+Secret filenames use
 :func:`praxis_prime.policy.boundary.is_secret_path`, including git pathspecs.
 Globs, ``rev:path``, case-folding magic, and exclude or stacked pathspec
 magic are not allowlisted.
@@ -26,6 +29,8 @@ from __future__ import annotations
 import os
 import re
 import shlex
+import stat
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -177,6 +182,9 @@ _GIT_CONFIG_LOCKS = (
     "diff.relative=false",
 )
 _GIT_FALSE_VALUES = frozenset({"", "0", "false", "no", "off"})
+_CONFIG_MAX_BYTES = 1_000_000
+_GIT_VERSION = re.compile(r"(\d+)\.(\d+)")
+_attr_source_support: bool | None = None
 _CONFIG_SECTION = re.compile(
     r'^\[\s*([A-Za-z0-9-]+)(?:\s+"([^"]*)")?\s*\]\s*(?:[#;].*)?$'
 )
@@ -581,10 +589,38 @@ def _allow_git(
     return _GitView(True, probe)
 
 
+def _git_supports_attr_source() -> bool:
+    """True when this git accepts ``--attr-source`` (2.40 and newer)."""
+    global _attr_source_support
+    if _attr_source_support is not None:
+        return _attr_source_support
+    supported = False
+    try:
+        proc = subprocess.run(
+            ["git", "--version"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        match = _GIT_VERSION.search(proc.stdout)
+        if match is not None:
+            supported = (int(match.group(1)), int(match.group(2))) >= (2, 40)
+    except (OSError, subprocess.TimeoutExpired):
+        supported = False
+    _attr_source_support = supported
+    return supported
+
+
 def _git_config_args() -> list[str]:
     args: list[str] = []
     for item in _GIT_CONFIG_LOCKS:
         args.extend(["-c", item])
+    if _git_supports_attr_source():
+        # HEAD's tree replaces worktree .gitattributes. core.attributesFile
+        # still applies on top of that, so point it at /dev/null too.
+        # Git older than 2.40 rejects --attr-source; leave those pins off.
+        args.extend(["-c", "core.attributesFile=/dev/null", "--attr-source=HEAD"])
     return args
 
 
@@ -636,7 +672,8 @@ def _repo_git_is_unsafe(workspace: Path, sub: str) -> bool:
     """True when repo config or attributes can still run a program.
 
     ``-c`` cannot clear every diff driver or filter. An include is refused
-    outright: the file it pulls in is not auto-approved either.
+    outright: the file it pulls in is not auto-approved either. Linked
+    worktrees keep the shared config in the ``commondir``.
     """
     if _git_config_is_hostile(workspace):
         return True
@@ -645,32 +682,116 @@ def _repo_git_is_unsafe(workspace: Path, sub: str) -> bool:
     return False
 
 
-def _git_config_path(workspace: Path) -> Path | None:
+@dataclass(frozen=True, slots=True)
+class _GitLayout:
+    """Git directories a checkout will read, plus a fail-closed flag."""
+
+    dirs: tuple[Path, ...] = ()
+    hostile: bool = False
+
+
+def _git_layout(workspace: Path) -> _GitLayout:
+    """Resolve the worktree git dir and, when linked, its common dir."""
     git = workspace / ".git"
     try:
+        if not os.path.lexists(git):
+            return _GitLayout()
         if git.is_dir():
-            return git / "config"
-        if not git.is_file():
+            gitdir = git
+        elif git.is_file():
+            pointed = _gitdir_from_pointer(workspace, git)
+            if pointed is None:
+                return _GitLayout(hostile=True)
+            gitdir = pointed
+        else:
+            return _GitLayout(hostile=True)
+    except OSError:
+        return _GitLayout(hostile=True)
+    try:
+        if not gitdir.is_dir():
+            return _GitLayout(hostile=True)
+    except OSError:
+        return _GitLayout(hostile=True)
+    common, bad = _common_dir(gitdir)
+    if bad:
+        return _GitLayout(dirs=(gitdir,), hostile=True)
+    dirs = [gitdir]
+    if common is not None:
+        try:
+            if not common.is_dir():
+                return _GitLayout(dirs=(gitdir,), hostile=True)
+            if common.resolve() != gitdir.resolve():
+                dirs.append(common)
+        except OSError:
+            return _GitLayout(dirs=(gitdir,), hostile=True)
+    return _GitLayout(dirs=tuple(dirs))
+
+
+def _gitdir_from_pointer(workspace: Path, git_file: Path) -> Path | None:
+    try:
+        if git_file.stat().st_size > _CONFIG_MAX_BYTES:
             return None
-        text = git.read_text(encoding="utf-8", errors="replace")
+        text = git_file.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return None
     for line in text.splitlines():
         if not line.startswith("gitdir:"):
             continue
         raw = line.split(":", 1)[1].strip()
+        if not raw:
+            return None
         gitdir = Path(raw)
         if not gitdir.is_absolute():
-            gitdir = (workspace / gitdir).resolve()
-        return gitdir / "config"
+            gitdir = workspace / gitdir
+        return gitdir
     return None
 
 
+def _common_dir(gitdir: Path) -> tuple[Path | None, bool]:
+    """Return ``(common, hostile)``. A missing file means ``gitdir`` is common."""
+    pointer = gitdir / "commondir"
+    try:
+        if not os.path.lexists(pointer):
+            return None, False
+        if pointer.stat().st_size > _CONFIG_MAX_BYTES:
+            return None, True
+        lines = [
+            line.strip()
+            for line in pointer.read_text(encoding="utf-8", errors="replace").splitlines()
+            if line.strip()
+        ]
+    except OSError:
+        return None, True
+    if len(lines) != 1:
+        return None, True
+    target = Path(lines[0])
+    if not target.is_absolute():
+        target = gitdir / target
+    return target, False
+
+
 def _git_config_is_hostile(workspace: Path) -> bool:
-    path = _git_config_path(workspace)
-    if path is None:
-        return False
-    return _config_file_is_hostile(path, set(), 0)
+    layout = _git_layout(workspace)
+    if layout.hostile:
+        return True
+    seen: set[str] = set()
+    for directory in layout.dirs:
+        if _exists_or_unreadable(directory / "config.worktree"):
+            return True
+        if _config_file_is_hostile(directory / "config", seen, 0):
+            return True
+    return False
+
+
+def _exists_or_unreadable(path: Path) -> bool:
+    """True when ``path`` exists or cannot be statted. Missing is false."""
+    try:
+        path.stat()
+    except FileNotFoundError:
+        return os.path.lexists(path)
+    except OSError:
+        return True
+    return True
 
 
 def _config_file_is_hostile(path: Path, seen: set[str], depth: int) -> bool:
@@ -684,11 +805,17 @@ def _config_file_is_hostile(path: Path, seen: set[str], depth: int) -> bool:
         return True
     seen.add(key)
     try:
-        if not path.is_file() or path.stat().st_size > 1_000_000:
-            return path.is_file()
+        info = path.stat()
+    except FileNotFoundError:
+        return os.path.lexists(path)
+    except OSError:
+        return True
+    if not stat.S_ISREG(info.st_mode) or info.st_size > _CONFIG_MAX_BYTES:
+        return True
+    try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
-        return False
+        return True
     section = ""
     for raw in text.splitlines():
         line = raw.strip()
@@ -726,6 +853,10 @@ def _config_key_is_hostile(section: str, key: str, value: str) -> bool:
         return True
     if section == "filter" and key:
         return True
+    if section == "extensions" and key == "worktreeconfig":
+        return True
+    if section == "core" and key == "attributesfile" and value != "":
+        return True
     lowered = value.lower()
     if section == "core" and key == "fsmonitor":
         return lowered not in _GIT_FALSE_VALUES
@@ -735,12 +866,12 @@ def _config_key_is_hostile(section: str, key: str, value: str) -> bool:
 
 
 def _attributes_assign_driver(workspace: Path) -> bool:
-    info: list[Path] = []
-    git_config = _git_config_path(workspace)
-    if git_config is not None:
-        info.append(git_config.parent / "info" / "attributes")
-    for path in info:
-        if path.is_file() and _file_assigns_driver(path):
+    layout = _git_layout(workspace)
+    if layout.hostile:
+        return True
+    for directory in layout.dirs:
+        info = directory / "info" / "attributes"
+        if _exists_or_unreadable(info) and _file_assigns_driver(info):
             return True
     seen = 0
     try:
@@ -757,11 +888,17 @@ def _attributes_assign_driver(workspace: Path) -> bool:
 
 def _file_assigns_driver(path: Path) -> bool:
     try:
-        if path.stat().st_size > 1_000_000:
-            return True
+        info = path.stat()
+    except FileNotFoundError:
+        return os.path.lexists(path)
+    except OSError:
+        return True
+    if not stat.S_ISREG(info.st_mode) or info.st_size > _CONFIG_MAX_BYTES:
+        return True
+    try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
-        return False
+        return True
     return any(_attribute_line_assigns_driver(line) for line in text.splitlines())
 
 

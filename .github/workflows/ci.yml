@@ -56,6 +56,9 @@ jobs:
           cat "$log"
           grep -qx 'live bwrap: read-only bind blocked the delete' "$log"
           grep -qx 'live bwrap: approved write changed only the worktree' "$log"
+          grep -qx 'live bwrap: repo git config did not run' "$log"
+          grep -qx 'live bwrap: worktree common config filter did not run' "$log"
+          grep -qx 'live bwrap: config.worktree attributes file did not run' "$log"
 
       - name: CLI smoke
         run: |

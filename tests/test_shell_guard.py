@@ -529,6 +529,248 @@ def test_repo_git_config_does_not_run_inside_bwrap(tmp_path: Path):
     _note_live_bwrap("repo git config did not run")
 
 
+def _asks(workspace: Path, command: str) -> bool:
+    """True when the classifier itself refuses, before the name-only probe."""
+    return not classify_shell(command, workspace=workspace).allowlisted
+
+
+def _linked_worktree(tmp_path: Path) -> tuple[Path, Path]:
+    main = tmp_path / "main"
+    work = tmp_path / "wt"
+    main.mkdir()
+    (main / "note.txt").write_text("alpha\n", encoding="utf-8")
+    _track_note(main)
+    _git("worktree", "add", "-q", str(work), "HEAD", cwd=main)
+    return main, work
+
+
+def _worktree_git_dirs(work: Path) -> tuple[Path, Path]:
+    text = (work / ".git").read_text(encoding="utf-8")
+    raw = text.split(":", 1)[1].strip()
+    gitdir = Path(raw)
+    if not gitdir.is_absolute():
+        gitdir = (work / gitdir).resolve()
+    common_raw = (gitdir / "commondir").read_text(encoding="utf-8").strip()
+    common = Path(common_raw)
+    if not common.is_absolute():
+        common = (gitdir / common).resolve()
+    return gitdir, common
+
+
+def _assert_not_run(workspace: Path, commands: tuple[str, ...], sentinel: str) -> None:
+    for command in commands:
+        assert _asks(workspace, command), command
+        prepared = classify_command(command, sandbox_ready=True, workspace=workspace)
+        assert prepared.force_approval is True, command
+        try:
+            execute_shell({"command": command}, _ctx(workspace))
+        except RuntimeError as exc:
+            assert "not run" in str(exc)
+        else:
+            raise AssertionError(command)
+        output = run_bwrap(command_for_sandbox(command), workspace, lambda: False)
+        assert sentinel not in output, command
+        assert "PWNED" not in output, command
+
+
+def test_linked_worktree_common_config_and_attributes_ask(tmp_path: Path):
+    _main, work = _linked_worktree(tmp_path)
+    gitdir, common = _worktree_git_dirs(work)
+    assert _asks(work, "git status") is False
+    assert _asks(work, "git diff --stat") is False
+
+    (common / "info").mkdir(exist_ok=True)
+    (common / "info" / "attributes").write_text("note.txt filter=x\n", encoding="utf-8")
+    assert _asks(work, "git diff note.txt")
+    assert _asks(work, "git diff --stat")
+    assert _asks(work, "git status") is False
+    (common / "info" / "attributes").unlink()
+
+    (gitdir / "info").mkdir(exist_ok=True)
+    (gitdir / "info" / "attributes").write_text("note.txt diff=leak\n", encoding="utf-8")
+    assert _asks(work, "git diff note.txt")
+    assert _asks(work, "git status") is False
+    (gitdir / "info" / "attributes").unlink()
+
+    (gitdir / "config").write_text('[filter "x"]\n\tclean = ./pwn.sh\n', encoding="utf-8")
+    assert _asks(work, "git status")
+    (gitdir / "config").unlink()
+    assert _asks(work, "git status") is False
+
+    config = common / "config"
+    original = config.read_text(encoding="utf-8")
+    config.write_text(original + '\n[filter "x"]\n\tclean = ./pwn.sh\n', encoding="utf-8")
+    assert _asks(work, "git status")
+    assert _asks(work, "git diff note.txt")
+    assert _asks(work, "git diff --stat")
+    config.write_text(original, encoding="utf-8")
+
+    pointer = gitdir / "commondir"
+    pointer.unlink()
+    pointer.mkdir()
+    assert _asks(work, "git status")
+
+
+def test_worktree_config_and_attributes_file_ask(tmp_path: Path):
+    (tmp_path / "note.txt").write_text("alpha\n", encoding="utf-8")
+    _track_note(tmp_path)
+    config = tmp_path / ".git" / "config"
+    original = config.read_text(encoding="utf-8")
+    assert _asks(tmp_path, "git status") is False
+
+    worktree_config = tmp_path / ".git" / "config.worktree"
+    worktree_config.write_text("# worktree\n", encoding="utf-8")
+    assert _asks(tmp_path, "git status")
+    assert _asks(tmp_path, "git diff --stat")
+    worktree_config.unlink()
+    assert _asks(tmp_path, "git status") is False
+
+    config.write_text(
+        original + "\n[extensions]\n\tworktreeConfig = true\n",
+        encoding="utf-8",
+    )
+    assert _asks(tmp_path, "git status")
+    config.write_text(original, encoding="utf-8")
+
+    attrs = tmp_path / "attrs.txt"
+    attrs.write_text("note.txt filter=x\n", encoding="utf-8")
+    config.write_text(
+        original + f"\n[core]\n\tattributesFile = {attrs}\n",
+        encoding="utf-8",
+    )
+    assert _asks(tmp_path, "git diff note.txt")
+    assert _asks(tmp_path, "git status")
+    config.write_text(original, encoding="utf-8")
+    assert _asks(tmp_path, "git status") is False
+
+
+def test_unreadable_or_oversized_git_config_asks(tmp_path: Path, monkeypatch):
+    (tmp_path / "note.txt").write_text("alpha\n", encoding="utf-8")
+    _track_note(tmp_path)
+    config = tmp_path / ".git" / "config"
+    original = config.read_text(encoding="utf-8")
+    real_read = Path.read_text
+
+    def denied(self: Path, *args: object, **kwargs: object) -> str:
+        if self.resolve() == config.resolve():
+            raise PermissionError("denied")
+        return real_read(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", denied)
+    assert _asks(tmp_path, "git status")
+    monkeypatch.setattr(Path, "read_text", real_read)
+
+    config.write_bytes(b"x" * 1_000_001)
+    assert _asks(tmp_path, "git status")
+    config.write_text(original, encoding="utf-8")
+    assert _asks(tmp_path, "git status") is False
+
+    config.unlink()
+    assert _asks(tmp_path, "git status") is False
+
+
+def test_attr_source_pin_follows_git_version(monkeypatch):
+    monkeypatch.setattr(
+        "praxis_prime.tools.shellclass._git_supports_attr_source",
+        lambda: True,
+    )
+    pinned = command_for_sandbox("git diff note.txt")
+    assert "--attr-source=HEAD" in pinned
+    assert "core.attributesFile=/dev/null" in pinned
+    assert "--no-textconv" in pinned
+    status = command_for_sandbox("git status")
+    assert "--attr-source=HEAD" in status
+    assert "--no-ext-diff" not in status
+
+    monkeypatch.setattr(
+        "praxis_prime.tools.shellclass._git_supports_attr_source",
+        lambda: False,
+    )
+    plain = command_for_sandbox("git diff note.txt")
+    assert "--attr-source" not in plain
+    assert "core.attributesFile=/dev/null" not in plain
+    assert "core.fsmonitor=false" in plain
+
+
+def test_worktree_common_filter_does_not_run_inside_bwrap(tmp_path: Path):
+    if not _live_bwrap():
+        return
+    sentinel = "SENTINEL-SECRET-VALUE"
+    main = tmp_path / "main"
+    work = tmp_path / "wt"
+    main.mkdir()
+    (main / "note.txt").write_text("alpha\n", encoding="utf-8")
+    (main / "secrets.env").write_text(sentinel + "\n", encoding="utf-8")
+    script = main / "pwn.sh"
+    script.write_text("#!/bin/sh\necho PWNED\ncat secrets.env\n", encoding="utf-8")
+    script.chmod(0o755)
+    _git("init", "-q", cwd=main)
+    _git("add", "--", "note.txt", "secrets.env", "pwn.sh", cwd=main)
+    _git(
+        "-c",
+        "user.email=tester@example.com",
+        "-c",
+        "user.name=tester",
+        "commit",
+        "-q",
+        "-m",
+        "init",
+        cwd=main,
+    )
+    _git("worktree", "add", "-q", str(work), "HEAD", cwd=main)
+    (work / "note.txt").write_text("beta\n", encoding="utf-8")
+    _gitdir, common = _worktree_git_dirs(work)
+    config = common / "config"
+    config.write_text(
+        config.read_text(encoding="utf-8") + '\n[filter "x"]\n\tclean = ./pwn.sh\n',
+        encoding="utf-8",
+    )
+    (common / "info").mkdir(exist_ok=True)
+    (common / "info" / "attributes").write_text("note.txt filter=x\n", encoding="utf-8")
+    _assert_not_run(work, ("git diff note.txt", "git diff --stat"), sentinel)
+    _note_live_bwrap("worktree common config filter did not run")
+
+
+def test_config_worktree_attributes_file_does_not_run_inside_bwrap(tmp_path: Path):
+    if not _live_bwrap():
+        return
+    sentinel = "SENTINEL-SECRET-VALUE"
+    (tmp_path / "note.txt").write_text("alpha\n", encoding="utf-8")
+    (tmp_path / "secrets.env").write_text(sentinel + "\n", encoding="utf-8")
+    script = tmp_path / "pwn.sh"
+    script.write_text("#!/bin/sh\necho PWNED\ncat secrets.env\n", encoding="utf-8")
+    script.chmod(0o755)
+    attrs = tmp_path / "attrs.txt"
+    attrs.write_text("note.txt filter=x\n", encoding="utf-8")
+    _git("init", "-q", cwd=tmp_path)
+    _git("add", "--", "note.txt", "secrets.env", "pwn.sh", "attrs.txt", cwd=tmp_path)
+    _git(
+        "-c",
+        "user.email=tester@example.com",
+        "-c",
+        "user.name=tester",
+        "commit",
+        "-q",
+        "-m",
+        "init",
+        cwd=tmp_path,
+    )
+    config = tmp_path / ".git" / "config"
+    config.write_text(
+        config.read_text(encoding="utf-8")
+        + "\n[extensions]\n\tworktreeConfig = true\n"
+        + f"[core]\n\tattributesFile = {attrs}\n",
+        encoding="utf-8",
+    )
+    (tmp_path / ".git" / "config.worktree").write_text(
+        '[filter "x"]\n\tclean = ./pwn.sh\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "note.txt").write_text("beta\n", encoding="utf-8")
+    _assert_not_run(tmp_path, ("git diff note.txt", "git diff --stat"), sentinel)
+    _note_live_bwrap("config.worktree attributes file did not run")
+
+
 def test_name_only_backstop_asks_when_the_probe_fails(tmp_path: Path, monkeypatch):
     (tmp_path / "note.txt").write_text("alpha\n", encoding="utf-8")
 
