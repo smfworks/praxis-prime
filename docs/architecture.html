@@ -2088,6 +2088,27 @@ praxis-prime omarchy install       # installs bar plugin, theme template, keybin
 </ul>
 <hr />
 <h2 id="arch-29-roadmap">29. Roadmap</h2>
+<p>The phase table is the long-horizon scope. The next build order inside those phases is milestones <strong>M0–M8</strong> from <a href="blueprint-addendum-2026-09.md">Blueprint Addendum A (2026-09-30)</a>. Markers there stay <strong>[V]</strong> verified, <strong>[U]</strong> unverified, and <strong>[E]</strong> estimate. M0–M3 complete the MVP (v0.2–0.3). M4–M6 sit in v0.5. M7–M8 are v0.6–v0.8. Teams is M8. Tauri is M7. Jury, Jarvis, and swarm stay in the phase table and come after M3.</p>
+<div class="tw"><table>
+<thead>
+<tr>
+<th>#</th>
+<th>Milestone</th>
+<th>Phase</th>
+</tr>
+</thead>
+<tbody>
+<tr><td><strong>M0</strong></td><td>Packs in the wheel. Legacy <code>pack.json</code> loader ignores <code>ollama-cloud</code> pins and pack dashboard JavaScript.</td><td>MVP completion (v0.2–0.3)</td></tr>
+<tr><td><strong>M1</strong></td><td>Web shell, accounts, and profiles. Loopback only.</td><td>MVP completion (v0.2–0.3)</td></tr>
+<tr><td><strong>M2</strong></td><td>First-run wizard. Remove the hard-coded Ollama default.</td><td>MVP completion (v0.2–0.3)</td></tr>
+<tr><td><strong>M3</strong></td><td>Theme packages and seven built-in themes. Contrast check: <code>scripts/contrast_check.py</code>.</td><td>MVP completion (v0.2–0.3)</td></tr>
+<tr><td><strong>M4</strong></td><td>NVIDIA OpenShell for regulated installs, with a visible bubblewrap/Podman fallback.</td><td>v0.5</td></tr>
+<tr><td><strong>M5a</strong> / <strong>M5b</strong></td><td>Ubuntu and Omarchy installers, then a WSL2 supported beta.</td><td>v0.5</td></tr>
+<tr><td><strong>M6</strong></td><td>Opt-in remote access and a PWA. Loopback stays the default.</td><td>v0.5</td></tr>
+<tr><td><strong>M7</strong></td><td>Tauri 2 desktop shell.</td><td>v0.6–v0.8</td></tr>
+<tr><td><strong>M8</strong></td><td>Microsoft 365 (Entra sign-in, Teams, Intune/winget).</td><td>v0.6–v0.8</td></tr>
+</tbody>
+</table></div>
 <div class="tw"><table>
 <thead>
 <tr>
@@ -2100,18 +2121,25 @@ praxis-prime omarchy install       # installs bar plugin, theme template, keybin
 </thead>
 <tbody>
 <tr>
-<td><strong>MVP (v0.1–0.2)</strong></td>
-<td><code>praxis-primed</code> + gateway protocol + CLI (<code>praxis-prime</code> / <code>pprime</code>) + TUI + web UI; loop with Hermes invariants; model router (Ollama/llama.cpp + 2 cloud providers); core tools; bubblewrap sandbox; MCP client; SKILL.md loading; memory tiers 1–2 + basic semantic; baseline spine + approval cards (UI + Telegram); audit hash chain; routines with delivery to Telegram/email; coding mode (worktrees, diffs, tests, AGENTS.md / CLAUDE.md / .cursor rules); <code>praxis-prime migrate --from-praxis</code>; .deb + AUR; Omarchy theme template + keybind</td>
+<td><strong>MVP (v0.1–0.3)</strong></td>
+<td>M0–M3 complete this phase. <code>praxis-primed</code> + gateway protocol + CLI (<code>praxis-prime</code> / <code>pprime</code>) + TUI + web UI; loop with Hermes invariants; model router with no default provider (M2: an explicit first-run choice); core tools; bubblewrap sandbox; MCP client; SKILL.md loading; memory tiers 1–2 + basic semantic; baseline spine + approval cards (UI + Telegram); audit hash chain; routines with delivery to Telegram/email; coding mode (worktrees, diffs, tests, AGENTS.md / CLAUDE.md / .cursor rules); <code>praxis-prime migrate --from-praxis</code>; .deb + AUR; Omarchy theme template + keybind</td>
 <td><strong>DE v0:</strong> T0 rules + T1 ONNX classifiers (GLiClass/GLiNER zero-shot) + T2 single local judge (llama.cpp/Ollama, constrained output + logprobs); temperature scaling; <code>/v1/decide</code> + <code>/v1/systemone</code> compat endpoint; decisions in the hash-chained audit; eval harness v0 (<code>injection</code>, <code>data_class</code>, <code>intent</code>, <code>numbers_dates</code>); escalate-only enforced in the Policy Engine</td>
 <td>Dial framework + policy-as-code; <strong>NC pack (data-privacy baseline: <code>NC_PII</code>, § 75-62 SSN egress rules, redaction, § 75-65 breach-notice drafts)</strong>; Praxis 13-state packs and regulated vertical packs imported (monitor mode)</td>
 <td>Daily-drivable by Michael on Omarchy and Ubuntu; injection red-team passes; 0 SEND without approval; DE safety-regression count = 0; ECE ≤ 0.08 on MVP templates (target)</td>
 </tr>
 <tr>
 <td><strong>v0.5</strong></td>
-<td>Tauri desktop; Omarchy Quickshell bar plugin; channels: Signal, Slack, Discord, WhatsApp, Matrix, Teams, webhooks; event triggers; swarm runtime (spawn tokens, blackboard, visualizer); <code>auto</code> mode with reviewer; hooks; Podman tier; plugin SDK v1; <strong>Jarvis alpha</strong> (wake word, STT/TTS, Home Assistant, heartbeat briefings); APT repo + AppImage</td>
+<td>M4 OpenShell, M5a Ubuntu/Omarchy installers, M5b WSL2 bootstrap, and M6 remote access + PWA, alongside: Omarchy Quickshell bar plugin; channels: Signal, Slack, Discord, WhatsApp, Matrix, webhooks (Teams is M8); event triggers; swarm runtime (spawn tokens, blackboard, visualizer); <code>auto</code> mode with reviewer; hooks; Podman tier; plugin SDK v1; <strong>Jarvis alpha</strong> (wake word, STT/TTS, Home Assistant, heartbeat briefings); APT repo + AppImage. Tauri desktop is M7</td>
 <td><strong>DE v1: the Jury.</strong> 3–5 judges (Swarm 2.0 personas × ≥2 base models), log-opinion pooling, isotonic calibration, disagreement escalation to T4; IdentityRegistry / PermissionEngine for judges; SetFit/ModernBERT heads for the top 5 templates, <strong>distilled from Jury + human labels</strong>; online recalibration from approval outcomes; reliability dashboard; voice fast path ≤ 300 ms (DE portion)</td>
 <td><strong>Enforce: HIPAA, FERPA/COPPA, GDPR, 13 state packs, NC pack</strong> (including NC professional overlays and the incident workflow); regulated packs modified for Praxis Prime; dial regression suites</td>
 <td>First-wave dials pass their regression suites; Jury beats the single judge on Brier score for risk triage and injection; swarm runs a 4-worker task under budget; Jarvis handles 20 home/desktop intents offline</td>
+</tr>
+<tr>
+<td><strong>v0.6–v0.8</strong></td>
+<td>M7 Tauri 2 desktop shell (same SPA, local or remote server). M8 Microsoft 365: Entra sign-in, Teams approvals, Intune/winget. The Windows path in this range is the WSL2 supported beta (M5b)</td>
+<td>Decision Engine work stays on the v0.5 and v1.0 rows and is sequenced after M3</td>
+<td>Dial enforce work stays on the v0.5 row</td>
+<td>M7 and M8 exit criteria in the addendum</td>
 </tr>
 <tr>
 <td><strong>v1.0</strong></td>
