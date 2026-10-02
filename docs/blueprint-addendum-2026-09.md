@@ -658,6 +658,14 @@ M0 packs/packaging ─┐
 - **M4:** human takeover and handback of the sandboxed browser or desktop, with a redacted activity log (pattern 5); derived sandbox credentials (pattern 6); snapshot-bound element actions (pattern 4), which start in the current browser tool.
 - **M6:** approval-card idempotency on mobile sheets (pattern 2); re-check the gateway request checks for remote exposure (pattern 7).
 
+**Per-person agents** (one agent per individual): see [Per-person agents](OPENDOTS-BORROWED-PATTERNS.md#per-person-agents).
+
+- **M1**, PRs (4) and (5): a personal profile, an admin boundary with break-glass, requester-routed approvals, and per-session visibility ([Per-person agents](OPENDOTS-BORROWED-PATTERNS.md#per-person-agents)).
+- **M1**, PR (6): a supervisor, run-as routines, revocation (pattern 3), per-worker credentials with a generation counter, and a systemd slice (`MemoryMax`, `CPUQuota`, `TasksMax`) ([Per-person agents](OPENDOTS-BORROWED-PATTERNS.md#per-person-agents)).
+- **M2:** per-profile provider keys ([Per-person agents](OPENDOTS-BORROWED-PATTERNS.md#per-person-agents)).
+- **M4:** L2/L3 ([Per-person agents](OPENDOTS-BORROWED-PATTERNS.md#per-person-agents)).
+- **M6:** per-account channel bindings, with approvals pushed to the requester ([Per-person agents](OPENDOTS-BORROWED-PATTERNS.md#per-person-agents)).
+
 ---
 
 ## 9. Risks and open questions
