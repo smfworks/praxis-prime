@@ -48,9 +48,9 @@ Build our own UI and borrow patterns only. The SPA uses `@ag-ui/core` types kept
 Reasons, from CopilotKit `f835ce8`:
 
 - Using those packages against our own backend means either `agents__unsafe_dev_only` or `selfManagedAgents`. The code labels `selfManagedAgents` an "Enterprise Intelligence tier" and logs a warning when there is no licence key (`react-core/src/v2/providers/CopilotKitProvider.tsx:515-536`).
-- The threads drawer locks without a licence (`CopilotThreadsDrawer.tsx:247-262`).
+- The threads drawer locks without a licence (`packages/react-core/src/v2/components/chat/CopilotThreadsDrawer.tsx:247-262`).
 - `@scarf/scarf` phones home from a postinstall script (`react-core/package.json:91`), and the `shared` package pulls in Segment and a licence verifier.
-- react-ui v1's dev console POSTs to `api.cloud.copilotkit.ai` whenever it runs on localhost (`console.tsx:103-113`).
+- react-ui v1's dev console POSTs to `api.cloud.copilotkit.ai` whenever it runs on localhost (`packages/react-ui/src/components/dev-console/console.tsx:103-113`).
 - The transport does not match our WebSocket, ticket, and CSRF gateway.
 - The dependency tree is heavy.
 - The `copilotkit` PyPI package pulls in langchain and langgraph.
@@ -218,7 +218,7 @@ A2UI, OpenGenerativeUI, and MCP Apps iframes are listed under [Not adopting](#no
   - `src/client/editor/autosave.ts`
   - `src/client/editor/use-page-autosave.ts`
 - **What Praxis Prime will do:**
-  - Canvas and artifact documents ([ARCHITECTURE §21.1](ARCHITECTURE.md#211-main-window-chat-canvas-tool-timeline)) carry a revision number.
+  - Canvas and artifact documents ([ARCHITECTURE §21.1](ARCHITECTURE.md#211-main-window--chat--canvas--tool-timeline)) carry a revision number.
   - A save based on an old revision is refused, so neither the agent nor the user overwrites newer work.
   - Autosave keeps the local draft when a save fails.
 - **Milestone:** M1d or later, when the canvas is built.
@@ -229,7 +229,7 @@ A2UI, OpenGenerativeUI, and MCP Apps iframes are listed under [Not adopting](#no
 
 ### 10. Route allowlist, with the same id in the path, body, and query
 
-- **Seen in OpenDots:** `runtime-scope.ts` allowlists routes and requires ids to agree across the path, the body, and the query.
+- **Seen in OpenDots:** `src/server/runtime-scope.ts` allowlists routes and requires ids to agree across the path, the body, and the query.
 - **What Praxis Prime will do:**
   - Allowlist the gateway routes the SPA and the channels may call.
   - When an id appears in more than one of the path, the body, and the query, the values must match. A mismatch is rejected.
@@ -243,7 +243,7 @@ A2UI, OpenGenerativeUI, and MCP Apps iframes are listed under [Not adopting](#no
 
 ### 11. Grants re-checked on every tool call
 
-- **Seen in OpenDots:** Dot-to-Space grants are re-checked on every tool call, with a one-time migration so a restart never restores a revoked grant (`workspace.ts:39-50`, `page-tools.ts:17`).
+- **Seen in OpenDots:** Dot-to-Space grants are re-checked on every tool call, with a one-time migration so a restart never restores a revoked grant (`src/server/workspace.ts:39-50`, `src/server/page-tools.ts:17`).
 - **What Praxis Prime will do:**
   - Re-check a grant on every tool call, against the account and profile role that holds it.
   - Ship a one-time migration so a restart never restores a revoked grant.
@@ -271,7 +271,7 @@ A2UI, OpenGenerativeUI, and MCP Apps iframes are listed under [Not adopting](#no
 
 ## Per-person agents
 
-Michael wants one agent per individual. OpenDots is single-owner: `identifyUser` always returns the owner (`platform.ts:63-66`), and every allowlisted Slack user maps to the owner (`slack-channel.ts:31-43`). The gaps below are on main at `ab66507`.
+Michael wants one agent per individual. OpenDots is single-owner: `identifyUser` always returns the owner (`src/server/platform.ts:63-66`), and every allowlisted Slack user maps to the owner (`src/server/slack-channel.ts:31-43`). The gaps below are on main at `ab66507`.
 
 1. No supervisor or per-profile workers. One daemon runs one profile (`packages/prime-core/praxis_prime/gateway/authz.py:297-318`). This is M1 PR 6.
 2. New accounts do not get a personal profile automatically (`packages/prime-core/praxis_prime/accounts/cli.py:126`).
@@ -289,7 +289,7 @@ Suggested placement, folded into [Addendum A §8](blueprint-addendum-2026-09.md#
 - **M1 PR 4/5:** personal profile, admin boundary with break-glass, requester-routed approvals, per-session visibility.
 - **M1 PR 6:** supervisor, run-as routines, revocation (pattern 3), per-worker credentials with a generation counter, systemd slice (`MemoryMax`, `CPUQuota`, `TasksMax`).
 - **M2:** per-profile provider keys.
-- **M4:** L2/L3.
+- **M4:** L3 (OpenShell). L2 (per-profile Linux users) is unscheduled, after M4.
 - **M6:** per-account channel bindings with approvals pushed to the requester.
 
 ## Not adopting
@@ -298,7 +298,7 @@ Suggested placement, folded into [Addendum A §8](blueprint-addendum-2026-09.md#
 |---|---|
 | CopilotKit Intelligence (threads, memories, channels) | OpenDots cannot chat without it (`src/server/platform.ts`), and conversation history is stored there, not locally (`docs/SETUP.md`). It is cloud-hosted unless you buy a self-hosting licence and run Kubernetes, Postgres and Redis. That breaks local-first, "no cloud engines forced on users", and the HIPAA/FERPA posture. |
 | CopilotKit Node runtime (`@copilotkit/runtime`) | It would add a second, Node.js server layer. The Praxis Prime core is Python by design ([ARCHITECTURE §23](ARCHITECTURE.md#23-tech-stack)). Pattern 1 uses the open AG-UI events directly instead. See [Frontend decision](#frontend-decision). |
-| `@copilotkit/*` React packages and runtime | [Frontend decision](#frontend-decision). `selfManagedAgents` is labelled an Enterprise Intelligence tier and warns when there is no licence key (`react-core/src/v2/providers/CopilotKitProvider.tsx:515-536`). The threads drawer locks without a licence (`CopilotThreadsDrawer.tsx:247-262`). `@scarf/scarf` phones home from postinstall (`react-core/package.json:91`), and `shared` pulls in Segment and a licence verifier. react-ui v1's dev console POSTs to `api.cloud.copilotkit.ai` on localhost (`console.tsx:103-113`). The transport does not match our WebSocket, ticket, and CSRF gateway, and the dependency tree is heavy. |
+| `@copilotkit/*` React packages and runtime | [Frontend decision](#frontend-decision). `selfManagedAgents` is labelled an Enterprise Intelligence tier and warns when there is no licence key (`packages/react-core/src/v2/providers/CopilotKitProvider.tsx:515-536`). The threads drawer locks without a licence (`packages/react-core/src/v2/components/chat/CopilotThreadsDrawer.tsx:247-262`). `@scarf/scarf` phones home from postinstall (`packages/react-core/package.json:91`), and `shared` pulls in Segment and a licence verifier. react-ui v1's dev console POSTs to `api.cloud.copilotkit.ai` on localhost (`packages/react-ui/src/components/dev-console/console.tsx:103-113`). The transport does not match our WebSocket, ticket, and CSRF gateway, and the dependency tree is heavy. |
 | `copilotkit` PyPI package | It pulls in langchain and langgraph. The Python side uses `ag-ui-protocol` only ([Frontend decision](#frontend-decision)). |
 | A2UI, OpenGenerativeUI, and MCP Apps iframes | They would run arbitrary UI from a model or a tool. [Addendum A §1.4](blueprint-addendum-2026-09.md#14-safety-model-no-arbitrary-js-sanitized-css-only) allows no arbitrary JS. |
 | Cloud "Automatic Learning" and learned-skill delivery | Skills are learned, reviewed and published inside Intelligence (`src/server/learning.ts`). Praxis Prime keeps skills as local `SKILL.md` folders ([SKILLS.md](SKILLS.md)). |
