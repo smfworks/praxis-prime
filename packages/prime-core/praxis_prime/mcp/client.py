@@ -33,7 +33,7 @@ from praxis_prime.mcp.protocol import (
 )
 from praxis_prime.mcp.sandbox import mcp_mount_decision, popen_stdio
 from praxis_prime.mcp.transport import HttpTransport, StdioTransport
-from praxis_prime.sandbox.bwrap import writable_scope_ok
+from praxis_prime.sandbox.bwrap import bwrap_available, writable_scope_ok
 from praxis_prime.tools.registry import Risk
 
 _PAGE_LIMIT = 20
@@ -276,10 +276,14 @@ def _stdio_write(client: McpClient) -> tuple[Path | None, bool]:
     """Return the configured scope and whether this launch may mount it read-write.
 
     No scope means the working directory stays read-only and nobody is asked.
-    ``$HOME`` and the main checkout are not asked: they cannot be a write
-    scope. Any other directory is mounted read-write only after the approval
-    gate allows it.
+    ``$HOME``, the main checkout, and any directory that is or contains an
+    account-data root are not asked: they cannot be a write scope. Any other
+    directory is mounted read-write only after the approval gate allows it.
+    When the sandbox is off or bubblewrap is missing, nothing is mounted, so
+    the gate is not asked.
     """
+    if client.spec.sandbox == "off" or not bwrap_available():
+        return None, False
     raw = client.spec.write_scope.strip()
     if not raw:
         return None, False

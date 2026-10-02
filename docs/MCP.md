@@ -45,7 +45,7 @@ Server names are letters, digits, `_`, and `-`, at most 41 characters, and must 
 | `trust` | `untrusted` (default) or `trusted` |
 | `sandbox` | `bwrap` (default) or `off` |
 | `network` | `off` (default) or `on`. `on` adds `--share-net` inside bubblewrap |
-| `write_scope` | Directory this server may write, after approval. Never `$HOME` or the main checkout. Empty keeps the working directory read-only |
+| `write_scope` | Directory this server may write, after approval. Never `$HOME`, the main checkout, an account-data directory, or a parent of one. Empty keeps the working directory read-only |
 | `env` | Explicit `KEY=VALUE` pairs. Do not put secrets here |
 | `env_allow` | Extra parent environment names to pass. Replaces the global list for this server |
 | `headers` | HTTP headers. `${VAR}` and `${env:VAR}` are filled from the environment or `secrets.env` |
@@ -89,9 +89,9 @@ Write-like names match `write`, `create`, `update`, `delete`, `remove`, `edit`, 
 
 ## Stdio sandbox and environment
 
-When `bwrap` is on `PATH` and `sandbox` is `bwrap`, the child runs under bubblewrap with a cleared environment. Only the allowlist is passed: `PATH`, `LANG`, `LC_ALL`, `LC_CTYPE`, and `TERM`, plus any names in the server's `env_allow`, plus the explicit `env` map. `HOME` is not passed unless you name it. Python commands also get `PYTHONUNBUFFERED=1`. Network stays off unless `network = "on"`. The working directory is mounted read-only. A read-write bind is added only for that server's `write_scope`, and only after the approval gate allows it. The scope is one directory. It is never `$HOME` and never the main checkout. The mount decision is an audit event of kind `mcp_mount`. An unapproved scope leaves the tree read-only.
+When `bwrap` is on `PATH` and `sandbox` is `bwrap`, the child runs under bubblewrap with a cleared environment. Only the allowlist is passed: `PATH`, `LANG`, `LC_ALL`, `LC_CTYPE`, and `TERM`, plus any names in the server's `env_allow`, plus the explicit `env` map. `HOME` is not passed unless you name it. Python commands also get `PYTHONUNBUFFERED=1`. Network stays off unless `network = "on"`. The working directory is mounted read-only. A read-write bind is added only for that server's `write_scope`, and only after the approval gate allows it. The scope is one directory. It is never `$HOME`, never the main checkout, and never an account-data root or a directory that contains one (`accounts.db`, `profiles/`, `backups/`, `audit.db`, `SOUL.md`). A path argument that names account data is not mounted. Every account-data root inside a bind, including the read-only working directory, is covered with a tmpfs. The mount decision is an audit event of kind `mcp_mount`. An unapproved scope leaves the tree read-only.
 
-If bubblewrap is missing, the same allowlist is used and the process is not wrapped. `praxis-prime doctor` warns in that case. A failed bubblewrap start is not retried on the host.
+If bubblewrap is missing, or `sandbox` is `off`, the same allowlist is used and the process is not wrapped. The `mcp_mount` row says `host`. A write scope is not sent to the approval gate, because nothing will be mounted. `praxis-prime doctor` warns when bubblewrap is missing. A failed bubblewrap start is not retried on the host.
 
 ## HTTP auth
 

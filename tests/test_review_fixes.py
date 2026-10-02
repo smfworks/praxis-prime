@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import stat
 import threading
 import time
@@ -1265,7 +1266,7 @@ def test_data_root_honours_an_explicit_data_dir(
     )
     try:
         assert is_secret_path(soul)
-        assert not is_secret_path(xdg_soul)
+        assert is_secret_path(xdg_soul)
     finally:
         runtime.close()
     bind_data_root(None)
@@ -1402,6 +1403,153 @@ def test_closing_one_runtime_keeps_the_other_data_root(
     finally:
         outer.close()
         bind_data_root(None)
+
+
+def test_explicit_data_dir_still_hides_the_xdg_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from praxis_prime.coding.tools import execute_edit_file, execute_grep
+    from praxis_prime.policy.boundary import bind_data_root, release_data_root
+    from praxis_prime.tools.builtin import execute_list_dir, execute_read_file
+
+    home = tmp_path / "home"
+    data = home / ".local" / "share" / "praxis-prime"
+    soul = data / "profiles" / "work" / "SOUL.md"
+    soul.parent.mkdir(parents=True)
+    soul.write_text("SECRET-XSOUL\n", encoding="utf-8")
+    (data / "accounts.db").write_text("argon2$SECRET-XACC\n", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_DATA_HOME", str(home / ".local" / "share"))
+    alt = tmp_path / "alt"
+    alt.mkdir()
+    bind_data_root(None)
+    token = bind_data_root(alt)
+    assert token is not None
+    context = ToolContext(cwd=str(home), cancelled=lambda: False, shell_approved=True)
+    try:
+        with pytest.raises(ReadDenied):
+            execute_read_file(
+                {"path": ".local/share/praxis-prime/accounts.db"},
+                context,
+            )
+        with pytest.raises(ReadDenied):
+            execute_read_file(
+                {"path": ".local/share/praxis-prime/profiles/work/SOUL.md"},
+                context,
+            )
+        listing = execute_list_dir({"path": ".local/share/praxis-prime"}, context)
+        assert "accounts.db" not in listing
+        assert "profiles" not in listing
+        found = execute_grep({"pattern": "SECRET", "path": ".local"}, context)
+        assert "SECRET" not in found
+        with pytest.raises(ValueError, match="secret file"):
+            execute_edit_file(
+                {
+                    "path": ".local/share/praxis-prime/profiles/work/SOUL.md",
+                    "old_string": "SECRET-XSOUL",
+                    "new_string": "PWNED",
+                },
+                context,
+            )
+        assert soul.read_text(encoding="utf-8") == "SECRET-XSOUL\n"
+        outside = home / "soul-hard.md"
+        os.link(soul, outside)
+        assert is_secret_path(outside)
+        with pytest.raises(ReadDenied):
+            execute_read_file({"path": "soul-hard.md"}, context)
+    finally:
+        release_data_root(token)
+        bind_data_root(None)
+
+
+def test_bind_none_from_another_context_keeps_the_process_stack(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from praxis_prime.policy.boundary import _data_root, bind_data_root, release_data_root
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_DATA_HOME", str(home / ".local" / "share"))
+    chosen = tmp_path / "A"
+    chosen.mkdir()
+    bind_data_root(None)
+    token = bind_data_root(chosen)
+    assert token is not None
+    seen: dict[str, str] = {}
+
+    def worker() -> None:
+        root = _data_root()
+        seen["worker"] = "" if root is None else root.name
+
+    def other_runtime() -> None:
+        bind_data_root(None)
+
+    try:
+        thread = threading.Thread(target=worker)
+        thread.start()
+        thread.join(5)
+        assert seen["worker"] == "A"
+        clearing = threading.Thread(target=other_runtime)
+        clearing.start()
+        clearing.join(5)
+        again = threading.Thread(target=worker)
+        again.start()
+        again.join(5)
+        assert seen["worker"] == "A"
+        assert _data_root() == chosen.resolve()
+        bind_data_root(None)
+        assert _data_root() == (home / ".local" / "share" / "praxis-prime").resolve()
+        after = threading.Thread(target=worker)
+        after.start()
+        after.join(5)
+        assert seen["worker"] == "praxis-prime"
+    finally:
+        release_data_root(token)
+        bind_data_root(None)
+
+
+def test_two_account_roots_share_the_inode_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from praxis_prime.policy.boundary import (
+        bind_data_root,
+        clear_data_inode_cache,
+        data_inode_scans,
+        is_secret_path,
+        release_data_root,
+    )
+
+    home = tmp_path / "home"
+    xdg = home / ".local" / "share" / "praxis-prime"
+    (xdg / "profiles" / "work").mkdir(parents=True)
+    xdg_soul = xdg / "profiles" / "work" / "SOUL.md"
+    xdg_soul.write_text("xdg\n", encoding="utf-8")
+    alt = tmp_path / "alt"
+    (alt / "profiles" / "default").mkdir(parents=True)
+    alt_soul = alt / "profiles" / "default" / "SOUL.md"
+    alt_soul.write_text("alt\n", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_DATA_HOME", str(home / ".local" / "share"))
+    note = home / "note.txt"
+    note.write_text("hi\n", encoding="utf-8")
+    bind_data_root(None)
+    clear_data_inode_cache()
+    token = bind_data_root(alt)
+    assert token is not None
+    try:
+        before = data_inode_scans()
+        assert not is_secret_path(note)
+        assert is_secret_path(xdg_soul)
+        assert is_secret_path(alt_soul)
+        scanned = data_inode_scans() - before
+        assert scanned == 2
+        assert not is_secret_path(note)
+        assert data_inode_scans() - before == scanned
+    finally:
+        release_data_root(token)
+        bind_data_root(None)
+        clear_data_inode_cache()
 
 
 def _create_args(name: str, data: Path, config: Path) -> object:

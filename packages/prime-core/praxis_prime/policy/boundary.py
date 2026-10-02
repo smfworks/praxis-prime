@@ -842,9 +842,9 @@ def bind_data_root(path: Path | None) -> int | None:
     ``release_data_root`` drops only the frame it was given, and a second
     runtime does not erase the first. Worker threads that have not bound a
     root read the process stack, so a bind on the main thread is visible
-    inside gateway turns. ``None`` drops this context's frames. When this
-    context had none, it clears the process stack so a leaked bind cannot
-    outlive the caller.
+    inside gateway turns. ``None`` drops this context's frames and follows
+    the XDG path. A context that has not bound a root leaves the process
+    stack alone, so one runtime cannot clear a bind that belongs to another.
     """
     if path is None:
         _reset_data_roots()
@@ -876,6 +876,7 @@ def _push_data_root(path: Path) -> int:
 
 
 def _reset_data_roots() -> None:
+    """Follow the XDG path in this context. Do not clear another context's bind."""
     current = _local_data_roots.get()
     with _data_root_lock:
         if current:
@@ -883,8 +884,6 @@ def _reset_data_roots() -> None:
             _process_data_roots[:] = [
                 item for item in _process_data_roots if item[0] not in tokens
             ]
-        elif current is None:
-            _process_data_roots.clear()
     _local_data_roots.set(())
 
 
@@ -917,12 +916,13 @@ def _data_root() -> Path | None:
 def _is_private_data(path: Path) -> bool:
     """Accounts database, profile trees, backups, and hard links to them.
 
-    A path that cannot be classified is private. ``Path.resolve`` and
-    ``Path.is_file`` on Python 3.14 hide permission errors, so this uses
-    ``os.stat`` / ``os.path.realpath``.
+    Every root ``account_data_present`` considers is checked. ``--data-dir``
+    does not make the default XDG tree readable. A path that cannot be
+    classified is private. ``Path.resolve`` and ``Path.is_file`` on Python
+    3.14 hide permission errors, so this uses ``os.stat`` / ``os.path.realpath``.
     """
-    root = _data_root()
-    if root is None:
+    roots = _account_data_roots()
+    if not roots:
         return True
     if lstat_kind(path) is StatKind.UNREADABLE or stat_kind(path) is StatKind.UNREADABLE:
         return True
@@ -930,14 +930,18 @@ def _is_private_data(path: Path) -> bool:
         resolved = Path(os.path.realpath(path, strict=False))
     except (OSError, RuntimeError, ValueError):
         return True
-    if _private_path(resolved, root):
-        return True
-    inodes, problem = _cached_private_inodes(root)
-    if problem:
-        # The tree was not fully scanned. Path rules above still apply.
-        # Other files stay readable; a hard link past the cap can be missed.
-        return False
-    return _inode_in(resolved, inodes)
+    for root in roots:
+        if _private_path(resolved, root):
+            return True
+    for root in roots:
+        inodes, problem = _cached_private_inodes(root)
+        if problem:
+            # This root was not fully scanned. Path rules above still apply.
+            # A hard link past the cap on this root can be missed.
+            continue
+        if _inode_in(resolved, inodes):
+            return True
+    return False
 
 
 def _private_path(resolved: Path, root: Path) -> bool:
@@ -979,16 +983,16 @@ class _InodeSnapshot:
     problem: str
 
 
-_data_inode_snapshot: _InodeSnapshot | None = None
+_INODE_CACHE_MAX = 8
+_data_inode_snapshots: dict[str, _InodeSnapshot] = {}
 _data_inode_lock = threading.Lock()
 _data_inode_scans = 0
 
 
 def clear_data_inode_cache() -> None:
-    """Drop the cached data-directory inode set. Tests use this."""
-    global _data_inode_snapshot
+    """Drop the cached data-directory inode sets. Tests use this."""
     with _data_inode_lock:
-        _data_inode_snapshot = None
+        _data_inode_snapshots.clear()
 
 
 def data_inode_scans() -> int:
@@ -999,37 +1003,42 @@ def data_inode_scans() -> int:
 
 def _data_scan_problem(path: Path) -> str:
     """Why ``path`` cannot be classified, or empty when it is not in that tree."""
-    root = _data_root()
-    if root is None:
-        return ""
-    _inodes, problem = _cached_private_inodes(root)
-    if not problem:
+    roots = _account_data_roots()
+    if not roots:
         return ""
     try:
         resolved = Path(os.path.realpath(path, strict=False))
     except (OSError, RuntimeError, ValueError):
-        return problem
-    if not _private_path(resolved, root):
-        return ""
-    return problem
+        return "unreadable path"
+    for root in roots:
+        _inodes, problem = _cached_private_inodes(root)
+        if problem and _private_path(resolved, root):
+            return problem
+    return ""
 
 
 def _cached_private_inodes(root: Path) -> tuple[set[tuple[int, int]], str]:
-    """Inodes under profiles and backups, reused while directory mtimes match."""
-    global _data_inode_scans, _data_inode_snapshot
+    """Inodes under profiles and backups, reused while that root's mtimes match.
+
+    Each account-data root has its own slot. Checking the override and the
+    default XDG directory does not throw the other scan away.
+    """
+    global _data_inode_scans
     key = str(root)
     with _data_inode_lock:
-        cached = _data_inode_snapshot
-        if (
-            cached is not None
-            and cached.root == key
-            and cached.stamp
-            and _stamp_matches(cached.stamp)
-        ):
+        cached = _data_inode_snapshots.get(key)
+        if cached is not None and cached.stamp and _stamp_matches(cached.stamp):
+            _data_inode_snapshots.pop(key)
+            _data_inode_snapshots[key] = cached
             return cached.inodes, cached.problem
         _data_inode_scans += 1
         inodes, problem, stamp = _scan_private_inodes(root)
-        _data_inode_snapshot = _InodeSnapshot(key, stamp, inodes, problem)
+        _data_inode_snapshots[key] = _InodeSnapshot(key, stamp, inodes, problem)
+        while len(_data_inode_snapshots) > _INODE_CACHE_MAX:
+            oldest = next(iter(_data_inode_snapshots))
+            if oldest == key:
+                break
+            del _data_inode_snapshots[oldest]
         return inodes, problem
 
 
