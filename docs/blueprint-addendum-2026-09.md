@@ -669,7 +669,7 @@ M0 packs/packaging ─┐
 **OpenClaw and Hermes gaps (2026-10-01):** see [OPENCLAW-HERMES-GAPS.md](OPENCLAW-HERMES-GAPS.md). Ideas only, with no code copied.
 
 - **MVP:** tool search, and the start of smarter approvals ([gaps 6 and 9](OPENCLAW-HERMES-GAPS.md#high-value-gaps)).
-- **M1b / M1 PR 6** per-person workers: one process, folder, secrets, and chat bindings per person, with approvals back to the requester ([gap 1](OPENCLAW-HERMES-GAPS.md#1-real-per-person-isolation)).
+- **M1c / M1 PR 6** per-person workers: one process, folder, secrets, and chat bindings per person, with approvals back to the requester ([gap 1](OPENCLAW-HERMES-GAPS.md#1-real-per-person-isolation)).
 - **M2:** API-key pools with fallback for side tasks, external secret-store pointers, and the start of doctor fixes ([gaps 2, 3, and 7](OPENCLAW-HERMES-GAPS.md#high-value-gaps)).
 - **M4 / M4a:** external secret stores, and isolated code execution ([gaps 3 and 5](OPENCLAW-HERMES-GAPS.md#high-value-gaps)).
 - **M5a:** doctor fixes, a security audit, safe updates, and backup ([gap 7](OPENCLAW-HERMES-GAPS.md#7-doctor-fixes-security-audit-updates-backup-and-recovery)).

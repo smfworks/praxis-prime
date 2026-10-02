@@ -8,7 +8,7 @@ Reviewed commits: OpenClaw `openclaw/openclaw` `0b7d21f`, Hermes Agent `NousRese
 
 [OpenClaw](https://github.com/openclaw/openclaw) and [Hermes Agent](https://github.com/NousResearch/hermes-agent) are both MIT-licensed. Their ideas are free to borrow. Their code can be reused only with attribution, and this plan does not copy any of it.
 
-Two trees inside those repositories are Apache-2.0, not MIT: OpenClaw `skills/skill-creator`, and Hermes `plugins/security-guidance`. Hermes `plugins/security-guidance` is already listed in [THIRD_PARTY.md](../THIRD_PARTY.md). If either tree is ever bundled, that change keeps the Apache-2.0 LICENSE and NOTICE beside the files and adds the row in the same change (see [AGENTS.md](../AGENTS.md), "Reuse rules"). Until then these are ideas only.
+Two trees inside those repositories are Apache-2.0, not MIT: OpenClaw `skills/skill-creator`, and Hermes `plugins/security-guidance`. Hermes `plugins/security-guidance` is already listed in [THIRD_PARTY.md](../THIRD_PARTY.md), and OpenClaw `skills/skill-creator` is also listed there (THIRD_PARTY.md:36). If either tree is ever bundled, that change keeps the Apache-2.0 LICENSE and NOTICE beside the files and adds the row in the same change (see [AGENTS.md](../AGENTS.md), "Reuse rules"). Until then these are ideas only.
 
 The smfworks mirrors are stale: `smfworks/openclaw` sits at `d545f11` (last pushed 19 September 2026), and `smfworks/hermes-agent` at `22c5684`. The commits above are the ones this note is about.
 
@@ -22,7 +22,7 @@ One agent per person. Chat accounts bind to agents, with one-time pairing. Each 
 
 - **Upstream:** OC `docs/concepts/multi-agent.md` and `agent-bindings.md`; HE `user-guide/profiles.md`.
 - **Praxis:** designed ([Addendum A §6](blueprint-addendum-2026-09.md#6-multi-user-and-multi-profile), M1). There are no per-profile workers yet. Not yet planned there: per-profile secrets, chat-account-to-profile binding, approvals routed to the requester, routines that run as a named person, and resource limits. The [per-person agents](OPENDOTS-BORROWED-PATTERNS.md#per-person-agents) note now lists those gaps.
-- **Milestone:** M1, plus M1b for the workers (large). M1b is the existing M1 PR 6 (per-person workers), not a new PR series.
+- **Milestone:** M1, plus M1c for the workers (large). M1c is the existing M1 PR 6 (per-person workers), not a new PR series.
 - **Acceptance criteria:**
   - Each person has a separate worker process, data folder, secrets, and chat bindings.
   - A chat account is bound to that person's agent through one-time pairing.
@@ -99,7 +99,7 @@ Doctor fixes problems and runs a security audit. A safe update command has stabl
 - **Milestone:** M2/M5a (medium).
 - **Acceptance criteria:**
   - `praxis-prime doctor` can fix the problems it knows how to fix, and it can run a security audit.
-  - `praxis-prime` update is a separate command, with a stable channel and a beta channel, and it refuses an update it cannot verify.
+  - `praxis-prime update` is a separate command, with a stable channel and a beta channel, and it refuses an update it cannot verify.
   - `praxis-prime backup` and `praxis-prime restore` round-trip a fixture install.
 
 ### 8. Skill learning lifecycle
@@ -190,7 +190,7 @@ These are explicit requirements, not optional notes. References are copied from 
     - What to do: Praxis plans to reuse the Hermes skills guard, so treat it as advisory only, enforce deny lists where tools are dispatched, and treat compression summaries as untrusted.
     - Disclosure: the advisories say Nous Research didn't respond to the reports, so Praxis should publish its own security policy with a response deadline and GitHub advisories.
 
-The roadmap names these as requirements now: a [SECURITY.md](SECURITY.md) response deadline, no gateway URL or token taken from a link, an owner check on settings-changing chat commands, policy enforced at dispatch and at the sandbox (including an outside harness's built-in tools), compression summaries treated as untrusted, webhook signatures verified before rate-limiting, and CSV formula-injection guards.
+The roadmap names these as requirements now: a [SECURITY.md](../SECURITY.md) response deadline, no gateway URL or token taken from a link, an owner check on settings-changing chat commands, policy enforced at dispatch and at the sandbox (including an outside harness's built-in tools), compression summaries treated as untrusted, webhook signatures verified before rate-limiting, and CSV formula-injection guards.
 
 ## Medium-value gaps
 
