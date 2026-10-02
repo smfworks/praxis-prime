@@ -73,11 +73,11 @@ With `XDG_CONFIG_HOME` unset, those paths are under `~/.config/praxis-prime/`. E
 
 ## Feature overview
 
-| Area | Plan | In this skeleton |
+| Area | Plan | In this tree |
 |---|---|---|
 | Governed agent loop | Perceive, plan, govern, act, reflect. Hermes prompt-cache invariants. OpenClaw queue modes. | Plan → check → act, streaming, steer/cancel, approval spine. [§5](docs/ARCHITECTURE.md) |
-| Local Decision Engine | Our own cascade: rules, ONNX classifiers, calibrated small-LLM judges, then a jury. Wire shape similar to a public decision API. No hosted TypeSafe service. | Package stub. [§7](docs/ARCHITECTURE.md) |
-| Compliance dials | HIPAA, FERPA, COPPA, GDPR, 13 Praxis state packs, a new North Carolina pack, then SOC 2, EU AI Act, CCPA, PCI, NIST AI RMF, and ISO 42001. Off, monitor, or enforce. **Default off.** | Catalog and config defaults. No enforcement. [§17](docs/ARCHITECTURE.md) |
+| Local Decision Engine | Our own cascade: rules, ONNX classifiers, calibrated small-LLM judges, then a jury. Wire shape similar to a public decision API. No hosted TypeSafe service. | Local cascade is running: rules, a keyword classifier, one local judge, a jury, then a larger local model or a human. `praxis-prime decide` and `POST /v1/decide`. ONNX weights are not loaded. No hosted decision service. [§7](docs/ARCHITECTURE.md), [DECISION-ENGINE.md](docs/DECISION-ENGINE.md) |
+| Compliance dials | HIPAA, FERPA, COPPA, GDPR, 13 Praxis state packs, a new North Carolina pack, then SOC 2, EU AI Act, CCPA, PCI, NIST AI RMF, and ISO 42001. Off, monitor, or enforce. **Default off.** | Catalog, bundled packs, and evaluation are in. Off adds nothing. Monitor writes an audit warning and lets the action run. Enforce may only tighten a verdict (ask, deny, redact, pin providers, or deny egress). A fresh config stays off, so those rules do not run. The per-dial hook objects are still placeholders. [§17](docs/ARCHITECTURE.md), [COMPLIANCE.md](docs/COMPLIANCE.md) |
 | Agent swarms | Workers, a blackboard, and the Swarm 2.0 personas as jury lenses. | Package stub. [§15](docs/ARCHITECTURE.md) |
 | Coding-agent mode | Worktrees, diffs, tests, and `AGENTS.md` / `CLAUDE.md` / `.cursor` rules. | `praxis-prime code` and `/code`: worktrees, instruction files, hooks, diff review. No embedding index yet. [§14](docs/ARCHITECTURE.md) |
 | Gateway | One typed WebSocket protocol for CLI, TUI, web, desktop, channels, and nodes. Loopback only. | Loopback HTTP and WebSocket, token auth, Telegram channel. TUI and web UI are not served yet. [§4](docs/ARCHITECTURE.md) |
@@ -147,7 +147,7 @@ Condensed from [ARCHITECTURE §29](docs/ARCHITECTURE.md) and [Blueprint Addendum
 | # | Milestone | Phase |
 |---|---|---|
 | **M0** | Packs ship in the wheel. Legacy `pack.json` loader ignores `ollama-cloud` model pins and pack dashboard JavaScript. | MVP completion (v0.2–0.3) |
-| **M1** | Web shell, accounts, and profiles. Loopback only. | MVP completion (v0.2–0.3) |
+| **M1** | Web shell, accounts, and profiles. Loopback only. **M1a** accounts, roles, and profiles (merged). **M1b** passkeys + TOTP. **M1c** per-profile workers and supervisor. **M1d** SPA (shell, profile picker, admin console). **M1e** OIDC. | MVP completion (v0.2–0.3) |
 | **M2** | First-run wizard. Remove the hard-coded Ollama default. | MVP completion (v0.2–0.3) |
 | **M3** | Theme packages and seven built-in themes. | MVP completion (v0.2–0.3) |
 | **M4** | NVIDIA OpenShell for regulated installs, with a visible bubblewrap/Podman fallback. | v0.5 |
