@@ -652,11 +652,19 @@ M0 packs/packaging ─┐
 - Everything else in §29 (Jury, Jarvis, swarm, etc.) is unchanged but sequenced after M3.
 
 **Patterns borrowed from OpenDots (2026-10-01):** see [OPENDOTS-BORROWED-PATTERNS.md](OPENDOTS-BORROWED-PATTERNS.md). These are ideas only, with no code copied. They are folded into the milestones above as follows:
-- **M1**, PR (6) per-profile workers (M1c): live revocation of in-flight runs and leased routine runs (pattern 3); per-worker derived credentials (pattern 6).
-- **M1**, PRs (1) and (7) SPA shell (M1d): AG-UI event types on the gateway stream (pattern 1); approval cards decided once per tool call (pattern 2); extra gateway request checks (pattern 7); optional revision-checked autosave for the canvas (pattern 9).
+- **M1**, PR (6) per-profile workers (M1c): live revocation of in-flight runs and leased routine runs (pattern 3); per-worker derived credentials (pattern 6); grants re-checked on every tool call, with a one-time migration (pattern 11); upstream response hardening (pattern 12).
+- **M1**, PRs (1) and (7) SPA shell (M1d): AG-UI event types on the gateway stream (pattern 1); approval cards decided once per tool call (pattern 2); extra gateway request checks (pattern 7); optional revision-checked autosave for the canvas (pattern 9); a route allowlist whose ids agree across path, body, and query (pattern 10).
 - **M2:** the "setup needed" screen lists exactly what is missing (pattern 8).
-- **M4:** human takeover and handback of the sandboxed browser or desktop, with a redacted activity log (pattern 5); derived sandbox credentials (pattern 6); snapshot-bound element actions (pattern 4), which start in the current browser tool.
-- **M6:** approval-card idempotency on mobile sheets (pattern 2); re-check the gateway request checks for remote exposure (pattern 7).
+- **M4:** human takeover and handback of the sandboxed browser or desktop, with a redacted activity log (pattern 5); derived sandbox credentials (pattern 6); snapshot-bound element actions (pattern 4), which start in the current browser tool; upstream response hardening (pattern 12).
+- **M6:** approval-card idempotency on mobile sheets (pattern 2); re-check the gateway request checks for remote exposure (pattern 7); re-check the route allowlist and session-id agreement (pattern 10).
+
+**Per-person agents** (one agent per individual): see [Per-person agents](OPENDOTS-BORROWED-PATTERNS.md#per-person-agents).
+
+- **M1**, PRs (4) and (5): a personal profile, an admin boundary with break-glass, requester-routed approvals, and per-session visibility ([Per-person agents](OPENDOTS-BORROWED-PATTERNS.md#per-person-agents)).
+- **M1**, PR (6): a supervisor, run-as routines, revocation (pattern 3), per-worker credentials with a generation counter, and a systemd slice (`MemoryMax`, `CPUQuota`, `TasksMax`) ([Per-person agents](OPENDOTS-BORROWED-PATTERNS.md#per-person-agents)).
+- **M2:** per-profile provider keys ([Per-person agents](OPENDOTS-BORROWED-PATTERNS.md#per-person-agents)).
+- **M4:** L3 (OpenShell). L2 (per-profile Linux users) is unscheduled, after M4 ([Per-person agents](OPENDOTS-BORROWED-PATTERNS.md#per-person-agents)).
+- **M6:** per-account channel bindings, with approvals pushed to the requester ([Per-person agents](OPENDOTS-BORROWED-PATTERNS.md#per-person-agents)).
 
 ---
 
