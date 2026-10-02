@@ -22,6 +22,7 @@ import os
 import shutil
 import signal
 import subprocess
+import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -29,6 +30,26 @@ from pathlib import Path
 
 class SandboxError(RuntimeError):
     """The sandbox could not run the command. The host shell was not used."""
+
+
+_profile_lock = threading.Lock()
+_bound_profile = ""
+
+
+def bind_profile(profile: str | None) -> None:
+    """Remember the runtime's profile id for worktree bind checks.
+
+    ``None`` or ``""`` means no profile is bound. The shell sandbox uses
+    this to refuse a worktree whose profile segment is someone else's.
+    """
+    global _bound_profile
+    with _profile_lock:
+        _bound_profile = profile or ""
+
+
+def bound_profile() -> str:
+    with _profile_lock:
+        return _bound_profile
 
 
 @dataclass(frozen=True, slots=True)
@@ -264,11 +285,14 @@ def _refuse_bind_inside_data(mount: Path, data: Path) -> None:
 
     The source is already resolved, so ``worktrees/lnk -> ../profiles`` is
     the profile tree and is refused. A coding task may be bound only when
-    it is one worktree: ``worktrees/<repo>/<task>`` or
-    ``worktrees/<profile>/<repo>/<task>``. ``worktrees/`` itself, a repo
-    directory that holds several tasks, and every other path inside the
-    data directory are refused. A tmpfs cannot hide a directory from a
-    mount that is already inside it.
+    it is one git worktree. With no profile bound and no ``profiles``
+    directory, that is ``worktrees/<repo>/<task>``. Once a profile is
+    bound or ``profiles/`` exists, it is ``worktrees/<profile>/<repo>/<task>``,
+    and a bound profile must match the path. ``worktrees/`` itself, a repo
+    directory that holds several tasks, a host-planted ``.git`` on a
+    shorter path, and every other path inside the data directory are
+    refused. A tmpfs cannot hide a directory from a mount that is already
+    inside it.
     """
     relative = _path_inside(mount, data)
     if relative is None:
@@ -279,13 +303,35 @@ def _refuse_bind_inside_data(mount: Path, data: Path) -> None:
 
 
 def _is_task_worktree(mount: Path, relative: Path) -> bool:
-    """True for one git worktree, not ``worktrees/`` or a parent of several."""
+    """True for one git worktree, not ``worktrees/`` or a parent of several.
+
+    Three segments (``worktrees/<repo>/<task>``) are a worktree only when
+    no profile is bound and the data directory has no ``profiles`` folder.
+    Otherwise the path needs four segments and, when a profile is bound,
+    the second segment has to be that profile. A ``.git`` planted at
+    ``worktrees/<profile>/<repo>`` is three segments and is not a task.
+    """
     parts = relative.parts
-    if not parts or parts[0] != "worktrees" or len(parts) not in {3, 4}:
+    if not parts or parts[0] != "worktrees":
         return False
     from praxis_prime.statfile import StatKind, lstat_kind
 
-    return lstat_kind(mount / ".git") in {StatKind.FILE, StatKind.DIR}
+    if lstat_kind(mount / ".git") not in {StatKind.FILE, StatKind.DIR}:
+        return False
+    try:
+        data = mount.parents[len(parts) - 1]
+    except IndexError:
+        return False
+    profile = bound_profile()
+    profiles = lstat_kind(data / "profiles")
+    profiles_present = profiles in {StatKind.DIR, StatKind.SYMLINK, StatKind.UNREADABLE}
+    if profile or profiles_present:
+        if len(parts) != 4:
+            return False
+        if profile and parts[1] != profile:
+            return False
+        return True
+    return len(parts) == 3
 
 
 def _path_inside(child: Path, parent: Path) -> Path | None:

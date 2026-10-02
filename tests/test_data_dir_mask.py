@@ -251,7 +251,17 @@ def test_bind_inside_the_data_dir_is_refused(
             project,
             ro_binds=[(str(private / "profiles"), "/opt/profiles")],
         )
-    worktree = private / "worktrees" / "repo" / "task"
+    planted = private / "worktrees" / "work" / "repo"
+    planted.mkdir(parents=True)
+    (planted / ".git").write_text("gitdir: /tmp/unused\n", encoding="utf-8")
+    with pytest.raises(SandboxError, match="inside the account data directory"):
+        build_bwrap_argv("echo hi", planted)
+    legacy = private / "worktrees" / "repo" / "task"
+    legacy.mkdir(parents=True)
+    (legacy / ".git").write_text("gitdir: /tmp/unused\n", encoding="utf-8")
+    with pytest.raises(SandboxError, match="inside the account data directory"):
+        build_bwrap_argv("echo hi", legacy)
+    worktree = private / "worktrees" / "work" / "repo" / "task"
     worktree.mkdir(parents=True)
     (worktree / ".git").write_text("gitdir: /tmp/unused\n", encoding="utf-8")
     argv = build_bwrap_argv("echo hi", worktree)
@@ -286,15 +296,18 @@ def test_cd_inside_a_worktree_is_allowed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     home, private = _tree(tmp_path, monkeypatch)
-    worktree = private / "worktrees" / "repo" / "task"
+    worktree = private / "worktrees" / "work" / "repo" / "task"
     source = worktree / "src"
     source.mkdir(parents=True)
     (source / "m.py").write_text("x=1\n", encoding="utf-8")
     (worktree / ".git").write_text("gitdir: /tmp/unused\n", encoding="utf-8")
     assert not private_data_command("cd src && cat m.py", worktree)
     assert not private_data_command("cd src; cat m.py", worktree)
+    assert not private_data_command("cd src\ncat m.py", worktree)
+    assert not private_data_command(f"cat {worktree}/src/m.py", worktree)
     assert private_data_command("cd .. && cat src/m.py", worktree)
-    assert private_data_command("cd ../../profiles/work && cat SOUL.md", worktree)
+    assert private_data_command("cd ../../../profiles/work && cat SOUL.md", worktree)
+    assert private_data_command(f"cat {worktree}/src/m.py {private}/accounts.db", worktree)
     if not bwrap_available():
         return
     context = ToolContext(
