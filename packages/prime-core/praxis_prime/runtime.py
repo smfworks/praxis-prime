@@ -64,6 +64,7 @@ class Runtime:
     tool_policy: ToolAllowlist | None = None
     profile_id: str = ""
     data_root_token: int | None = None
+    profile_token: int | None = None
 
     def close(self) -> None:
         if self.mcp is not None:
@@ -79,6 +80,12 @@ class Runtime:
             from praxis_prime.policy.boundary import release_data_root
 
             release_data_root(token)
+        profile_token = self.profile_token
+        self.profile_token = None
+        if profile_token is not None:
+            from praxis_prime.sandbox.bwrap import release_profile
+
+            release_profile(profile_token)
 
     def set_model(self, spec: str) -> str:
         ref = parse_model_spec(spec)
@@ -275,10 +282,12 @@ def build_runtime(
     if built.mcp is not None and layout.allowlist is not None:
         built.mcp.allowed_servers = layout.allowlist.mcp
     from praxis_prime.policy.boundary import bind_data_root
+    from praxis_prime.sandbox.bwrap import bind_profile
 
     built.data_root_token = bind_data_root(
         Path(data_path).parent if data_path is not None else None
     )
+    built.profile_token = bind_profile(layout.profile_id or None)
     return built
 
 

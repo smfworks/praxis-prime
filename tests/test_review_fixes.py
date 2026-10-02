@@ -1533,6 +1533,10 @@ def test_two_account_roots_share_the_inode_cache(
     monkeypatch.setenv("XDG_DATA_HOME", str(home / ".local" / "share"))
     note = home / "note.txt"
     note.write_text("hi\n", encoding="utf-8")
+    stale = time.time() - 30
+    for root in (xdg, alt):
+        for directory, _subdirs, _files in os.walk(root):
+            os.utime(directory, (stale, stale))
     bind_data_root(None)
     clear_data_inode_cache()
     token = bind_data_root(alt)

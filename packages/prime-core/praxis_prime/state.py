@@ -47,6 +47,9 @@ def db_lock_path(path: Path) -> Path:
     return Path(f"{path}.lock")
 
 
+_LOCK_ATTEMPTS = 8
+
+
 def _open_lock_fd(db_path: Path) -> int:
     lock = db_lock_path(db_path)
     lock.parent.mkdir(parents=True, exist_ok=True)
@@ -56,25 +59,92 @@ def _open_lock_fd(db_path: Path) -> int:
     return os.open(lock, flags, 0o600)
 
 
+def _open_dir_fd(directory: Path) -> int:
+    directory.mkdir(parents=True, exist_ok=True)
+    flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        flags |= os.O_DIRECTORY
+    return os.open(directory, flags)
+
+
+def _fd_is_path(fd: int, path: Path) -> bool:
+    """True when ``fd`` still names the inode at ``path``."""
+    try:
+        held = os.fstat(fd)
+        current = os.lstat(path)
+    except OSError:
+        return False
+    return (held.st_dev, held.st_ino) == (current.st_dev, current.st_ino)
+
+
+def _close_fd(fd: int) -> None:
+    if fd < 0:
+        return
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+
+
+def _acquire_db_lock(db_path: Path, *, exclusive: bool) -> list[int]:
+    """Lock the sidecar and its parent directory. Caller closes both fds.
+
+    The flock is on the sidecar's inode. Replacing that file with
+    unlink and create would let a new opener lock a different inode and
+    migration would no longer see the holder. The opener retries until
+    ``fstat`` matches ``lstat`` of the path, and both sides flock the
+    parent directory so a replacement cannot drop the migration lock
+    while a holder remains.
+
+    A shared opener takes the file descriptor first and the directory
+    lock only after ``_open_lock_fd`` returns. An exclusive opener takes
+    the directory first. Two shared locks do not block each other.
+    """
+    lock = db_lock_path(db_path)
+    mode = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
+    flag = mode | fcntl.LOCK_NB
+    for _attempt in range(_LOCK_ATTEMPTS):
+        file_fd = -1
+        dir_fd = -1
+        try:
+            if exclusive:
+                dir_fd = _open_dir_fd(lock.parent)
+                fcntl.flock(dir_fd, flag)
+                file_fd = _open_lock_fd(db_path)
+                fcntl.flock(file_fd, flag)
+            else:
+                file_fd = _open_lock_fd(db_path)
+                dir_fd = _open_dir_fd(lock.parent)
+                fcntl.flock(dir_fd, flag)
+                fcntl.flock(file_fd, flag)
+        except BlockingIOError:
+            _close_fd(file_fd)
+            _close_fd(dir_fd)
+            if exclusive:
+                raise DatabaseBusy(db_path) from None
+            raise MigrationInProgress("migration in progress") from None
+        except OSError:
+            _close_fd(file_fd)
+            _close_fd(dir_fd)
+            raise
+        if _fd_is_path(file_fd, lock):
+            return [dir_fd, file_fd]
+        _close_fd(file_fd)
+        _close_fd(dir_fd)
+    raise MigrationInProgress("database lock changed while opening")
+
+
 def acquire_exclusive_db_locks(paths: list[Path]) -> list[int]:
     """Non-blocking exclusive locks. The caller closes every returned fd.
 
     A shared lock from ``StateDB`` in another process makes this raise
-    ``DatabaseBusy`` and drops any locks already taken.
+    ``DatabaseBusy`` and drops any locks already taken. Each database
+    contributes its parent-directory fd and its sidecar fd.
     """
     held: list[int] = []
     try:
         for db_path in paths:
-            fd = _open_lock_fd(db_path)
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                os.close(fd)
-                raise DatabaseBusy(db_path) from None
-            except OSError:
-                os.close(fd)
-                raise
-            held.append(fd)
+            held.extend(_acquire_db_lock(db_path, exclusive=True))
     except Exception:
         release_db_locks(held)
         raise
@@ -93,6 +163,66 @@ def release_db_locks(fds: list[int]) -> None:
             os.close(fd)
         except OSError:
             pass
+
+
+def refuse_misplaced_database(path: Path) -> None:
+    """Refuse ``<account-root>/profiles/prime.db``, or an illegal profile id.
+
+    ``--data-dir <data>/profiles`` would otherwise create
+    ``profiles/prime.db`` beside the real profile folders. A data directory
+    that is itself named ``profiles``, and is not that folder inside an
+    account root, is a normal data directory. A folder such as
+    ``profiles/Bad_Name`` is not a profile id and must not open without
+    profile scoping.
+    """
+    candidate = Path(path)
+    if candidate.name != DB_FILENAME:
+        return
+    parent = candidate.parent
+    if parent.name == "profiles" and _profiles_tree_inside_account_root(parent):
+        raise ValueError(
+            "refusing to use a profiles directory as the data directory; "
+            "pass the account data root"
+        )
+    if parent.parent.name != "profiles":
+        return
+    from praxis_prime.profiles.ids import profile_id
+
+    if profile_id(parent.name) is None:
+        raise ValueError(f"invalid profile id {parent.name!r}")
+
+
+def _profiles_tree_inside_account_root(profiles_dir: Path) -> bool:
+    """True when ``profiles_dir`` is the profile tree of an account root.
+
+    A directory that is merely named ``profiles`` is not that tree. The
+    default XDG data directory counts even before it holds files, and so
+    does a parent that already has account data or profile folders.
+    """
+    account = profiles_dir.parent
+    try:
+        if account.resolve() == Path(data_dir()).resolve():
+            return True
+    except (OSError, RuntimeError, ValueError):
+        return True
+    for name in ("accounts.db", "audit.db", "backups", "SOUL.md", "prime.db"):
+        if _path_exists(account / name):
+            return True
+    try:
+        children = list(profiles_dir.iterdir())
+    except OSError:
+        return True
+    from praxis_prime.profiles.ids import profile_id
+
+    return any(child.is_dir() and profile_id(child.name) is not None for child in children)
+
+
+def _path_exists(path: Path) -> bool:
+    try:
+        os.lstat(path)
+    except OSError:
+        return False
+    return True
 
 
 def default_db_path(env: Mapping[str, str] | None = None) -> Path:
@@ -145,29 +275,27 @@ def _legacy_path_closed(path: Path, root: Path) -> bool:
 class StateDB:
     """One WAL connection and the schema for sessions plus the audit chain.
 
-    The process holds a shared flock on ``<path>.lock`` until ``close``.
-    The lock is non-blocking: an exclusive migration lock fails the open
-    with ``migration in progress`` instead of waiting and then creating a
-    new file at a path chosen before the move. Migration takes that file
-    exclusively and refuses when it is held.
+    The process holds a shared flock on ``<path>.lock`` and on the parent
+    directory until ``close``. The lock is non-blocking: an exclusive
+    migration lock fails the open with ``migration in progress`` instead
+    of waiting and then creating a new file at a path chosen before the
+    move. Migration takes that file exclusively and refuses when it is held.
 
     ``allow_during_migration`` is only for ``create_profile`` while the
-    move itself is creating ``profiles/default/prime.db``.
+    move itself is creating ``profiles/default/prime.db``. Callers other
+    than that move leave it false.
     """
 
     def __init__(self, path: Path, *, allow_during_migration: bool = False) -> None:
         self.path = Path(path)
-        self._lock_fd = -1
+        self._lock_fds: list[int] = []
+        refuse_misplaced_database(self.path)
         if not allow_during_migration:
             refuse_if_migrating(self.path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._lock_fd = _open_lock_fd(self.path)
+        self._lock_fds = _acquire_db_lock(self.path, exclusive=False)
         conn: sqlite3.Connection | None = None
         try:
-            try:
-                fcntl.flock(self._lock_fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
-            except BlockingIOError:
-                raise MigrationInProgress("migration in progress") from None
             if not allow_during_migration:
                 refuse_if_migrating(self.path)
             conn = sqlite3.connect(self.path, check_same_thread=False)
@@ -329,15 +457,6 @@ class StateDB:
         self._release_lock()
 
     def _release_lock(self) -> None:
-        fd = self._lock_fd
-        self._lock_fd = -1
-        if fd < 0:
-            return
-        try:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-        except OSError:
-            pass
-        try:
-            os.close(fd)
-        except OSError:
-            pass
+        fds = self._lock_fds
+        self._lock_fds = []
+        release_db_locks(fds)

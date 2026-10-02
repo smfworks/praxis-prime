@@ -94,8 +94,19 @@ def profile_allowlist(data_root: Path, profile: str) -> ToolAllowlist:
     return effective_allowlist(load_org_policy(data_root), home.layer())
 
 
-def create_profile(data_root: Path, name: str, *, display_name: str = "") -> ProfileHome:
-    """Create an empty profile. Fails when the id is illegal or already present."""
+def create_profile(
+    data_root: Path,
+    name: str,
+    *,
+    display_name: str = "",
+    allow_during_migration: bool = False,
+) -> ProfileHome:
+    """Create an empty profile. Fails when the id is illegal or already present.
+
+    ``allow_during_migration`` is true only for the move that is creating
+    the default profile while ``.migration.lock`` exists. Every other
+    caller leaves it false and is refused while that lock is present.
+    """
     checked = profile_id(name)
     if checked is None:
         raise ValueError("profile id must be 1 to 64 characters: a-z, 0-9, hyphen")
@@ -121,7 +132,7 @@ def create_profile(data_root: Path, name: str, *, display_name: str = "") -> Pro
     _write(home.config_path, text)
     if lstat_kind(home.soul_path) is StatKind.MISSING:
         _write(home.soul_path, _DEFAULT_SOUL)
-    db = StateDB(home.db_path, allow_during_migration=True)
+    db = StateDB(home.db_path, allow_during_migration=allow_during_migration)
     db.close()
     tighten_file(home.db_path)
     return home
@@ -177,6 +188,10 @@ def resolve_runtime_layout(
     ``profiles/<id>/prime.db`` keeps that profile. Any other explicit
     database path stays put.
     """
+    if data_file is not None:
+        from praxis_prime.state import refuse_misplaced_database
+
+        refuse_misplaced_database(data_file)
     if profile:
         checked = profile_id(profile)
         if checked is None:
@@ -205,10 +220,17 @@ def _layout_for_file(data_file: Path) -> RuntimeLayout:
 
 
 def _profile_owning(path: Path, root: Path) -> str | None:
-    """Profile id when ``path`` is ``<root>/profiles/<id>/prime.db``."""
+    """Profile id when ``path`` is ``<root>/profiles/<id>/prime.db``.
+
+    An invalid id under ``profiles/`` is refused. Opening it used to skip
+    profile scoping and treat the file as an ordinary database.
+    """
     if path.name != DB_FILENAME or path.parent.parent != root / "profiles":
         return None
-    return profile_id(path.parent.name)
+    checked = profile_id(path.parent.name)
+    if checked is None:
+        raise ValueError(f"invalid profile id {path.parent.name!r}")
+    return checked
 
 
 def _default_layout(root: Path) -> RuntimeLayout:

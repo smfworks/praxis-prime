@@ -18,10 +18,12 @@ unsandboxed run.
 
 from __future__ import annotations
 
+import contextvars
 import os
 import shutil
 import signal
 import subprocess
+import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -29,6 +31,79 @@ from pathlib import Path
 
 class SandboxError(RuntimeError):
     """The sandbox could not run the command. The host shell was not used."""
+
+
+_profile_lock = threading.Lock()
+_process_profiles: list[tuple[int, str]] = []
+_next_profile_token = 0
+# None: this context has not bound a profile, so read the process stack.
+# (): this context explicitly has no profile.
+# A non-empty tuple is this context's stack. The last frame wins.
+_local_profiles: contextvars.ContextVar[tuple[tuple[int, str], ...] | None] = (
+    contextvars.ContextVar("praxis_prime_profile", default=None)
+)
+
+
+def bind_profile(profile: str | None) -> int | None:
+    """Bind ``profile`` for this context. ``None`` or ``""`` clears it here.
+
+    The binding is a stack, matching ``bind_data_root``. ``release_profile``
+    drops only the frame it was given. Worker threads that have not bound a
+    profile read the process stack. A context that has not bound a profile
+    does not clear another runtime's stack.
+    """
+    if not profile:
+        _reset_profiles()
+        return None
+    return _push_profile(profile)
+
+
+def release_profile(token: int) -> None:
+    """Drop the frame ``bind_profile`` returned. Other frames stay."""
+    with _profile_lock:
+        _process_profiles[:] = [item for item in _process_profiles if item[0] != token]
+    current = _local_profiles.get()
+    if not current:
+        return
+    remaining = tuple(item for item in current if item[0] != token)
+    _local_profiles.set(remaining if remaining else None)
+
+
+def bound_profile() -> str:
+    """Profile id for this context, or the process stack when this context has not bound one."""
+    current = _local_profiles.get()
+    if current is not None:
+        if not current:
+            return ""
+        return current[-1][1]
+    with _profile_lock:
+        if not _process_profiles:
+            return ""
+        return _process_profiles[-1][1]
+
+
+def _push_profile(profile: str) -> int:
+    global _next_profile_token
+    with _profile_lock:
+        _next_profile_token += 1
+        token = _next_profile_token
+        _process_profiles.append((token, profile))
+    current = _local_profiles.get()
+    frames = () if current is None else current
+    _local_profiles.set((*frames, (token, profile)))
+    return token
+
+
+def _reset_profiles() -> None:
+    """Clear this context's profile. Leave another context's bind on the process stack."""
+    current = _local_profiles.get()
+    with _profile_lock:
+        if current:
+            tokens = {token for token, _profile in current}
+            _process_profiles[:] = [
+                item for item in _process_profiles if item[0] not in tokens
+            ]
+    _local_profiles.set(())
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,13 +235,14 @@ def build_bwrap_argv(
 def _data_dir_mask(mounts: list[tuple[Path, str]]) -> list[str]:
     """Hide every account-data root a bind mount contains.
 
-    A later ``--tmpfs`` covers that path inside the sandbox, so no command
-    string can read profiles, backups, ``accounts.db``, or ``audit.db``.
-    Containment is by real path and by ``(st_dev, st_ino)``, so a
-    bind-mount alias of a parent is masked too. A bind that sits inside a
-    data directory is refused. ``pushd`` and ``popd`` are not tracked by
-    the command denylist; this mask is the control that hides those
-    directories. Every root ``account_data_present`` considers is masked,
+    A later ``--tmpfs`` covers that directory path inside the sandbox.
+    Containment of the directory is by real path and by ``(st_dev, st_ino)``,
+    so a bind-mount alias of a parent is masked too. A hard link of a file
+    from that directory, planted outside the mount, is not covered, and the
+    command walk does not refuse every such read before bubblewrap runs.
+    A bind that sits inside a data directory is refused. ``pushd`` and
+    ``popd`` are not tracked. Every root ``account_data_present`` considers
+    is masked,
     including the default XDG tree when ``--data-dir`` points somewhere
     else. A root that is not on any mount is left alone.
     """
@@ -264,11 +340,14 @@ def _refuse_bind_inside_data(mount: Path, data: Path) -> None:
 
     The source is already resolved, so ``worktrees/lnk -> ../profiles`` is
     the profile tree and is refused. A coding task may be bound only when
-    it is one worktree: ``worktrees/<repo>/<task>`` or
-    ``worktrees/<profile>/<repo>/<task>``. ``worktrees/`` itself, a repo
-    directory that holds several tasks, and every other path inside the
-    data directory are refused. A tmpfs cannot hide a directory from a
-    mount that is already inside it.
+    it is one git worktree. With no profile bound and no ``profiles``
+    directory, that is ``worktrees/<repo>/<task>``. Once a profile is
+    bound or ``profiles/`` exists, it is ``worktrees/<profile>/<repo>/<task>``,
+    and a bound profile must match the path. ``worktrees/`` itself, a repo
+    directory that holds several tasks, a host-planted ``.git`` on a
+    shorter path, and every other path inside the data directory are
+    refused. A tmpfs cannot hide a directory from a mount that is already
+    inside it.
     """
     relative = _path_inside(mount, data)
     if relative is None:
@@ -279,13 +358,35 @@ def _refuse_bind_inside_data(mount: Path, data: Path) -> None:
 
 
 def _is_task_worktree(mount: Path, relative: Path) -> bool:
-    """True for one git worktree, not ``worktrees/`` or a parent of several."""
+    """True for one git worktree, not ``worktrees/`` or a parent of several.
+
+    Three segments (``worktrees/<repo>/<task>``) are a worktree only when
+    no profile is bound and the data directory has no ``profiles`` folder.
+    Otherwise the path needs four segments and, when a profile is bound,
+    the second segment has to be that profile. A ``.git`` planted at
+    ``worktrees/<profile>/<repo>`` is three segments and is not a task.
+    """
     parts = relative.parts
-    if not parts or parts[0] != "worktrees" or len(parts) not in {3, 4}:
+    if not parts or parts[0] != "worktrees":
         return False
     from praxis_prime.statfile import StatKind, lstat_kind
 
-    return lstat_kind(mount / ".git") in {StatKind.FILE, StatKind.DIR}
+    if lstat_kind(mount / ".git") not in {StatKind.FILE, StatKind.DIR}:
+        return False
+    try:
+        data = mount.parents[len(parts) - 1]
+    except IndexError:
+        return False
+    profile = bound_profile()
+    profiles = lstat_kind(data / "profiles")
+    profiles_present = profiles in {StatKind.DIR, StatKind.SYMLINK, StatKind.UNREADABLE}
+    if profile or profiles_present:
+        if len(parts) != 4:
+            return False
+        if profile and parts[1] != profile:
+            return False
+        return True
+    return len(parts) == 3
 
 
 def _path_inside(child: Path, parent: Path) -> Path | None:

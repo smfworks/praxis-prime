@@ -225,8 +225,13 @@ def _lock_is_stale(path: Path) -> bool:
         return True
     if not _pid_alive(pid):
         return True
+    # A live pid with no start time was written when ``/proc`` had no
+    # starttime. It is not stale; ``--force`` is what replaces it.
+    # A dead pid-only lock stays stale. A mismatched start time stays stale.
+    if start is None:
+        return False
     current = _process_starttime(pid)
-    if current is None or start is None or current != start:
+    if current is None or current != start:
         return True
     return False
 
@@ -383,7 +388,12 @@ def _migrate_holding_locks(
         _copy_skills(config_dir, home)
         _apply_config_dials(config_dir, home)
     else:
-        create_profile(root, "default", display_name="Default")
+        create_profile(
+            root,
+            "default",
+            display_name="Default",
+            allow_during_migration=True,
+        )
         _copy_skills(config_dir, home)
         _apply_config_dials(config_dir, home)
     _write_marker(marker, "default", backup_rel, owner_account)

@@ -55,6 +55,11 @@ def test_inode_cap_does_not_call_every_file_secret(
     for index in range(12):
         os.close(os.open(folder / f"f{index}", os.O_CREAT | os.O_WRONLY, 0o600))
     (home / "hello.txt").write_text("hi\n", encoding="utf-8")
+    # A directory modified in the last two seconds is not cached. This tree
+    # is quiet, so the walk is reused.
+    stale = time.time() - 30
+    for directory, _subdirs, _files in os.walk(private):
+        os.utime(directory, (stale, stale))
     bind_data_root(None)
     clear_data_inode_cache()
     context = ToolContext(cwd=str(home), cancelled=lambda: False)

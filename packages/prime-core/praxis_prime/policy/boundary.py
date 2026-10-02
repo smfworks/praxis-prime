@@ -26,6 +26,7 @@ import socket
 import ssl
 import stat
 import threading
+import time
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -725,27 +726,37 @@ def private_data_command(command: str, workspace: Path) -> bool:
     """True when a shell command names account or profile data.
 
     Quotes are parsed with ``shlex`` and ``punctuation_chars``, so ``;`` and
-    ``&&`` split even when they are not surrounded by spaces. ``cd`` changes
-    the directory later tokens are judged against, and globs are expanded on
-    the filesystem. A ``cd`` whose target stays inside ``workspace`` is
-    allowed, including a coding worktree that lives under the data directory.
-    A ``cd`` that leaves that workspace and enters the data directory is
-    refused. ``cd -`` fails closed. A recursive reader (``grep -r``,
-    ``rg``, ``git grep``, ``ag``, ``ack``, ``find -exec``, ``tar``, ``cp -r``,
-    ``rsync``, ``zip -r``) is refused when a path it walks contains the data
-    directory. Every root ``account_data_present`` considers is checked, so
+    ``&&`` split even when they are not surrounded by spaces. A newline is a
+    command separator too: ``shlex`` would otherwise treat it as whitespace
+    and judge the following relative path from the old directory. ``cd``
+    changes the directory later tokens are judged against, and globs are
+    expanded on the filesystem. ``cd`` into the data directory is allowed
+    only when ``workspace`` itself is inside that directory and the target
+    stays inside ``workspace``, which is a coding worktree. A ``cd`` from
+    ``$HOME`` into the data directory is refused, and so is a ``cd`` that
+    leaves the worktree. ``cd -`` fails closed. When ``workspace`` is inside
+    the data directory, mentioning that workspace's own absolute path is
+    not by itself a refusal; any other occurrence of the data-root string
+    still is. A recursive reader is refused only when a parsed path operand
+    is the data directory or contains it. ``grep -r .``, ``rg``,
+    ``tar cf - .``, ``cp -r .``, and ``git grep --no-index`` are not refused
+    just because a hard link sits in the tree they walk. Every root
+    ``account_data_present`` considers is checked, so
     ``--data-dir`` does not leave the default XDG tree off the denylist.
 
-    ``pushd`` and ``popd`` are not tracked. The bubblewrap tmpfs over each
-    of those roots is the control that hides them; this walk is defence in
-    depth and only follows ``cd``. Without bubblewrap, host shell is refused
-    outright once account data exists.
+    The walk only sees paths it can parse. It does not refuse every
+    hard-link read before bubblewrap runs. A command that never names the
+    data directory can still be launched, and a hard link planted outside
+    that directory is still readable inside the sandbox. ``pushd`` and
+    ``popd`` are not tracked. The tmpfs hides each data-directory path on a
+    bind. It does not hide those links. Without bubblewrap, host shell is
+    refused outright once account data exists.
     """
     roots = _account_data_roots()
     if not roots:
         return True
     for root in roots:
-        if str(root) in command:
+        if _command_names_data_root(command, workspace, root):
             return True
     try:
         tokens = _shell_tokens(command)
@@ -817,10 +828,109 @@ def _directory_has_account_data(root: Path) -> bool:
 
 
 def _shell_tokens(command: str) -> list[str]:
-    """Split a shell command. Punctuation such as ``;`` and ``&&`` is its own token."""
-    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+    """Split a shell command. Punctuation such as ``;`` and ``&&`` is its own token.
+
+    An unquoted newline is rewritten to ``;`` first. ``shlex`` treats a
+    newline as whitespace, which would leave ``cd data\\ncat secret`` as
+    one segment and judge ``secret`` from the directory before the ``cd``.
+    """
+    lexer = shlex.shlex(
+        _newlines_as_separators(command),
+        posix=True,
+        punctuation_chars=True,
+    )
     lexer.commenters = ""
     return list(lexer)
+
+
+def _newlines_as_separators(command: str) -> str:
+    """Replace unquoted newlines with ``;``. Quotes and backslash escapes stay."""
+    out: list[str] = []
+    quote = ""
+    escaped = False
+    for char in command:
+        if escaped:
+            out.append(char)
+            escaped = False
+            continue
+        if char == "\\" and quote != "'":
+            out.append(char)
+            escaped = True
+            continue
+        if quote:
+            if char == quote:
+                quote = ""
+            out.append(char)
+            continue
+        if char in {"'", '"'}:
+            quote = char
+            out.append(char)
+            continue
+        if char in "\n\r":
+            out.append(";")
+            continue
+        out.append(char)
+    return "".join(out)
+
+
+def _command_names_data_root(command: str, workspace: Path, root: Path) -> bool:
+    """True when ``command`` mentions the data root outside ``workspace``.
+
+    A worktree lives under the data root, so its own absolute path contains
+    that root. That path is removed before the check. Any other occurrence
+    still refuses the command. A workspace that is not inside the data root
+    gets no such exception.
+    """
+    needle = str(root)
+    if needle not in command:
+        return False
+    if not _inside_data(workspace, root):
+        return True
+    try:
+        work = str(Path(os.path.realpath(workspace, strict=False)))
+    except OSError:
+        return True
+    stripped = _strip_bounded_path(command, work)
+    given = str(workspace)
+    if given != work:
+        stripped = _strip_bounded_path(stripped, given)
+    return needle in stripped
+
+
+def _strip_bounded_path(text: str, path: str) -> str:
+    """Remove ``path`` only where it is a whole path or a directory prefix.
+
+    ``<worktree>2/x`` keeps the data-root text. ``<worktree>/src`` does not,
+    because ``/`` continues a path inside the worktree.
+    """
+    if not path:
+        return text
+    pieces: list[str] = []
+    start = 0
+    while True:
+        index = text.find(path, start)
+        if index < 0:
+            pieces.append(text[start:])
+            break
+        before = text[index - 1] if index else ""
+        after_at = index + len(path)
+        after = text[after_at] if after_at < len(text) else ""
+        if _path_edge(before, trailing=False) and _path_edge(after, trailing=True):
+            pieces.append(text[start:index])
+            start = after_at
+            continue
+        pieces.append(text[start:after_at])
+        start = after_at
+    return "".join(pieces)
+
+
+def _path_edge(char: str, *, trailing: bool) -> bool:
+    """True when ``char`` does not continue a single path segment."""
+    if char == "":
+        return True
+    if trailing and char == "/":
+        return True
+    return char in " \t\n\r\"'`=;|&<>(){}$"
 
 
 _data_root_lock = threading.Lock()
@@ -920,6 +1030,10 @@ def _is_private_data(path: Path) -> bool:
     does not make the default XDG tree readable. A path that cannot be
     classified is private. ``Path.resolve`` and ``Path.is_file`` on Python
     3.14 hide permission errors, so this uses ``os.stat`` / ``os.path.realpath``.
+
+    When the inode walk stops early, inodes it already collected are still
+    secret. A regular file with more than one link is secret too, so a
+    hard link past the cap is not treated as readable.
     """
     roots = _account_data_roots()
     if not roots:
@@ -935,13 +1049,20 @@ def _is_private_data(path: Path) -> bool:
             return True
     for root in roots:
         inodes, problem = _cached_private_inodes(root)
-        if problem:
-            # This root was not fully scanned. Path rules above still apply.
-            # A hard link past the cap on this root can be missed.
-            continue
         if _inode_in(resolved, inodes):
             return True
+        if problem and _extra_link(resolved):
+            return True
     return False
+
+
+def _extra_link(path: Path) -> bool:
+    """True for a regular file that has another name on disk."""
+    try:
+        st = os.stat(path, follow_symlinks=True)
+    except OSError:
+        return False
+    return stat.S_ISREG(st.st_mode) and st.st_nlink > 1
 
 
 def _private_path(resolved: Path, root: Path) -> bool:
@@ -978,7 +1099,7 @@ _PRIVATE_INODE_CAP = 20_000
 @dataclass
 class _InodeSnapshot:
     root: str
-    stamp: tuple[tuple[str, int], ...]
+    stamp: tuple[tuple[str, int, int, int], ...]
     inodes: set[tuple[int, int]]
     problem: str
 
@@ -1017,11 +1138,20 @@ def _data_scan_problem(path: Path) -> str:
     return ""
 
 
-def _cached_private_inodes(root: Path) -> tuple[set[tuple[int, int]], str]:
-    """Inodes under profiles and backups, reused while that root's mtimes match.
+# A directory touched in this window is not cached. Creating a file in the
+# same timestamp tick as the scan can leave the recorded mtime unchanged,
+# so a cache written then would miss that file until the directory changed
+# again. Two seconds is wider than a one-second timestamp tick.
+_FRESH_DIR_NS = 2_000_000_000
 
-    Each account-data root has its own slot. Checking the override and the
-    default XDG directory does not throw the other scan away.
+
+def _cached_private_inodes(root: Path) -> tuple[set[tuple[int, int]], str]:
+    """Inodes under profiles and backups, one slot per account-data root.
+
+    The cache key is each directory's inode, ctime, and mtime, so restoring
+    the mtime with ``os.utime`` still misses. A directory whose mtime is
+    within two seconds of the scan is not cached. Checking the override and
+    the default XDG directory does not throw the other scan away.
     """
     global _data_inode_scans
     key = str(root)
@@ -1032,33 +1162,41 @@ def _cached_private_inodes(root: Path) -> tuple[set[tuple[int, int]], str]:
             _data_inode_snapshots[key] = cached
             return cached.inodes, cached.problem
         _data_inode_scans += 1
-        inodes, problem, stamp = _scan_private_inodes(root)
-        _data_inode_snapshots[key] = _InodeSnapshot(key, stamp, inodes, problem)
-        while len(_data_inode_snapshots) > _INODE_CACHE_MAX:
-            oldest = next(iter(_data_inode_snapshots))
-            if oldest == key:
-                break
-            del _data_inode_snapshots[oldest]
+        inodes, problem, stamp, cacheable = _scan_private_inodes(root)
+        if cacheable:
+            _data_inode_snapshots[key] = _InodeSnapshot(key, stamp, inodes, problem)
+            while len(_data_inode_snapshots) > _INODE_CACHE_MAX:
+                oldest = next(iter(_data_inode_snapshots))
+                if oldest == key:
+                    break
+                del _data_inode_snapshots[oldest]
+        else:
+            _data_inode_snapshots.pop(key, None)
         return inodes, problem
 
 
-def _stamp_matches(stamp: tuple[tuple[str, int], ...]) -> bool:
-    for path, mtime in stamp:
+def _stamp_matches(stamp: tuple[tuple[str, int, int, int], ...]) -> bool:
+    for path, inode, ctime, mtime in stamp:
         try:
             st = os.lstat(path)
         except OSError:
             return False
-        if not stat.S_ISDIR(st.st_mode) or st.st_mtime_ns != mtime:
+        if (
+            not stat.S_ISDIR(st.st_mode)
+            or st.st_ino != inode
+            or st.st_ctime_ns != ctime
+            or st.st_mtime_ns != mtime
+        ):
             return False
     return True
 
 
 def _scan_private_inodes(
     root: Path,
-) -> tuple[set[tuple[int, int]], str, tuple[tuple[str, int], ...]]:
+) -> tuple[set[tuple[int, int]], str, tuple[tuple[str, int, int, int], ...], bool]:
     found: set[tuple[int, int]] = set()
-    dirs: list[tuple[str, int]] = []
-    root_stamp = _dir_mtime(root)
+    dirs: list[tuple[str, int, int, int]] = []
+    root_stamp = _dir_stamp(root)
     if root_stamp is not None:
         dirs.append(root_stamp)
     problem = ""
@@ -1074,28 +1212,40 @@ def _scan_private_inodes(
             problem = "unreadable accounts.db"
         elif kind is StatKind.FILE and not _add_regular_inode(database, found):
             problem = f"more than {_PRIVATE_INODE_CAP} files under the account data directory"
-    return found, problem, tuple(dirs)
+    stamp = tuple(dirs)
+    return found, problem, stamp, _stamp_is_stable(stamp, time.time_ns())
 
 
-def _dir_mtime(path: Path) -> tuple[str, int] | None:
+def _stamp_is_stable(stamp: tuple[tuple[str, int, int, int], ...], now: int) -> bool:
+    if not stamp:
+        return False
+    for _path, _inode, _ctime, mtime in stamp:
+        if abs(now - mtime) <= _FRESH_DIR_NS:
+            return False
+    return True
+
+
+def _dir_stamp(path: Path) -> tuple[str, int, int, int] | None:
     try:
         st = os.lstat(path)
     except OSError:
         return None
     if not stat.S_ISDIR(st.st_mode):
         return None
-    return str(path), st.st_mtime_ns
+    return str(path), st.st_ino, st.st_ctime_ns, st.st_mtime_ns
 
 
 def _collect_tree_inodes(
     folder: Path,
     found: set[tuple[int, int]],
-    dirs: list[tuple[str, int]],
+    dirs: list[tuple[str, int, int, int]],
 ) -> str:
     """Empty string when the walk finished. Otherwise why it stopped.
 
     Symlinks are not followed. Hard links share the inode of the original.
-    Each directory's mtime is recorded so a later check can reuse ``found``.
+    Each directory's inode, ctime, and mtime are recorded so a later check
+    can reuse ``found``. A restored mtime does not match, because ctime
+    changes. A directory modified within two seconds of the scan is not cached.
     """
     kind = lstat_kind(folder)
     if kind is StatKind.MISSING:
@@ -1111,7 +1261,7 @@ def _collect_tree_inodes(
     stack = [folder]
     while stack:
         directory = stack.pop()
-        stamp = _dir_mtime(directory)
+        stamp = _dir_stamp(directory)
         if stamp is not None:
             dirs.append(stamp)
         try:
@@ -1180,7 +1330,12 @@ def _command_reaches_data(tokens: list[str], workspace: Path, root: Path) -> boo
             return True
         if destination is not None:
             cwd = destination
-            if _inside_data(cwd, root) and not _inside_workspace(cwd, workspace):
+            # ``cd`` into the data directory is allowed only for a workspace
+            # that already lives there (a task worktree) and only when the
+            # target stays inside that workspace. ``$HOME`` contains the data
+            # directory, and that used to let the ``cd`` through.
+            allowed = _inside_data(workspace, root) and _inside_workspace(cwd, workspace)
+            if _inside_data(cwd, root) and not allowed:
                 return True
     return False
 
@@ -1395,9 +1550,11 @@ def _path_private_under(path: Path, root: Path) -> bool:
     if _private_path(resolved, root):
         return True
     inodes, problem = _cached_private_inodes(root)
-    if problem:
-        return False
-    return _inode_in(resolved, inodes)
+    if _inode_in(resolved, inodes):
+        return True
+    if problem and _extra_link(resolved):
+        return True
+    return False
 
 
 def _token_contains_data(token: str, workspace: Path, root: Path) -> bool:

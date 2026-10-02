@@ -408,3 +408,50 @@ def test_post_migration_commands_open_the_profile_database(
     ):
         StateDB(data / "prime.db")
     assert not (data / "prime.db").exists()
+
+
+def test_pid_only_live_lock_is_not_stale(tmp_path: Path) -> None:
+    config = tmp_path / "config"
+    config.mkdir()
+    data = tmp_path / "pid-only"
+    StateDB(data / "prime.db").close()
+    text = f"{os.getpid()}\n"
+    (data / ".migration.lock").write_text(text, encoding="utf-8")
+    with pytest.raises(MigrationBusy, match=r"\.migration\.lock"):
+        migrate_under_lock(data, config, daemon_running=lambda: False)
+    assert (data / ".migration.lock").read_text(encoding="utf-8") == text
+    assert (data / "prime.db").is_file()
+    result = migrate_under_lock(data, config, daemon_running=lambda: False, force=True)
+    assert result.already is False
+    assert not (data / ".migration.lock").exists()
+    assert not (data / "prime.db").exists()
+
+
+def test_replaced_lock_file_does_not_free_migration(tmp_path: Path) -> None:
+    config = tmp_path / "config"
+    config.mkdir()
+    data = tmp_path / "swap"
+    db = _seed(data, rows=2)
+    lock = data / "prime.db.lock"
+    os.unlink(lock)
+    replacement = os.open(lock, os.O_CREAT | os.O_RDWR, 0o600)
+    os.close(replacement)
+    try:
+        with pytest.raises(MigrationBusy, match=r"prime\.db\.lock"):
+            migrate_under_lock(data, config, daemon_running=lambda: False)
+        assert (data / "prime.db").is_file()
+        assert _count(db) == 2
+    finally:
+        db.close()
+
+
+def test_two_shared_database_locks_do_not_block(tmp_path: Path) -> None:
+    data = tmp_path / "shared"
+    first = _seed(data, rows=1)
+    second = StateDB(data / "prime.db")
+    try:
+        assert _count(first) == 1
+        assert _count(second) == 1
+    finally:
+        second.close()
+        first.close()
