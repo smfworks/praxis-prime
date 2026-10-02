@@ -52,6 +52,24 @@ The session cookie is `HttpOnly`, `Secure`, and `SameSite=Strict`. Browsers send
 
 `gateway.bearer` defaults to `true`. After an account exists, set `bearer = false` in `config.toml` and restart to refuse the token. Cookie sessions and WebSocket tickets still work. Before any account exists the flag does not apply, so the gateway is not left open and the first-run token still works.
 
+## Passkeys and TOTP
+
+Sign-in factors are local. Nothing in this path calls a hosted WebAuthn service or an identity provider.
+
+A password alone opens a session until that account confirms TOTP. After that, `POST /v1/auth/login` returns a short-lived `mfaToken` and no session cookie. `POST /v1/auth/login/totp` exchanges the token plus a 6-digit code or a recovery code for the session. A passkey skips that second step: `POST /v1/auth/passkey/options` then `POST /v1/auth/passkey/verify` opens the session. Enrollment is `POST /v1/auth/passkey/register/options` and `.../verify`, and `POST /v1/auth/totp/enroll` then `.../confirm`, all on an existing session.
+
+Open the daemon as `http://localhost:18790` to enroll a passkey. The relying party id is `localhost` for that origin and `127.0.0.1` for `http://127.0.0.1:18790`. A credential from one does not work on the other. The process still binds `127.0.0.1` only.
+
+TOTP uses SHA-1, 6 digits, and a 30-second step, with one step of clock drift. The step that was accepted is stored. Presenting it again fails, including the code just used to confirm enrollment. Ten recovery codes are returned once at enrollment and when regenerated. Only their SHA-256 hashes are stored. Each code works once.
+
+Five failures lock the account for 15 minutes. Password failures and second-factor failures add up. A correct password does not reset the second-factor count, so a known password cannot be used to guess codes without limit. The lock looks like any other rejected sign-in.
+
+The TOTP seed is encrypted in `accounts.db`. The AES-GCM key is in that same file. The file is mode 0600, and shell commands and sandboxes already cannot read it. Passkey public keys and signature counters are in the same database. They are not secrets. The private key stays on the authenticator.
+
+The loopback bearer token is not checked with a passkey or TOTP. It remains the owner-equivalent credential described above, on loopback only. `praxis-prime account totp` and `account passkey` write `accounts.db` as the OS user who can read that file, the same trust as `account passwd`. Passkey enrollment itself is the HTTP ceremony; the CLI can list and remove credentials. Telegram Approve and Deny do not call these routes. A paired chat is its own credential.
+
+OIDC is not in this build. Neither is a rule that turns MFA on for every role above viewer when the gateway leaves loopback, or a second passkey prompt on SEND and SPEND. Those wait for M1e and M6.
+
 ## Shell and the data directory
 
 Bubblewrap mounts that contain the account data directory get an empty tmpfs over that directory, matched by path and by device and inode, so a bind-mount alias of a parent cannot read `profiles/`, `backups/`, or `accounts.db` at that path. The tmpfs does not hide a hard link of one of those files planted outside the mount. The command walk does not refuse every such read before bubblewrap runs. A bind that is inside the data directory is refused. The exception is one coding task worktree, `worktrees/<repo>/<task>` or `worktrees/<profile>/<repo>/<task>` after a profile exists, and the bind source is resolved first so a symlink cannot mount `profiles/`. `worktrees/` itself is not bindable. A `cd` that stays inside that worktree is allowed; a `cd` that leaves it is still refused. Without bubblewrap, shell commands are refused when any account or profile data exists (`accounts.db`, `profiles/`, `backups/`, `prime.db`, or `SOUL.md`), including account data in the default data directory when `--data-dir` points somewhere else. The card says `install bubblewrap to run shell commands` and the command is not run. Host shell remains only for a fresh install with no account data. The token check still splits `;` and `&&` and treats `cd -` as a refusal, as defence in depth. `read_file` of `org/policy.toml` stays allowed.

@@ -41,7 +41,7 @@ Do not add a `prime` console script. That name collides with other tools.
 - Jarvis stays disabled in the default config.
 - Sandbox network stays `off` in the default config.
 - Gateway listen address stays on loopback.
-- Do not put secrets, API keys, tokens, or personal data in the repo, in tests, or in the default config. Secrets belong in the OS keychain or `secrets.env.age` (ARCHITECTURE §25).
+- Do not put secrets, API keys, tokens, or personal data in the repo, in tests, or in the default config. Secrets belong in the OS keychain or `secrets.env.age` (ARCHITECTURE §25). Account passwords, passkey public keys, encrypted TOTP seeds, and recovery-code hashes are the exception that stays inside `accounts.db` (mode 0600). Do not add a second file for them. The sandbox denylist and the data-directory mask already hide that database. The loopback bearer token is not a passkey or TOTP check.
 - `praxis-primed` is the user service (`praxis-prime service install`, unit `praxis-prime.service`). It listens on loopback only. The default is `127.0.0.1:18790`. `localhost` is rewritten to that host. Any other host is refused before the socket is created. Tests cover the bind address. Do not move the listen address off loopback.
 
 ## Reuse rules
@@ -67,6 +67,7 @@ Do not add a `prime` console script. That name collides with other tools.
 | Web UI | `ui/` |
 | User services | `packaging/systemd/` |
 | Tests | `tests/` |
+| Passkeys and TOTP | `accounts/factors.py`, `accounts/passkeys.py`, `accounts/totp.py`, `gateway/factors.py` |
 
 Point new stubs at a blueprint section with a `TODO: ARCHITECTURE §N` line.
 

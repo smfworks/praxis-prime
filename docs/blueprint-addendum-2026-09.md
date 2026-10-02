@@ -431,6 +431,8 @@ Praxis:
 ### 4.3 Authentication
 
 - **Local accounts:** argon2id password hashes, **passkeys (WebAuthn)** preferred, and TOTP as a second factor. Admin-enforced MFA for any role above `viewer` when exposure ≠ loopback.
+
+  M1b implements the local factors on the loopback daemon: passkey enrollment and sign-in, TOTP as a second factor after the password or as a fallback when a passkey is not used, recovery codes, and the same 5-failure lockout as passwords. The loopback bearer token and `praxis-prime account` stay local-operator credentials and are not WebAuthn ceremonies. Telegram approvals are unchanged. OIDC is M1e. Requiring MFA whenever exposure is not loopback, and passkey re-authentication on SEND/SPEND, stay in M6.
 - **OIDC:** generic OIDC (auth code + PKCE). Presets for **Microsoft Entra ID** (§5.4), Google Workspace, Authentik, Keycloak. Group/app-role claims map to Praxis roles.
 - **Device pairing:** the §4 Ed25519 device pairing (planned, not built) becomes "remember this device" plus an admin-revocable device list.
 - **API/automation tokens:** per-user, scoped, expiring. The existing single bearer-token file (`gateway/auth.py`, mode 0600) becomes the *owner's bootstrap token* (loopback only).
@@ -645,7 +647,7 @@ M0 packs/packaging ─┐
 | **M7** | **Desktop wrapper (Tauri 2)** | (1) Tauri shell loading the same SPA (local or remote server URL); (2) tray, notifications, deep links; (3) Linux packages (AppImage/.deb/Flatpak per §27); (4) optional Windows Tauri client that connects to a WSL/remote server (client only) | M1–M3 (M6 for remote) | Desktop app connects to local or remote Praxis server with the same accounts | 2–3 wk |
 | **M8** | **Microsoft 365** | (1) Entra OIDC preset + app-role mapping + setup guide; (2) Teams connector (Bot Framework, Adaptive Card approvals, tunnel design); (3) Intune Win32 packaging + WSL policy docs; (4) Graph delegated connectors (if not already via MCP) | M1 (OIDC), M5b, M6 | Tenant user signs in with Entra; approvals arrive in Teams; Intune deploys to a pilot group | 4–6 wk |
 
-**M1 lettered split.** The numbered PRs in the M1 row are also named this way: **M1a** is (2), (4), (5), and (8) (accounts, roles, profiles, and audit actors; merged); **M1b** is (3), passkeys + TOTP; **M1c** is (6), per-profile workers and the supervisor; **M1d** is (1) and (7), the SPA, profile picker, and admin console; **M1e** is (9), generic OIDC. The same labels are in the README roadmap and in [OPENDOTS-BORROWED-PATTERNS.md](OPENDOTS-BORROWED-PATTERNS.md).
+**M1 lettered split.** The numbered PRs in the M1 row are also named this way: **M1a** is (2), (4), (5), and (8) (accounts, roles, profiles, and audit actors; merged); **M1b** is (3), passkeys + TOTP (local enrollment and sign-in on the loopback daemon); **M1c** is (6), per-profile workers and the supervisor; **M1d** is (1) and (7), the SPA, profile picker, and admin console; **M1e** is (9), generic OIDC. The same labels are in the README roadmap and in [OPENDOTS-BORROWED-PATTERNS.md](OPENDOTS-BORROWED-PATTERNS.md).
 
 **Placement in the existing phases (ARCHITECTURE §29):**
 - M0–M3 = **MVP completion** (v0.2–0.3).

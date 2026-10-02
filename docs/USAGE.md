@@ -89,6 +89,17 @@ Stop the daemon before that first `account create`. It moves an existing single-
 
 `account disable USER` disables an account. `account role USER --role admin` changes a server role. Both revoke sessions and tickets. `profile unassign NAME --account USER` removes a membership. The owner is changed only with `account transfer-owner`.
 
+Passkeys and TOTP are optional until you enroll them. A passkey signs in on its own. TOTP, once confirmed, is required after the password, and recovery codes are the one-time fallback. The daemon is still `127.0.0.1:18790`. Enroll a passkey from `http://localhost:18790` (that name and `127.0.0.1` are different passkey identities). The CLI can start TOTP without a browser. It prints the secret and the recovery codes once:
+
+```bash
+praxis-prime account totp enroll ada
+praxis-prime account totp confirm ada
+praxis-prime account factors ada
+praxis-prime account passkey list ada
+```
+
+`account totp confirm` reads one code from stdin. `account passkey remove USER CREDENTIAL_ID` drops a credential. Creating a passkey is the daemon's `/v1/auth/passkey/register/*` routes, because that needs a WebAuthn client. The loopback bearer token and Telegram Approve/Deny are unchanged: they are not passkey or TOTP checks. See [SECURITY.md](SECURITY.md).
+
 ## Models
 
 The default spec is `ollama:qwen3:32b`. Ollama's native chat API is `http://127.0.0.1:11434`. Override it with `PRAXIS_PRIME_OLLAMA_HOST` or `OLLAMA_HOST`.

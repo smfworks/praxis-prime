@@ -122,6 +122,10 @@ No TypeSafe source is vendored in `praxis_prime.decide`.
 | Package | License | Note |
 |---|---|---|
 | argon2-cffi | MIT | Password hashing for local accounts. The Argon2 reference implementation it binds is CC0 or Apache-2.0. Neither tree is copied into this repository. |
+| webauthn (`duo-labs/py_webauthn`) | BSD-3-Clause | Local WebAuthn registration and authentication. No source is copied into this repository. |
+| pyotp | MIT | Local TOTP codes (RFC 6238). No source is copied into this repository. |
+| cryptography | Apache-2.0 OR BSD-3-Clause | AES-GCM for TOTP seeds in `accounts.db`, and the signature checks `webauthn` already needs. No source is copied into this repository. |
+| cbor2 | MIT | Transitive dependency of `webauthn` for CBOR. No source is copied into this repository. |
 
 ## Runtime components that are not bundled
 

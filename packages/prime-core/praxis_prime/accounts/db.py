@@ -4,6 +4,8 @@ The file is SQLite in WAL mode, created mode 0600. Session cookies and
 WebSocket tickets are stored only as SHA-256 hashes. The CSRF token is
 stored so a same-origin client can read it back; it is useless without
 the session cookie. Passwords are stored only as argon2id hashes.
+Passkey public keys, encrypted TOTP seeds, and recovery-code hashes live
+in this same file so the existing account-data denylist covers them.
 
 docs/blueprint-addendum-2026-09.md §4.3 and §6.3.
 """
@@ -213,6 +215,23 @@ class AccountStore:
                     "DELETE FROM memberships WHERE account_id = ?",
                     (account_id,),
                 )
+                self.conn.execute(
+                    "DELETE FROM mfa_tokens WHERE account_id = ?",
+                    (account_id,),
+                )
+                self.conn.execute(
+                    "DELETE FROM recovery_codes WHERE account_id = ?",
+                    (account_id,),
+                )
+                self.conn.execute("DELETE FROM totp WHERE account_id = ?", (account_id,))
+                self.conn.execute(
+                    "DELETE FROM passkeys WHERE account_id = ?",
+                    (account_id,),
+                )
+                self.conn.execute(
+                    "DELETE FROM webauthn_challenges WHERE account_id = ?",
+                    (account_id,),
+                )
                 deleted = self.conn.execute(
                     "DELETE FROM accounts WHERE id = ?",
                     (account_id,),
@@ -346,7 +365,8 @@ class AccountStore:
             self.conn.execute(
                 """
                 UPDATE accounts
-                SET password_hash = ?, updated_at = ?, failed_logins = 0, locked_until = ''
+                SET password_hash = ?, updated_at = ?, failed_logins = 0,
+                    second_factor_failures = 0, locked_until = ''
                 WHERE id = ?
                 """,
                 (encoded, now, row["id"]),
@@ -358,6 +378,27 @@ class AccountStore:
         if fresh is None:
             raise AccountError("no such account")
         return _account(fresh)
+
+    def note_second_factor_failure(self, account_id: str) -> None:
+        """Count a TOTP, recovery, or passkey failure toward the same lockout."""
+        with self._lock:
+            self._note_second_factor_failure(account_id)
+
+    def clear_failures(self, account_id: str) -> None:
+        """Reset password and second-factor counters after a full sign-in."""
+        with self._lock:
+            self._clear_failure_counters(account_id)
+            self.conn.commit()
+
+    def account_is_locked(self, account_id: str) -> bool:
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT locked_until, status FROM accounts WHERE id = ?",
+                (account_id,),
+            ).fetchone()
+        if row is None or str(row["status"]) != "active":
+            return False
+        return _is_locked(str(row["locked_until"]))
 
     def disable_account(self, username_text: str) -> Account:
         """Disable an account and revoke its sessions and tickets.
@@ -774,9 +815,64 @@ class AccountStore:
                 expires_at TEXT NOT NULL,
                 used INTEGER NOT NULL DEFAULT 0
             );
+
+            CREATE TABLE IF NOT EXISTS auth_meta (
+                key TEXT PRIMARY KEY,
+                value BLOB NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS totp (
+                account_id TEXT PRIMARY KEY REFERENCES accounts(id),
+                secret_enc BLOB NOT NULL,
+                confirmed INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                confirmed_at TEXT NOT NULL DEFAULT '',
+                last_step INTEGER NOT NULL DEFAULT 0
+            );
+
+            CREATE TABLE IF NOT EXISTS recovery_codes (
+                code_hash TEXT PRIMARY KEY,
+                account_id TEXT NOT NULL REFERENCES accounts(id),
+                created_at TEXT NOT NULL,
+                used_at TEXT NOT NULL DEFAULT ''
+            );
+
+            CREATE TABLE IF NOT EXISTS passkeys (
+                credential_id TEXT PRIMARY KEY,
+                account_id TEXT NOT NULL REFERENCES accounts(id),
+                public_key BLOB NOT NULL,
+                sign_count INTEGER NOT NULL DEFAULT 0,
+                rp_id TEXT NOT NULL,
+                name TEXT NOT NULL DEFAULT 'passkey',
+                created_at TEXT NOT NULL,
+                last_used_at TEXT NOT NULL DEFAULT ''
+            );
+
+            CREATE TABLE IF NOT EXISTS webauthn_challenges (
+                challenge BLOB PRIMARY KEY,
+                account_id TEXT NOT NULL DEFAULT '',
+                kind TEXT NOT NULL CHECK (kind IN ('register', 'authenticate')),
+                rp_id TEXT NOT NULL,
+                origin TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                used INTEGER NOT NULL DEFAULT 0
+            );
+
+            CREATE TABLE IF NOT EXISTS mfa_tokens (
+                token_hash TEXT PRIMARY KEY,
+                account_id TEXT NOT NULL REFERENCES accounts(id),
+                expires_at TEXT NOT NULL,
+                used INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL
+            );
             """
         )
         self._ensure_column("ws_tickets", "session_id", "session_id TEXT NOT NULL DEFAULT ''")
+        self._ensure_column(
+            "accounts",
+            "second_factor_failures",
+            "second_factor_failures INTEGER NOT NULL DEFAULT 0",
+        )
         self.conn.commit()
         tighten_file(self.path)
 
@@ -791,9 +887,14 @@ class AccountStore:
         ).fetchone()
 
     def _record_failure(self, account_id: str, previous: int) -> None:
+        extra = self.conn.execute(
+            "SELECT second_factor_failures FROM accounts WHERE id = ?",
+            (account_id,),
+        ).fetchone()
+        second = int(extra["second_factor_failures"]) if extra is not None else 0
         failed = previous + 1
         locked = ""
-        if failed >= LOCK_AFTER_FAILURES:
+        if failed + second >= LOCK_AFTER_FAILURES:
             locked = (datetime.now(UTC) + timedelta(seconds=LOCK_SECONDS)).isoformat(
                 timespec="seconds"
             )
@@ -806,6 +907,44 @@ class AccountStore:
             (failed, locked, _now(), account_id),
         )
         self.conn.commit()
+
+    def _note_second_factor_failure(self, account_id: str) -> None:
+        """Caller holds ``_lock``. Commits, including any pending challenge burn."""
+        row = self.conn.execute(
+            """
+            SELECT failed_logins, second_factor_failures, locked_until
+            FROM accounts WHERE id = ?
+            """,
+            (account_id,),
+        ).fetchone()
+        if row is None or _is_locked(str(row["locked_until"])):
+            self.conn.commit()
+            return
+        second = int(row["second_factor_failures"]) + 1
+        locked = ""
+        if int(row["failed_logins"]) + second >= LOCK_AFTER_FAILURES:
+            locked = (datetime.now(UTC) + timedelta(seconds=LOCK_SECONDS)).isoformat(
+                timespec="seconds"
+            )
+        self.conn.execute(
+            """
+            UPDATE accounts
+            SET second_factor_failures = ?, locked_until = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (second, locked, _now(), account_id),
+        )
+        self.conn.commit()
+
+    def _clear_failure_counters(self, account_id: str) -> None:
+        self.conn.execute(
+            """
+            UPDATE accounts
+            SET failed_logins = 0, second_factor_failures = 0, locked_until = '', updated_at = ?
+            WHERE id = ?
+            """,
+            (_now(), account_id),
+        )
 
     def _ensure_column(self, table: str, column: str, declaration: str) -> None:
         rows = self.conn.execute(f"PRAGMA table_info({table})").fetchall()
@@ -874,6 +1013,10 @@ class AccountStore:
         )
         self.conn.execute(
             "UPDATE ws_tickets SET used = 1 WHERE account_id = ? AND used = 0",
+            (account_id,),
+        )
+        self.conn.execute(
+            "UPDATE mfa_tokens SET used = 1 WHERE account_id = ? AND used = 0",
             (account_id,),
         )
 
