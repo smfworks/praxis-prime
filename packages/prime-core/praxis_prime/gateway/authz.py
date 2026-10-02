@@ -22,6 +22,7 @@ from praxis_prime.accounts.db import (
     cookie_value,
     session_cookie,
 )
+from praxis_prime.accounts.factors import Factors
 from praxis_prime.accounts.roles import (
     APPROVE_SERVER_ROLES,
     CHAT_SERVER_ROLES,
@@ -220,8 +221,32 @@ def login(
         ):
             return 503, _error("unavailable", "audit log is busy"), []
         return 401, _error("unauthorized", "invalid username or password"), []
+    factors = Factors(store)
+    if factors.totp_active(account.id):
+        # The password is only the first factor. Do not clear second-factor
+        # failures here: a known password must not reset TOTP lockout.
+        if not _audit_or_unavailable(
+            audit,
+            "auth.mfa",
+            "second factor required",
+            {
+                "actor_account": account.id,
+                "username": account.username,
+                "role": account.role,
+                "method": "password",
+            },
+        ):
+            return 503, _error("unavailable", "audit log is busy; login was not completed"), []
+        token = factors.issue_mfa(account.id)
+        return 200, {
+            "ok": True,
+            "mfaRequired": True,
+            "mfaToken": token,
+            "methods": ["totp", "recovery"],
+        }, []
     # Write the audit row before the session exists. A locked prime.db then
     # returns 503 and does not leave an orphan session.
+    store.clear_failures(account.id)
     if not _audit_or_unavailable(
         audit,
         "auth.login",

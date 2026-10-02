@@ -37,6 +37,7 @@ from praxis_prime.gateway.authz import (
     logout,
     principal_from_ticket,
 )
+from praxis_prime.gateway.factors import authed_factor, passkey_options, passkey_verify, totp_login
 from praxis_prime.gateway.guard import host_origin_denial
 from praxis_prime.gateway.protocol import (
     CHAT_ROLES,
@@ -286,6 +287,9 @@ class GatewayServer:
             if status != 200 and self.logger is not None:
                 self.logger.warning("auth_fail")
             return status, payload
+        public_factor = self._public_factor(method, route, headers, body, extras, peer)
+        if public_factor is not None:
+            return public_factor
         principal = authenticate_http(
             self.accounts,
             headers,
@@ -332,6 +336,21 @@ class GatewayServer:
         principal: Principal,
         profile_name: str,
     ) -> tuple[int, dict[str, object]]:
+        if self.accounts is not None:
+            handled = authed_factor(
+                self.accounts,
+                principal,
+                method,
+                route,
+                body,
+                self.audit,
+                origin=headers.get("origin", ""),
+                port=self.bound_port,
+            )
+            if handled is not None:
+                status, payload, cookies = handled
+                extras.extend(cookies)
+                return status, payload
         if method == "POST" and route == "/v1/auth/logout":
             if self.accounts is None:
                 return 404, _error("not_found", "no such route")
@@ -400,6 +419,40 @@ class GatewayServer:
         if method == "POST" and fired is not None:
             return self._http_routine(fired.group(1))
         return 404, _error("not_found", "no such route")
+
+    def _public_factor(
+        self,
+        method: str,
+        route: str,
+        headers: dict[str, str],
+        body: bytes,
+        extras: list[tuple[str, str]],
+        peer: str,
+    ) -> tuple[int, dict[str, object]] | None:
+        if method != "POST" or route not in {
+            "/v1/auth/login/totp",
+            "/v1/auth/passkey/options",
+            "/v1/auth/passkey/verify",
+        }:
+            return None
+        if self.accounts is None:
+            return 503, _error("unavailable", "accounts are not configured")
+        origin = headers.get("origin", "")
+        if route == "/v1/auth/login/totp":
+            status, payload, cookies = totp_login(self.accounts, body, self.audit, peer=peer)
+        elif route == "/v1/auth/passkey/options":
+            status, payload, cookies = passkey_options(
+                self.accounts,
+                body,
+                origin=origin,
+                port=self.bound_port,
+            )
+        else:
+            status, payload, cookies = passkey_verify(self.accounts, body, self.audit, peer=peer)
+        extras.extend(cookies)
+        if status == 401 and self.logger is not None:
+            self.logger.warning("auth_fail")
+        return status, payload
 
     def _http_routine(self, routine_id: str) -> tuple[int, dict[str, object]]:
         if self.routine_fire is None:
