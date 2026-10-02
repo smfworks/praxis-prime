@@ -98,7 +98,7 @@ praxis-prime account factors ada
 praxis-prime account passkey list ada
 ```
 
-`account totp confirm` reads one code from stdin. `account passkey remove USER CREDENTIAL_ID` drops a credential. `account passwd` also deletes that account's passkeys. Those commands append an audit event and do not write the secret into it. Creating a passkey is the daemon's `/v1/auth/passkey/register/*` routes, because that needs a WebAuthn client. The HTTP route also needs a step-up (`POST /v1/auth/step-up` with the password, plus a TOTP or recovery code once TOTP is on, or a passkey assertion at `/v1/auth/step-up/passkey/*`). The same step-up covers TOTP enroll and passkey removal in the browser. The loopback bearer token and Telegram Approve/Deny are unchanged: they are not passkey or TOTP checks. See [SECURITY.md](SECURITY.md).
+`account totp confirm` reads one code from stdin. `account passkey remove USER CREDENTIAL_ID` drops a credential. `account passwd` also deletes that account's passkeys. Those commands append an audit event and do not write the secret into it. Creating a passkey is the daemon's `/v1/auth/passkey/register/*` routes, because that needs a WebAuthn client. The HTTP route also needs a step-up (`POST /v1/auth/step-up` with the password, plus a TOTP or recovery code once TOTP is on, or a passkey assertion at `/v1/auth/step-up/passkey/*`). The same step-up covers TOTP enroll, TOTP disable, and passkey removal in the browser. `account totp disable` still reads only the password. Logout drops that session's step-up tokens. The loopback bearer token and Telegram Approve/Deny are unchanged: they are not passkey or TOTP checks. See [SECURITY.md](SECURITY.md).
 
 ## Models
 

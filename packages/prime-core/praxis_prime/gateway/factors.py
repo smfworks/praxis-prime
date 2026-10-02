@@ -184,13 +184,10 @@ def _totp_disable(
     port: int,
 ) -> _Result:
     del origin, port
-    parsed = _object(body)
-    if parsed is None:
-        return 400, _error("bad_request", "body must be JSON"), []
-    password = parsed.get("password", "")
-    if not isinstance(password, str):
-        return 400, _error("bad_request", "password must be a string"), []
-    Factors(store).disable_totp(principal.username, password)
+    denied = _step_up_or_deny(store, principal, body)
+    if denied is not None:
+        return denied
+    Factors(store).clear_totp(principal.account_id)
     if not _audit_factor(audit, principal, "auth.mfa", "totp disabled", "totp"):
         return 503, _error("unavailable", "audit log is busy"), []
     return 200, {"ok": True, "totp": False}, []

@@ -91,9 +91,16 @@ def registration_options(
     )
 
 
-def authentication_options(*, rp_id: str, origin: str, allow: list[bytes]) -> Ceremony:
+def authentication_options(
+    *,
+    rp_id: str,
+    origin: str,
+    allow: list[bytes],
+    challenge: bytes | None = None,
+) -> Ceremony:
     options = generate_authentication_options(
         rp_id=rp_id,
+        challenge=challenge,
         allow_credentials=[PublicKeyCredentialDescriptor(id=item) for item in allow] or None,
         user_verification=UserVerificationRequirement.REQUIRED,
     )

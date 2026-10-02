@@ -16,7 +16,7 @@ from tests.soft_passkey import SoftPasskey
 from tests.test_accounts import _login, _request
 
 from praxis_prime.accounts.db import LOCK_AFTER_FAILURES, AccountStore
-from praxis_prime.accounts.factors import Factors
+from praxis_prime.accounts.factors import FactorError, Factors
 from praxis_prime.accounts.seal import LEGACY_AAD, account_aad, seal, unseal
 from praxis_prime.accounts.totp import PERIOD
 from praxis_prime.approvals.queue import ApprovalQueue
@@ -567,13 +567,14 @@ def test_step_up_origin_mfa_token_and_challenge_cap(tmp_path: Path):
         )
         assert status == 200
         for _ in range(6):
-            _request(
+            status, _headers, _body = _request(
                 port,
                 "POST",
                 "/v1/auth/passkey/options",
                 origin=origin,
                 body_json={"username": "ada"},
             )
+            assert status == 200
         kept = device.authenticate(
             first["options"], origin=origin, user_handle=ada.id.encode()
         )
@@ -780,6 +781,268 @@ def test_step_up_origin_mfa_token_and_challenge_cap(tmp_path: Path):
         server.shutdown()
         host.close()
         store.close()
+
+
+def test_http_disable_requires_step_up_and_sign_in_challenges_are_sealed(tmp_path: Path):
+    data = tmp_path / "data"
+    data.mkdir()
+    store = AccountStore(data / "accounts.db")
+    ada = store.create_account(username_text="ada", password=_PASSWORD, display_name="Ada")
+    store.create_account(username_text="bob", password=_PASSWORD, display_name="Bob")
+    runtime = build_runtime(
+        env={},
+        config_path=tmp_path / "missing.toml",
+        data_path=data / "prime.db",
+        cwd=tmp_path,
+        providers={"ollama": ScriptedProvider([AssistantFinal(content="ok")])},
+    )
+    host = Host(runtime, ApprovalQueue())
+    server = GatewayServer(
+        host="127.0.0.1",
+        port=0,
+        token="test-token",
+        agent=host,
+        approvals=host.queue,
+        logger=JsonLogger(tmp_path / "daemon.log"),
+        accounts=store,
+        audit=runtime.audit,
+        data_root=data,
+    )
+    server.start()
+    try:
+        port = server.bound_port
+        origin = f"http://localhost:{port}"
+        cookie, csrf, _body = _login(port, "ada", _PASSWORD)
+        step = _step_up(port, cookie, csrf, _PASSWORD)
+        status, _headers, options_body = _request(
+            port,
+            "POST",
+            "/v1/auth/passkey/register/options",
+            cookie=cookie,
+            csrf=csrf,
+            origin=origin,
+            body_json={"stepUpToken": step},
+        )
+        assert status == 200
+        device = SoftPasskey()
+        created = device.register(options_body["options"], origin=origin)
+        status, _headers, _body = _request(
+            port,
+            "POST",
+            "/v1/auth/passkey/register/verify",
+            cookie=cookie,
+            csrf=csrf,
+            origin=origin,
+            body_json={"credential": created, "name": "laptop", "stepUpToken": step},
+        )
+        assert status == 200
+
+        enroll_step = _step_up(port, cookie, csrf, _PASSWORD)
+        status, _headers, enrolled = _request(
+            port,
+            "POST",
+            "/v1/auth/totp/enroll",
+            cookie=cookie,
+            csrf=csrf,
+            origin=origin,
+            body_json={"stepUpToken": enroll_step},
+        )
+        assert status == 200
+        secret = str(enrolled["secret"])
+        status, _headers, _body = _request(
+            port,
+            "POST",
+            "/v1/auth/totp/confirm",
+            cookie=cookie,
+            csrf=csrf,
+            origin=origin,
+            body_json={"code": pyotp.TOTP(secret).now()},
+        )
+        assert status == 200
+
+        status, _headers, _body = _request(
+            port,
+            "POST",
+            "/v1/auth/totp/disable",
+            cookie=cookie,
+            csrf=csrf,
+            origin=origin,
+            body_json={"password": _PASSWORD},
+        )
+        assert status == 401
+        status, _headers, listed = _request(
+            port, "GET", "/v1/auth/factors", cookie=cookie, csrf=csrf
+        )
+        assert listed["totp"] is True
+        status, _headers, _body = _request(
+            port,
+            "POST",
+            "/v1/auth/step-up",
+            cookie=cookie,
+            csrf=csrf,
+            origin=origin,
+            body_json={"password": _PASSWORD, "code": ""},
+        )
+        assert status == 401
+        status, _headers, _body = _request(
+            port,
+            "POST",
+            "/v1/auth/passkey/register/options",
+            cookie=cookie,
+            csrf=csrf,
+            origin=origin,
+            body_json={},
+        )
+        assert status == 401
+        status, _headers, listed = _request(
+            port, "GET", "/v1/auth/factors", cookie=cookie, csrf=csrf
+        )
+        assert len(listed["passkeys"]) == 1
+
+        _reset_step(store, ada.id)
+        _reset_failures(store, ada.id)
+        disable_step = _step_up(port, cookie, csrf, _PASSWORD, pyotp.TOTP(secret).now())
+        status, _headers, _body = _request(
+            port,
+            "POST",
+            "/v1/auth/totp/disable",
+            cookie=cookie,
+            csrf=csrf,
+            origin=origin,
+            body_json={"stepUpToken": disable_step},
+        )
+        assert status == 200
+        status, _headers, listed = _request(
+            port, "GET", "/v1/auth/factors", cookie=cookie, csrf=csrf
+        )
+        assert listed["totp"] is False
+
+        lengths = []
+        for username in ("ada", "bob", "", "nosuchuser"):
+            status, _headers, body = _request(
+                port,
+                "POST",
+                "/v1/auth/passkey/options",
+                origin=origin,
+                body_json={"username": username},
+            )
+            assert status == 200
+            lengths.append(len(str(body["options"]["challenge"])))
+        assert lengths[0] == lengths[1] == lengths[2] == lengths[3]
+        stored = store.conn.execute(
+            "SELECT count(*) FROM webauthn_challenges WHERE kind = 'authenticate'"
+        ).fetchone()
+        assert stored is not None and int(stored[0]) == 0
+
+        for _ in range(8):
+            status, _headers, _body = _request(
+                port,
+                "POST",
+                "/v1/auth/passkey/options",
+                origin=origin,
+                body_json={},
+            )
+            assert status == 200
+            status, _headers, _body = _request(
+                port,
+                "POST",
+                "/v1/auth/passkey/options",
+                origin=origin,
+                body_json={"username": "ada"},
+            )
+            assert status == 200
+        status, _headers, named = _request(
+            port,
+            "POST",
+            "/v1/auth/passkey/options",
+            origin=origin,
+            body_json={"username": "ada"},
+        )
+        assert status == 200
+        assertion = device.authenticate(
+            named["options"], origin=origin, user_handle=ada.id.encode()
+        )
+        status, _headers, signed = _request(
+            port,
+            "POST",
+            "/v1/auth/passkey/verify",
+            origin=origin,
+            body_json={"credential": assertion},
+        )
+        assert status == 200
+        assert signed["account"]["username"] == "ada"
+        status, _headers, _body = _request(
+            port,
+            "POST",
+            "/v1/auth/passkey/verify",
+            origin=origin,
+            body_json={"credential": assertion},
+        )
+        assert status == 401
+        status, _headers, open_step = _request(
+            port,
+            "POST",
+            "/v1/auth/step-up/passkey/options",
+            cookie=cookie,
+            csrf=csrf,
+            origin=origin,
+        )
+        assert status == 200
+        status, _headers, nameless = _request(
+            port,
+            "POST",
+            "/v1/auth/passkey/options",
+            origin=origin,
+            body_json={},
+        )
+        assert status == 200
+        again = device.authenticate(
+            nameless["options"], origin=origin, user_handle=ada.id.encode()
+        )
+        status, _headers, signed = _request(
+            port,
+            "POST",
+            "/v1/auth/passkey/verify",
+            origin=origin,
+            body_json={"credential": again},
+        )
+        assert status == 200
+        assert signed["account"]["username"] == "ada"
+        assert open_step["options"]["challenge"]
+
+        minted = _step_up(port, cookie, csrf, _PASSWORD)
+        assert minted
+        status, _headers, _body = _request(
+            port, "POST", "/v1/auth/logout", cookie=cookie, csrf=csrf, origin=origin
+        )
+        assert status == 200
+        left = store.conn.execute(
+            "SELECT count(*) FROM step_up WHERE account_id = ?",
+            (ada.id,),
+        ).fetchone()
+        assert left is not None and int(left[0]) == 0
+    finally:
+        server.shutdown()
+        host.close()
+        store.close()
+
+
+def test_cli_disable_totp_uses_the_password_only(tmp_path: Path):
+    store = AccountStore(tmp_path / "accounts.db")
+    ada = store.create_account(username_text="ada", password=_PASSWORD, display_name="Ada")
+    factors = Factors(store)
+    enrollment = factors.begin_totp(ada.id)
+    factors.confirm_totp(ada.id, pyotp.TOTP(enrollment.secret).now())
+    try:
+        factors.disable_totp(ada.username, "not-the-password")
+    except FactorError:
+        pass
+    else:
+        raise AssertionError("a wrong password disabled totp")
+    assert factors.totp_active(ada.id)
+    factors.disable_totp(ada.username, _PASSWORD)
+    assert not factors.totp_active(ada.id)
+    store.close()
 
 
 def test_one_totp_step_succeeds_once_under_contention(tmp_path: Path):

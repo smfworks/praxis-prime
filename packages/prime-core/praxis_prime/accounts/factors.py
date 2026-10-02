@@ -52,6 +52,10 @@ MFA_TTL_SECONDS = 5 * 60
 CHALLENGE_TTL_SECONDS = 5 * 60
 STEP_UP_TTL_SECONDS = 5 * 60
 _OPEN_CHALLENGES = 5
+_SIGNIN_AAD = b"praxis-prime-webauthn-signin-v1"
+_SIGNIN_RP = 32
+_SIGNIN_ORIGIN = 64
+_SIGNIN_ACCOUNT = 32
 
 
 class FactorError(ValueError):
@@ -157,9 +161,20 @@ class Factors:
                 self.store.conn.commit()
 
     def disable_totp(self, username: str, password: str) -> Account:
+        """Turn TOTP off from the CLI. The password is the OS-user check.
+
+        The HTTP route does not call this. It requires a step-up token and
+        then ``clear_totp``.
+        """
         account = self.store.authenticate(username, password)
         if account is None:
             raise FactorError("invalid code", status=401, code="unauthorized")
+        self.clear_totp(account.id)
+        return account
+
+    def clear_totp(self, account_id: str) -> None:
+        """Delete TOTP, recovery codes, and outstanding second-factor tokens."""
+        account = self._active(account_id)
         with self.store._lock:
             self.store.conn.execute("DELETE FROM totp WHERE account_id = ?", (account.id,))
             self.store.conn.execute(
@@ -172,7 +187,6 @@ class Factors:
             )
             self.store._clear_failure_counters(account.id)
             self.store.conn.commit()
-        return account
 
     def regenerate_recovery(
         self,
@@ -508,12 +522,27 @@ class Factors:
         bound = ""
         if account is not None and account.status == "active":
             bound = account.id
-        # The response never lists credential ids. A username still binds the
-        # challenge, so another account's passkey cannot finish it.
+        # The response never lists credential ids. The username is sealed
+        # inside the challenge, so another account's passkey cannot finish
+        # it, and the blob is not stored. Anonymous callers cannot fill the
+        # per-account cap that registration and step-up use.
         with self.store._lock:
+            self.store.conn.execute("BEGIN IMMEDIATE")
             try:
-                ceremony = authentication_options(rp_id=rp_id, origin=origin, allow=[])
-                self._store_challenge(bound, "authenticate", ceremony.challenge, rp_id, origin)
+                expires = int(datetime.now(UTC).timestamp()) + CHALLENGE_TTL_SECONDS
+                challenge = _seal_sign_in(
+                    self._key(),
+                    account_id=bound,
+                    rp_id=rp_id,
+                    origin=origin,
+                    expires=expires,
+                )
+                ceremony = authentication_options(
+                    rp_id=rp_id,
+                    origin=origin,
+                    allow=[],
+                    challenge=challenge,
+                )
                 self.store.conn.commit()
             except Exception:
                 self.store.conn.rollback()
@@ -541,7 +570,9 @@ class Factors:
                 """,
                 (challenge,),
             ).fetchone()
-        if challenge_row is None or str(challenge_row["kind"]) != "authenticate":
+        if challenge_row is None:
+            return self._finish_signed(credential, challenge, encoded)
+        if str(challenge_row["kind"]) != "authenticate":
             return None
         if int(challenge_row["used"]) or str(challenge_row["expires_at"]) <= _now():
             return None
@@ -621,6 +652,142 @@ class Factors:
                     self.store.conn.rollback()
                     raise
         return account
+
+    def _finish_signed(
+        self,
+        credential: dict[str, object],
+        challenge: bytes,
+        encoded: str,
+    ) -> Account | None:
+        """Finish a sealed sign-in challenge. It is stored only once spent."""
+        opened = self._open_sign_in(challenge)
+        if opened is None:
+            return None
+        account_id, rp_id, origin, expires_at = opened
+        with self.store._lock:
+            existing = self.store.conn.execute(
+                """
+                SELECT account_id, public_key, sign_count, rp_id
+                FROM passkeys WHERE credential_id = ?
+                """,
+                (encoded,),
+            ).fetchone()
+        if existing is None:
+            self._reject_signed(account_id, challenge, expires_at, fail=bool(account_id))
+            return None
+        account = self.store.get_id(str(existing["account_id"]))
+        if account is None or account.status != "active":
+            self._reject_signed("", challenge, expires_at, fail=False)
+            return None
+        if account_id and account_id != account.id:
+            self._reject_signed(account.id, challenge, expires_at, fail=True)
+            return None
+        if str(existing["rp_id"]) != rp_id:
+            self._reject_signed(account.id, challenge, expires_at, fail=True)
+            return None
+        with self.store._account_gate(account.username):
+            if self.store.account_is_locked(account.id):
+                self._reject_signed("", challenge, expires_at, fail=False)
+                return None
+            try:
+                verified = verify_authentication(
+                    credential,
+                    challenge=challenge,
+                    rp_id=rp_id,
+                    origin=origin,
+                    public_key=bytes(existing["public_key"]),
+                    sign_count=int(existing["sign_count"]),
+                )
+            except WebAuthnException:
+                self._reject_signed(account.id, challenge, expires_at, fail=True)
+                return None
+            with self.store._lock:
+                self.store.conn.execute("BEGIN IMMEDIATE")
+                try:
+                    current = self.store.conn.execute(
+                        "SELECT sign_count FROM passkeys WHERE credential_id = ?",
+                        (encoded,),
+                    ).fetchone()
+                    fresh = self._spend_sign_in(challenge, expires_at)
+                    new_count = int(verified.new_sign_count)
+                    old_count = int(current["sign_count"]) if current is not None else 0
+                    if current is None or not fresh or _sign_count_replayed(new_count, old_count):
+                        if fresh:
+                            self.store._note_second_factor_failure(account.id)
+                        else:
+                            self.store.conn.rollback()
+                        return None
+                    self.store.conn.execute(
+                        """
+                        UPDATE passkeys
+                        SET sign_count = ?, last_used_at = ?
+                        WHERE credential_id = ?
+                        """,
+                        (new_count, _now(), encoded),
+                    )
+                    self.store._clear_failure_counters(account.id)
+                    self.store.conn.commit()
+                except Exception:
+                    self.store.conn.rollback()
+                    raise
+        return account
+
+    def _open_sign_in(self, challenge: bytes) -> tuple[str, str, str, str] | None:
+        with self.store._lock:
+            key = self._read_key()
+        if key is None:
+            return None
+        try:
+            raw = unseal(key, challenge, aad=_SIGNIN_AAD)
+        except Exception:
+            return None
+        parsed = _unpack_sign_in(raw)
+        if parsed is None:
+            return None
+        account_id, rp_id, origin, expires_unix = parsed
+        if expires_unix <= int(datetime.now(UTC).timestamp()):
+            return None
+        expires_at = datetime.fromtimestamp(expires_unix, UTC).isoformat(timespec="seconds")
+        return account_id, rp_id, origin, expires_at
+
+    def _spend_sign_in(self, challenge: bytes, expires_at: str) -> bool:
+        """Record one use. Caller holds ``_lock`` and the write transaction."""
+        self.store.conn.execute(
+            "DELETE FROM webauthn_spent WHERE expires_at <= ?",
+            (_now(),),
+        )
+        seen = self.store.conn.execute(
+            "SELECT 1 FROM webauthn_spent WHERE challenge = ?",
+            (challenge,),
+        ).fetchone()
+        if seen is not None:
+            return False
+        self.store.conn.execute(
+            "INSERT INTO webauthn_spent (challenge, expires_at) VALUES (?, ?)",
+            (challenge, expires_at),
+        )
+        return True
+
+    def _reject_signed(
+        self,
+        account_id: str,
+        challenge: bytes,
+        expires_at: str,
+        *,
+        fail: bool,
+    ) -> None:
+        """Spend a sealed challenge. A repeat spend does not count as a new failure."""
+        with self.store._lock:
+            self.store.conn.execute("BEGIN IMMEDIATE")
+            try:
+                fresh = self._spend_sign_in(challenge, expires_at)
+                if fresh and fail and account_id:
+                    self.store._note_second_factor_failure(account_id)
+                    return
+                self.store.conn.commit()
+            except Exception:
+                self.store.conn.rollback()
+                raise
 
     def _finish_mfa(
         self,
@@ -817,11 +984,14 @@ class Factors:
             """,
             (account_id,),
         ).fetchall()
-        # Leave outstanding challenges in place. Deleting the oldest one let
-        # an anonymous caller evict a sign-in the user had already started.
+        # Registration and step-up only. Both require a session, so an
+        # anonymous options call cannot land here. Sign-in challenges are
+        # sealed and are not rows in this table. Leave stored challenges in
+        # place: deleting the oldest one used to drop a ceremony already
+        # in flight.
         if len(rows) >= _OPEN_CHALLENGES:
             raise FactorError(
-                "too many sign-in challenges",
+                "too many challenges",
                 status=429,
                 code="too_many",
             )
@@ -908,6 +1078,57 @@ def _label(value: str) -> str:
     if not text:
         return "passkey"
     return text[:64]
+
+
+def _seal_sign_in(
+    key: bytes,
+    *,
+    account_id: str,
+    rp_id: str,
+    origin: str,
+    expires: int,
+) -> bytes:
+    """Seal a fixed-width sign-in challenge. The length does not identify the account."""
+    if "\x00" in account_id or "\x00" in rp_id or "\x00" in origin:
+        raise FactorError("origin is not allowed")
+    try:
+        packed = (
+            int(expires).to_bytes(4, "big")
+            + _fit(rp_id, _SIGNIN_RP)
+            + _fit(origin, _SIGNIN_ORIGIN)
+            + _fit(account_id, _SIGNIN_ACCOUNT)
+        )
+    except ValueError:
+        raise FactorError("origin is not allowed") from None
+    return seal(key, packed, aad=_SIGNIN_AAD)
+
+
+def _unpack_sign_in(raw: bytes) -> tuple[str, str, str, int] | None:
+    width = 4 + _SIGNIN_RP + _SIGNIN_ORIGIN + _SIGNIN_ACCOUNT
+    if len(raw) != width:
+        return None
+    expires = int.from_bytes(raw[:4], "big")
+    rp_id = _unfit(raw[4 : 4 + _SIGNIN_RP])
+    origin = _unfit(raw[4 + _SIGNIN_RP : 4 + _SIGNIN_RP + _SIGNIN_ORIGIN])
+    account_id = _unfit(raw[4 + _SIGNIN_RP + _SIGNIN_ORIGIN :])
+    if rp_id is None or origin is None or account_id is None or not rp_id or not origin:
+        return None
+    return account_id, rp_id, origin, expires
+
+
+def _fit(value: str, width: int) -> bytes:
+    raw = value.encode("ascii")
+    if len(raw) > width:
+        raise ValueError("too long")
+    return raw.ljust(width, b"\x00")
+
+
+def _unfit(raw: bytes) -> str | None:
+    text = raw.split(b"\x00", 1)[0]
+    try:
+        return text.decode("ascii")
+    except UnicodeError:
+        return None
 
 
 def _sign_count_replayed(new_count: int, old_count: int) -> bool:

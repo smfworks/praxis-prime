@@ -6,9 +6,10 @@ from stdin, never from an argument.
 
 ``totp`` and ``passkey`` write ``accounts.db`` as the local OS user, the
 same trust as ``passwd``. Each of those commands appends an audit event
-and does not record the secret. Passkey enrollment itself is the daemon
-HTTP ceremony and requires a step-up there; this CLI can only list and
-remove credentials.
+and does not record the secret. ``totp disable`` asks for the password
+only. The HTTP disable route requires a step-up instead. Passkey
+enrollment itself is the daemon HTTP ceremony and requires a step-up
+there; this CLI can only list and remove credentials.
 
 docs/blueprint-addendum-2026-09.md §4.3, §6.2, and §6.3.
 """

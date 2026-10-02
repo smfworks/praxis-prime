@@ -658,10 +658,19 @@ class AccountStore:
         if not token:
             return False
         with self._lock:
+            row = self.conn.execute(
+                "SELECT id, account_id FROM sessions WHERE token_hash = ?",
+                (_hash(token),),
+            ).fetchone()
             cursor = self.conn.execute(
                 "UPDATE sessions SET revoked = 1 WHERE token_hash = ? AND revoked = 0",
                 (_hash(token),),
             )
+            if row is not None:
+                self.conn.execute(
+                    "DELETE FROM step_up WHERE account_id = ? AND session_id = ?",
+                    (row["account_id"], row["id"]),
+                )
             self.conn.commit()
         return cursor.rowcount > 0
 
@@ -871,6 +880,11 @@ class AccountStore:
                 origin TEXT NOT NULL,
                 expires_at TEXT NOT NULL,
                 used INTEGER NOT NULL DEFAULT 0
+            );
+
+            CREATE TABLE IF NOT EXISTS webauthn_spent (
+                challenge BLOB PRIMARY KEY,
+                expires_at TEXT NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS mfa_tokens (
