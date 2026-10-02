@@ -651,6 +651,13 @@ M0 packs/packaging ─┐
 - M7–M8 = **v0.6–v0.8**.
 - Everything else in §29 (Jury, Jarvis, swarm, etc.) is unchanged but sequenced after M3.
 
+**Patterns borrowed from OpenDots (2026-10-01):** see [OPENDOTS-BORROWED-PATTERNS.md](OPENDOTS-BORROWED-PATTERNS.md). These are ideas only, with no code copied. They are folded into the milestones above as follows:
+- **M1**, PR (6) per-profile workers (M1c): live revocation of in-flight runs and leased routine runs (pattern 3); per-worker derived credentials (pattern 6).
+- **M1**, PRs (1) and (7) SPA shell (M1d): AG-UI event types on the gateway stream (pattern 1); approval cards decided once per tool call (pattern 2); extra gateway request checks (pattern 7); optional revision-checked autosave for the canvas (pattern 9).
+- **M2:** the "setup needed" screen lists exactly what is missing (pattern 8).
+- **M4:** human takeover and handback of the sandboxed browser or desktop, with a redacted activity log (pattern 5); derived sandbox credentials (pattern 6); snapshot-bound element actions (pattern 4), which start in the current browser tool.
+- **M6:** approval-card idempotency on mobile sheets (pattern 2); re-check the gateway request checks for remote exposure (pattern 7).
+
 ---
 
 ## 9. Risks and open questions
