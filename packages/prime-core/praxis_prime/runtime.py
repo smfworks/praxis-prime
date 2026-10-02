@@ -63,6 +63,7 @@ class Runtime:
     system_prompt: str = ""
     tool_policy: ToolAllowlist | None = None
     profile_id: str = ""
+    data_root_token: int | None = None
 
     def close(self) -> None:
         if self.mcp is not None:
@@ -72,9 +73,12 @@ class Runtime:
         self.engine.labels.close()
         self.audit.close()
         self.db.close()
-        from praxis_prime.policy.boundary import bind_data_root
+        token = self.data_root_token
+        self.data_root_token = None
+        if token is not None:
+            from praxis_prime.policy.boundary import release_data_root
 
-        bind_data_root(None)
+            release_data_root(token)
 
     def set_model(self, spec: str) -> str:
         ref = parse_model_spec(spec)
@@ -231,12 +235,15 @@ def build_runtime(
         read_access=access,
         workspace_root=str(work),
     )
+    gate = ApprovalGate(approver)
     mcp = install_mcp_tools(
         tools,
         config_path=resolved_config,
         cwd=work,
         audit=audit,
         parent_env=environ,
+        gate=gate,
+        main_checkout=work,
     )
     browser = install_browser_tool(
         tools,
@@ -249,7 +256,7 @@ def build_runtime(
         router=router,
         registry=tools,
         policy=policy,
-        gate=ApprovalGate(approver),
+        gate=gate,
         db=db,
         store=SessionStore(db),
         audit=audit,
@@ -269,7 +276,9 @@ def build_runtime(
         built.mcp.allowed_servers = layout.allowlist.mcp
     from praxis_prime.policy.boundary import bind_data_root
 
-    bind_data_root(Path(data_path).parent if data_path is not None else None)
+    built.data_root_token = bind_data_root(
+        Path(data_path).parent if data_path is not None else None
+    )
     return built
 
 

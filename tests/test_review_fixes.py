@@ -1278,17 +1278,130 @@ def test_username_locks_stay_bounded(tmp_path: Path) -> None:
 
     store = AccountStore(tmp_path / "accounts.db")
     try:
-        held = store._account_gate("held-name")
-        held.acquire()
+        # Pinned but not acquired: this is the window where eviction used
+        # to drop the lock and the next caller created a second one.
+        held = store._pin_name_lock("held-name")
         try:
+            assert not held.lock.locked()
             for index in range(400):
-                store._account_gate(f"user{index}")
+                with store._account_gate(f"user{index}"):
+                    pass
             assert len(store._name_locks) <= _NAME_LOCK_CAP
-            assert "held-name" in store._name_locks
+            assert store._name_locks["held-name"] is held
+            again = store._pin_name_lock("held-name")
+            assert again is held
+            store._unpin_name_lock("held-name")
         finally:
-            held.release()
+            store._unpin_name_lock("held-name")
     finally:
         store.close()
+
+
+def test_data_root_binding_does_not_cross_contexts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from praxis_prime.policy.boundary import _data_root, bind_data_root, release_data_root
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_DATA_HOME", str(home / ".local" / "share"))
+    left = tmp_path / "left"
+    right = tmp_path / "right"
+    for path in (left, right):
+        path.mkdir()
+        (path / "accounts.db").write_text("x\n", encoding="utf-8")
+    bind_data_root(None)
+    barrier = threading.Barrier(2)
+    seen: dict[str, str] = {}
+    errors: list[BaseException] = []
+
+    def worker(name: str, path: Path) -> None:
+        try:
+            token = bind_data_root(path)
+            assert token is not None
+            barrier.wait(5)
+            seen[name] = str(_data_root())
+            barrier.wait(5)
+            release_data_root(token)
+        except BaseException as exc:
+            errors.append(exc)
+            try:
+                barrier.abort()
+            except threading.BrokenBarrierError:
+                pass
+
+    threads = [
+        threading.Thread(target=worker, args=("left", left)),
+        threading.Thread(target=worker, args=("right", right)),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(5)
+        assert not thread.is_alive()
+    assert not errors
+    assert seen["left"] == str(left.resolve())
+    assert seen["right"] == str(right.resolve())
+
+    token = bind_data_root(left)
+    assert token is not None
+    try:
+        seen_by_worker: dict[str, str] = {}
+
+        def follower() -> None:
+            seen_by_worker["root"] = str(_data_root())
+
+        follower_thread = threading.Thread(target=follower)
+        follower_thread.start()
+        follower_thread.join(5)
+        assert seen_by_worker["root"] == str(left.resolve())
+    finally:
+        release_data_root(token)
+        bind_data_root(None)
+
+
+def test_closing_one_runtime_keeps_the_other_data_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from praxis_prime.policy.boundary import _data_root, bind_data_root
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_DATA_HOME", str(home / ".local" / "share"))
+    left = tmp_path / "left"
+    right = tmp_path / "right"
+    for path in (left, right):
+        (path / "profiles" / "default").mkdir(parents=True)
+        (path / "profiles" / "default" / "SOUL.md").write_text(path.name + "\n", encoding="utf-8")
+    bind_data_root(None)
+    outer = build_runtime(
+        env={},
+        config_path=tmp_path / "missing.toml",
+        data_path=left / "prime.db",
+        cwd=tmp_path,
+        providers={"ollama": ScriptedProvider([AssistantFinal(content="ok")])},
+    )
+    inner = build_runtime(
+        env={},
+        config_path=tmp_path / "missing-inner.toml",
+        data_path=right / "prime.db",
+        cwd=tmp_path,
+        providers={"ollama": ScriptedProvider([AssistantFinal(content="ok")])},
+    )
+    try:
+        assert _data_root() == right.resolve()
+        assert is_secret_path(right / "profiles" / "default" / "SOUL.md")
+    finally:
+        inner.close()
+    try:
+        assert _data_root() == left.resolve()
+        assert is_secret_path(left / "profiles" / "default" / "SOUL.md")
+        assert not is_secret_path(right / "profiles" / "default" / "SOUL.md")
+    finally:
+        outer.close()
+        bind_data_root(None)
 
 
 def _create_args(name: str, data: Path, config: Path) -> object:

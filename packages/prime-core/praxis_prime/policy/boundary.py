@@ -13,6 +13,7 @@ ARCHITECTURE §8, §16, and §25.
 
 from __future__ import annotations
 
+import contextvars
 import errno
 import glob
 import http.client
@@ -732,20 +733,25 @@ def private_data_command(command: str, workspace: Path) -> bool:
     refused. ``cd -`` fails closed. A recursive reader (``grep -r``,
     ``rg``, ``git grep``, ``ag``, ``ack``, ``find -exec``, ``tar``, ``cp -r``,
     ``rsync``, ``zip -r``) is refused when a path it walks contains the data
-    directory. Bubblewrap also hides that directory. Without bubblewrap,
-    host shell is refused outright once account data exists; this check is
-    defence in depth.
+    directory. Every root ``account_data_present`` considers is checked, so
+    ``--data-dir`` does not leave the default XDG tree off the denylist.
+
+    ``pushd`` and ``popd`` are not tracked. The bubblewrap tmpfs over each
+    of those roots is the control that hides them; this walk is defence in
+    depth and only follows ``cd``. Without bubblewrap, host shell is refused
+    outright once account data exists.
     """
-    root = _data_root()
-    if root is None:
+    roots = _account_data_roots()
+    if not roots:
         return True
-    if str(root) in command:
-        return True
+    for root in roots:
+        if str(root) in command:
+            return True
     try:
         tokens = _shell_tokens(command)
     except ValueError:
         return True
-    return _command_reaches_data(tokens, workspace, root)
+    return any(_command_reaches_data(tokens, workspace, root) for root in roots)
 
 
 def account_data_present() -> bool:
@@ -769,6 +775,24 @@ def account_data_present() -> bool:
     return _directory_has_account_data(default)
 
 
+def _account_data_roots() -> list[Path] | None:
+    """Every directory ``account_data_present`` considers.
+
+    ``None`` means a path could not be resolved. Callers fail closed.
+    The override and the default XDG directory are both returned when
+    they differ, so ``--data-dir`` cannot leave the default tree unmasked.
+    """
+    primary = _data_root()
+    if primary is None:
+        return None
+    default = _xdg_data_root()
+    if default is None:
+        return None
+    if default == primary:
+        return [primary]
+    return [primary, default]
+
+
 def _xdg_data_root() -> Path | None:
     try:
         return Path(data_dir()).resolve(strict=False)
@@ -782,7 +806,7 @@ def _directory_has_account_data(root: Path) -> bool:
         return False
     if kind is not StatKind.DIR:
         return True
-    for name in ("accounts.db", "profiles", "backups", "prime.db", "SOUL.md"):
+    for name in ("accounts.db", "profiles", "backups", "prime.db", "audit.db", "SOUL.md"):
         if lstat_kind(root / name) is not StatKind.MISSING:
             return True
     try:
@@ -800,23 +824,84 @@ def _shell_tokens(command: str) -> list[str]:
 
 
 _data_root_lock = threading.Lock()
-_data_root_override: Path | None = None
+_process_data_roots: list[tuple[int, Path]] = []
+_next_data_root_token = 0
+# None: this context has not bound a root, so read the process stack.
+# (): this context explicitly follows the XDG path.
+# A non-empty tuple is this context's stack. The last frame wins.
+_local_data_roots: contextvars.ContextVar[tuple[tuple[int, Path], ...] | None] = (
+    contextvars.ContextVar("praxis_prime_data_root", default=None)
+)
 
 
-def bind_data_root(path: Path | None) -> None:
-    """Use ``path`` as the account data root. ``None`` follows the XDG path.
+def bind_data_root(path: Path | None) -> int | None:
+    """Bind ``path`` for this context. ``None`` follows the XDG path.
 
     ``praxis-prime --data-dir`` passes that directory into the runtime.
-    The denylist has to use it, not only ``$XDG_DATA_HOME``.
+    The binding is a stack on this context, not one process-global slot:
+    ``release_data_root`` drops only the frame it was given, and a second
+    runtime does not erase the first. Worker threads that have not bound a
+    root read the process stack, so a bind on the main thread is visible
+    inside gateway turns. ``None`` drops this context's frames. When this
+    context had none, it clears the process stack so a leaked bind cannot
+    outlive the caller.
     """
-    global _data_root_override
+    if path is None:
+        _reset_data_roots()
+        return None
+    return _push_data_root(Path(path))
+
+
+def release_data_root(token: int) -> None:
+    """Drop the frame ``bind_data_root`` returned. Other frames stay."""
     with _data_root_lock:
-        _data_root_override = None if path is None else Path(path)
+        _process_data_roots[:] = [item for item in _process_data_roots if item[0] != token]
+    current = _local_data_roots.get()
+    if not current:
+        return
+    remaining = tuple(item for item in current if item[0] != token)
+    _local_data_roots.set(remaining if remaining else None)
+
+
+def _push_data_root(path: Path) -> int:
+    global _next_data_root_token
+    with _data_root_lock:
+        _next_data_root_token += 1
+        token = _next_data_root_token
+        _process_data_roots.append((token, path))
+    current = _local_data_roots.get()
+    frames = () if current is None else current
+    _local_data_roots.set((*frames, (token, path)))
+    return token
+
+
+def _reset_data_roots() -> None:
+    current = _local_data_roots.get()
+    with _data_root_lock:
+        if current:
+            tokens = {token for token, _path in current}
+            _process_data_roots[:] = [
+                item for item in _process_data_roots if item[0] not in tokens
+            ]
+        elif current is None:
+            _process_data_roots.clear()
+    _local_data_roots.set(())
+
+
+def _data_root_override_path() -> Path | None:
+    current = _local_data_roots.get()
+    if current is not None:
+        if not current:
+            return None
+        return current[-1][1]
+    with _data_root_lock:
+        if not _process_data_roots:
+            return None
+        return _process_data_roots[-1][1]
 
 
 def _data_root() -> Path | None:
-    with _data_root_lock:
-        override = _data_root_override
+    override = _data_root_override_path()
     chosen = override
     if chosen is None:
         try:
@@ -861,6 +946,12 @@ def _private_path(resolved: Path, root: Path) -> bool:
     if resolved.parent == root and resolved.name.startswith("accounts.db-"):
         return True
     if _same_regular_inode(resolved, root / "accounts.db"):
+        return True
+    if resolved == root / "audit.db":
+        return True
+    if resolved.parent == root and resolved.name.startswith("audit.db-"):
+        return True
+    if _same_regular_inode(resolved, root / "audit.db"):
         return True
     for folder in ("profiles", "backups"):
         try:
@@ -1073,7 +1164,7 @@ def _command_reaches_data(tokens: list[str], workspace: Path, root: Path) -> boo
         expanded = _expand_globs(segment, cwd)
         if _recursive_segment(expanded, cwd, root):
             return True
-        if _plain_tokens_private(expanded, cwd):
+        if _plain_tokens_private(expanded, cwd, root):
             return True
         destination, failed = _cd_destination(expanded, cwd)
         if failed:
@@ -1105,11 +1196,11 @@ def _glob_token(token: str, cwd: Path) -> list[str]:
     return matches or [token]
 
 
-def _plain_tokens_private(argv: list[str], cwd: Path) -> bool:
+def _plain_tokens_private(argv: list[str], cwd: Path, root: Path) -> bool:
     for token in argv:
         if token.startswith("-") or token in _SHELL_SEPARATORS:
             continue
-        if _token_is_private(token, cwd):
+        if _token_is_private(token, cwd, root):
             return True
     return False
 
@@ -1124,13 +1215,13 @@ def _recursive_segment(argv: list[str], cwd: Path, root: Path) -> bool:
         if not paths:
             return _contains_data(cwd, root)
         return any(
-            _token_is_private(token, cwd) or _token_contains_data(token, cwd, root)
+            _token_is_private(token, cwd, root) or _token_contains_data(token, cwd, root)
             for token in paths
         )
     if not operands and Path(unwrapped[0]).name in _CWD_SEARCHERS:
         return _contains_data(cwd, root)
     for token in operands:
-        if _token_is_private(token, cwd) or _token_contains_data(token, cwd, root):
+        if _token_is_private(token, cwd, root) or _token_contains_data(token, cwd, root):
             return True
     return False
 
@@ -1280,8 +1371,24 @@ def _operands(args: list[str]) -> list[str]:
     return found
 
 
-def _token_is_private(token: str, workspace: Path) -> bool:
-    return _is_private_data(_token_path(token, workspace))
+def _token_is_private(token: str, workspace: Path, root: Path) -> bool:
+    return _path_private_under(_token_path(token, workspace), root)
+
+
+def _path_private_under(path: Path, root: Path) -> bool:
+    """True when ``path`` is account data under ``root``, not only the bound root."""
+    if lstat_kind(path) is StatKind.UNREADABLE or stat_kind(path) is StatKind.UNREADABLE:
+        return True
+    try:
+        resolved = Path(os.path.realpath(path, strict=False))
+    except (OSError, RuntimeError, ValueError):
+        return True
+    if _private_path(resolved, root):
+        return True
+    inodes, problem = _cached_private_inodes(root)
+    if problem:
+        return False
+    return _inode_in(resolved, inodes)
 
 
 def _token_contains_data(token: str, workspace: Path, root: Path) -> bool:

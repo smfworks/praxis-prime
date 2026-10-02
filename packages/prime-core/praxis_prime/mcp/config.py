@@ -45,6 +45,7 @@ class ServerSpec:
     trust: str = "untrusted"
     sandbox: str = "bwrap"
     network: str = "off"
+    write_scope: str = ""
     tool_risks: tuple[tuple[str, str], ...] = ()
     enabled: bool = True
     source: str = "config"
@@ -68,6 +69,8 @@ class ServerSpec:
             "network": self.network,
             "enabled": self.enabled,
         }
+        if self.write_scope:
+            table["write_scope"] = self.write_scope
         if self.command:
             table["command"] = self.command
         if self.args:
@@ -108,6 +111,8 @@ class ServerSpec:
         body["trust"] = self.trust
         body["sandbox"] = self.sandbox
         body["network"] = self.network
+        if self.write_scope:
+            body["writeScope"] = self.write_scope
         if not self.enabled:
             body["enabled"] = False
         if self.tool_risks:
@@ -175,6 +180,9 @@ def spec_from_mapping(name: str, raw: object, *, source: str) -> ServerSpec:
     network = _string(raw.get("network") or "off").lower()
     if network not in {"off", "on"}:
         raise McpConfigError(f"MCP server {checked} network must be off or on")
+    write_scope = _string(raw.get("write_scope") or raw.get("writeScope"))
+    if any(char in write_scope for char in "\r\n\x00"):
+        raise McpConfigError(f"MCP server {checked} write_scope cannot contain newlines")
     allow_raw = raw.get("env_allow") if "env_allow" in raw else raw.get("envAllow")
     env_allow = _optional_str_list(allow_raw)
     return ServerSpec(
@@ -190,6 +198,7 @@ def spec_from_mapping(name: str, raw: object, *, source: str) -> ServerSpec:
         trust=trust,
         sandbox=sandbox,
         network=network,
+        write_scope=write_scope,
         tool_risks=_pairs(
             raw.get("tools") if _is_risk_map(raw.get("tools")) else raw.get("toolRisks")
         ),

@@ -4,6 +4,11 @@ bubblewrap is used when ``bwrap`` is on PATH and the server asks for it.
 The parent environment is never passed through. Only the allowlist, plus
 values the user wrote on that server, are visible to the child.
 
+The server's working directory is mounted read-only. A read-write bind is
+added only for an explicit per-server directory that a person approved,
+and that directory is never ``$HOME`` and never the main checkout. The
+mount decision is written to the audit log.
+
 A failed bubblewrap start does not fall back to the host. A missing
 ``bwrap`` binary runs the command with the same allowlist and no extra
 variables. ARCHITECTURE §13.
@@ -13,9 +18,11 @@ from __future__ import annotations
 
 import subprocess
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
-from praxis_prime.sandbox.bwrap import bwrap_available
+from praxis_prime.sandbox.bwrap import bwrap_available, writable_scope_ok
 
 _PYTHON = ("python", "python3")
 
@@ -43,6 +50,71 @@ def child_environment(
     return env
 
 
+@dataclass(frozen=True, slots=True)
+class McpMount:
+    """How the server's filesystem is mounted. ``mode`` is ``ro`` or ``rw``."""
+
+    mode: str
+    decision: str
+    scope: str
+
+
+def mcp_mount_decision(
+    cwd: Path,
+    write_scope: Path | None,
+    *,
+    write_approved: bool,
+    main_checkout: Path | None,
+) -> McpMount:
+    """Read-only cwd unless ``write_scope`` was approved and is a legal directory.
+
+    A missing scope is the default and is allowed. A scope that was asked
+    for and refused, or that is ``$HOME`` or the main checkout, stays
+    read-only and is recorded as a denial.
+    """
+    if write_scope is None:
+        return McpMount("ro", "allow", "")
+    try:
+        scope = write_scope.resolve()
+        work = cwd.resolve()
+    except OSError:
+        return McpMount("ro", "deny", str(write_scope))
+    legal = (
+        write_approved
+        and scope.is_dir()
+        and writable_scope_ok(scope, scope, main_checkout)
+    )
+    if not legal:
+        return McpMount("ro", "deny", str(scope))
+    chosen = work if scope == work else scope
+    return McpMount("rw", "allow", str(chosen))
+
+
+def audit_mcp_mount(
+    audit: Any,
+    *,
+    server: str,
+    mount: McpMount,
+    main_checkout: Path | None,
+) -> None:
+    """Record the mount decision the way shell records ``shell_mount``."""
+    if audit is None or not hasattr(audit, "append"):
+        return
+    summary = f"{mount.mode} {mount.decision} {server}"
+    audit.append(
+        session_id=None,
+        kind="mcp_mount",
+        summary=summary[:300],
+        payload={
+            "server": server,
+            "mount": mount.mode,
+            "decision": mount.decision,
+            "write_scope": mount.scope,
+            "main_checkout": "" if main_checkout is None else str(main_checkout),
+        },
+    )
+
+
 def build_mcp_bwrap_argv(
     command: str,
     args: tuple[str, ...] | list[str],
@@ -50,8 +122,16 @@ def build_mcp_bwrap_argv(
     cwd: Path,
     env: Mapping[str, str],
     network: str,
+    write_scope: Path | None = None,
+    write_approved: bool = False,
+    main_checkout: Path | None = None,
 ) -> list[str]:
-    """Return a bwrap command that runs the server with ``--clearenv``."""
+    """Return a bwrap command that runs the server with ``--clearenv``.
+
+    The working directory is ``--ro-bind``. ``write_scope`` is ``--bind``
+    only when ``write_approved`` is set and the directory is not ``$HOME``
+    or ``main_checkout``.
+    """
     argv = [
         "bwrap",
         "--unshare-all",
@@ -65,6 +145,12 @@ def build_mcp_bwrap_argv(
         argv.extend(["--setenv", key, value])
     argv.extend(["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"])
     work = cwd.resolve()
+    mount = mcp_mount_decision(
+        work,
+        write_scope,
+        write_approved=write_approved,
+        main_checkout=main_checkout,
+    )
     bound: list[Path] = []
     for optional in ("/usr", "/bin", "/lib", "/lib64", "/etc"):
         path = Path(optional)
@@ -72,13 +158,20 @@ def build_mcp_bwrap_argv(
             argv.extend(["--ro-bind", optional, optional])
             bound.append(path)
     if work.exists():
-        argv.extend(["--bind", str(work), str(work)])
+        flag = "--bind" if mount.mode == "rw" and mount.scope == str(work) else "--ro-bind"
+        argv.extend([flag, str(work), str(work)])
         bound.append(work)
+    if mount.mode == "rw" and mount.scope and mount.scope != str(work):
+        # A parent --ro-bind (the cwd, or /usr) does not make this directory
+        # writable. Mount it afterwards so the read-write bind sits on top.
+        scope = Path(mount.scope)
+        if scope.exists():
+            argv.extend(["--bind", str(scope), str(scope)])
+            bound.append(scope)
     for candidate in _bind_candidates(command, args):
         if _covered(candidate, bound):
             continue
-        flag = "--ro-bind"
-        argv.extend([flag, str(candidate), str(candidate)])
+        argv.extend(["--ro-bind", str(candidate), str(candidate)])
         bound.append(candidate)
     argv.extend(["--chdir", str(work), "--", command, *args])
     return argv
@@ -94,14 +187,35 @@ def popen_stdio(
     parent: Mapping[str, str],
     sandbox: str,
     network: str,
+    write_scope: Path | None = None,
+    write_approved: bool = False,
+    main_checkout: Path | None = None,
+    audit: Any = None,
+    server: str = "",
 ) -> subprocess.Popen[bytes]:
     """Start the server. The returned process speaks MCP on stdin and stdout."""
     env = child_environment(command, allow, explicit, parent)
     work = cwd.resolve()
     work.mkdir(parents=True, exist_ok=True)
+    mount = mcp_mount_decision(
+        work,
+        write_scope,
+        write_approved=write_approved,
+        main_checkout=main_checkout,
+    )
+    audit_mcp_mount(audit, server=server, mount=mount, main_checkout=main_checkout)
     use_bwrap = sandbox != "off" and bwrap_available()
     if use_bwrap:
-        argv = build_mcp_bwrap_argv(command, args, cwd=work, env=env, network=network)
+        argv = build_mcp_bwrap_argv(
+            command,
+            args,
+            cwd=work,
+            env=env,
+            network=network,
+            write_scope=write_scope,
+            write_approved=write_approved,
+            main_checkout=main_checkout,
+        )
     else:
         argv = [command, *args]
     try:

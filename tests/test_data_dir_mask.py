@@ -8,7 +8,13 @@ from pathlib import Path
 import pytest
 
 from praxis_prime.approvals.card import HOST_FULL_WRITE, HOST_NEEDS_BWRAP
-from praxis_prime.policy.boundary import account_data_present, bind_data_root, private_data_command
+from praxis_prime.policy.boundary import (
+    account_data_present,
+    bind_data_root,
+    is_secret_path,
+    private_data_command,
+    release_data_root,
+)
 from praxis_prime.sandbox.bwrap import SandboxError, build_bwrap_argv, bwrap_available, run_bwrap
 from praxis_prime.tools.registry import ToolContext
 from praxis_prime.tools.shell import execute_shell
@@ -371,3 +377,64 @@ def test_fresh_data_dir_still_checks_the_default_data_dir(
     )
     with pytest.raises(RuntimeError, match="install bubblewrap to run shell commands"):
         execute_shell({"command": "echo hello"}, context)
+    bind_data_root(None)
+
+
+def test_override_masks_and_denies_the_default_xdg_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home, private = _tree(tmp_path, monkeypatch)
+    fresh = tmp_path / "fresh-data"
+    fresh.mkdir()
+    token = bind_data_root(fresh)
+    try:
+        assert account_data_present() is True
+        argv = build_bwrap_argv("echo hi", home)
+        masked = "/workspace/.local/share/praxis-prime"
+        assert argv[argv.index(masked) - 1] == "--tmpfs"
+        assert private_data_command(
+            "cat .local/share/praxis-prime/accounts.db",
+            home,
+        )
+        pushd = "pushd .local/share/praxis-prime && cat profiles/work/SOUL.md"
+        if not bwrap_available():
+            return
+        output = run_bwrap(
+            "cat .local/share/praxis-prime/profiles/work/SOUL.md",
+            home,
+            lambda: False,
+        )
+        assert _SECRET not in output
+        assert _HASH not in output
+        hidden = run_bwrap(pushd, home, lambda: False)
+        assert _SECRET not in hidden
+        assert (private / "profiles" / "work" / "SOUL.md").read_text(encoding="utf-8").startswith(
+            _SECRET
+        )
+    finally:
+        if token is not None:
+            release_data_root(token)
+        bind_data_root(None)
+
+
+def test_audit_db_marks_a_data_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_DATA_HOME", str(home / ".local" / "share"))
+    root = home / ".local" / "share" / "praxis-prime"
+    root.mkdir(parents=True)
+    audit = root / "audit.db"
+    audit.write_text("audit-secret\n", encoding="utf-8")
+    link = home / "audit-link"
+    os.link(audit, link)
+    bind_data_root(None)
+    try:
+        assert account_data_present() is True
+        assert is_secret_path(audit)
+        assert is_secret_path(link)
+        assert private_data_command("cat .local/share/praxis-prime/audit.db", home)
+    finally:
+        bind_data_root(None)

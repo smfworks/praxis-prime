@@ -158,20 +158,37 @@ def build_bwrap_argv(
 
 
 def _data_dir_mask(mounts: list[tuple[Path, str]]) -> list[str]:
-    """Hide the account data directory when a bind mount contains it.
+    """Hide every account-data root a bind mount contains.
 
     A later ``--tmpfs`` covers that path inside the sandbox, so no command
-    string can read profiles, backups, or ``accounts.db``. Containment is
-    by real path and by ``(st_dev, st_ino)``, so a bind-mount alias of a
-    parent is masked too. A bind that sits inside the data directory is
-    refused. The directory is left alone when it is not on any mount.
+    string can read profiles, backups, ``accounts.db``, or ``audit.db``.
+    Containment is by real path and by ``(st_dev, st_ino)``, so a
+    bind-mount alias of a parent is masked too. A bind that sits inside a
+    data directory is refused. ``pushd`` and ``popd`` are not tracked by
+    the command denylist; this mask is the control that hides those
+    directories. Every root ``account_data_present`` considers is masked,
+    including the default XDG tree when ``--data-dir`` points somewhere
+    else. A root that is not on any mount is left alone.
     """
-    from praxis_prime.policy.boundary import _data_root
+    from praxis_prime.policy.boundary import _account_data_roots
+
+    roots = _account_data_roots()
+    if not roots:
+        return []
+    masked: list[str] = []
+    seen: set[str] = set()
+    for root in roots:
+        masked.extend(_mask_one_data_root(mounts, root, seen))
+    return masked
+
+
+def _mask_one_data_root(
+    mounts: list[tuple[Path, str]],
+    root: Path,
+    seen: set[str],
+) -> list[str]:
     from praxis_prime.statfile import StatKind, lstat_kind
 
-    root = _data_root()
-    if root is None:
-        return []
     try:
         data = Path(os.path.realpath(root, strict=False))
     except OSError:
@@ -179,7 +196,6 @@ def _data_dir_mask(mounts: list[tuple[Path, str]]) -> list[str]:
     if lstat_kind(data) is not StatKind.DIR:
         return []
     masked: list[str] = []
-    seen: set[str] = set()
     for src, dest in mounts:
         _refuse_bind_inside_data(src, data)
         relative = _data_relative_to_mount(src, data)

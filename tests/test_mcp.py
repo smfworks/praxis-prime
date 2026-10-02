@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 from tests.fakes import ScriptedProvider
@@ -223,7 +224,7 @@ def test_bwrap_mounts_a_symlinked_interpreter_outside_usr(tmp_path: Path):
     assert _mount_flag(argv, str(bindir.resolve())) == "--ro-bind"
     if libdir is not None:
         assert _mount_flag(argv, str(libdir)) == "--ro-bind"
-    assert _mount_flag(argv, str(work.resolve())) == "--bind"
+    assert _mount_flag(argv, str(work.resolve())) == "--ro-bind"
     in_ci = os.environ.get("CI") == "true" or os.environ.get("GITHUB_ACTIONS") == "true"
     if not bwrap_available():
         if in_ci:
@@ -338,8 +339,11 @@ def test_untrusted_write_asks_and_echo_is_fenced(tmp_path: Path, monkeypatch):
 
 def test_allowed_write_is_audited(tmp_path: Path):
     config = tmp_path / "config"
-    log = tmp_path / "calls.txt"
-    add_server(config, _stdio_spec(tmp_path, log))
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    log = scratch / "calls.txt"
+    spec = _stdio_spec(tmp_path, log)
+    add_server(config, replace(spec, write_scope=str(scratch)))
     provider = ScriptedProvider(
         [
             _tool_reply("mcp__fake__write_note", {"text": "hello"}),
@@ -525,3 +529,108 @@ class _Stub:
     def get_prompt(self, name: str, *, session_id: str | None = None) -> str:
         del name, session_id
         return "prompt"
+
+
+def test_mcp_cwd_is_read_only_unless_a_scope_is_approved(tmp_path: Path) -> None:
+    work = tmp_path / "checkout"
+    work.mkdir()
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    note = work / "note.txt"
+    note.write_text("kept\n", encoding="utf-8")
+    planted = scratch / "planted.txt"
+    script = tmp_path / "write.py"
+    script.write_text(
+        "from pathlib import Path\n"
+        f"note = Path({str(note)!r})\n"
+        f"planted = Path({str(planted)!r})\n"
+        "try:\n"
+        "    note.write_text('changed\\n')\n"
+        "except OSError:\n"
+        "    pass\n"
+        "planted.write_text('nope\\n')\n",
+        encoding="utf-8",
+    )
+    env = {"PATH": "/usr/bin:/bin", "PYTHONUNBUFFERED": "1"}
+    denied = build_mcp_bwrap_argv(
+        sys.executable,
+        (str(script),),
+        cwd=work,
+        env=env,
+        network="off",
+        write_scope=scratch,
+        write_approved=False,
+        main_checkout=work,
+    )
+    assert _mount_flag(denied, str(work.resolve())) == "--ro-bind"
+    assert str(scratch.resolve()) not in denied
+    home = build_mcp_bwrap_argv(
+        sys.executable,
+        (str(script),),
+        cwd=work,
+        env=env,
+        network="off",
+        write_scope=Path.home(),
+        write_approved=True,
+        main_checkout=work,
+    )
+    assert _mount_flag(home, str(work.resolve())) == "--ro-bind"
+    checkout = build_mcp_bwrap_argv(
+        sys.executable,
+        (str(script),),
+        cwd=work,
+        env=env,
+        network="off",
+        write_scope=work,
+        write_approved=True,
+        main_checkout=work,
+    )
+    assert _mount_flag(checkout, str(work.resolve())) == "--ro-bind"
+    allowed = build_mcp_bwrap_argv(
+        sys.executable,
+        (str(script),),
+        cwd=work,
+        env=env,
+        network="off",
+        write_scope=scratch,
+        write_approved=True,
+        main_checkout=work,
+    )
+    assert _mount_flag(allowed, str(work.resolve())) == "--ro-bind"
+    assert _mount_flag(allowed, str(scratch.resolve())) == "--bind"
+    events: list[dict[str, object]] = []
+
+    class _Audit:
+        def append(self, **kwargs: object) -> str:
+            events.append(kwargs)
+            return "1"
+
+    from praxis_prime.mcp.sandbox import audit_mcp_mount, mcp_mount_decision
+
+    audit_mcp_mount(
+        _Audit(),
+        server="notes",
+        mount=mcp_mount_decision(
+            work, scratch, write_approved=False, main_checkout=work
+        ),
+        main_checkout=work,
+    )
+    assert events[0]["kind"] == "mcp_mount"
+    payload = events[0]["payload"]
+    assert isinstance(payload, dict)
+    assert payload["decision"] == "deny"
+    assert payload["mount"] == "ro"
+    if not bwrap_available():
+        in_ci = os.environ.get("CI") == "true" or os.environ.get("GITHUB_ACTIONS") == "true"
+        if in_ci:
+            raise AssertionError("bubblewrap must be installed in CI")
+        return
+    subprocess.run(denied, capture_output=True, text=True, timeout=30, check=False)
+    assert note.read_text(encoding="utf-8") == "kept\n"
+    assert not planted.exists()
+    granted = subprocess.run(
+        allowed, capture_output=True, text=True, timeout=30, check=False
+    )
+    assert granted.returncode == 0, granted.stderr
+    assert note.read_text(encoding="utf-8") == "kept\n"
+    assert planted.read_text(encoding="utf-8") == "nope\n"
