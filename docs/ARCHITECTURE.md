@@ -1260,6 +1260,8 @@ M0 packs/packaging ─┐
 | **M7** | Tauri 2 desktop shell around the same SPA, talking to a local or remote server. | v0.6–v0.8 | The desktop app uses the same accounts as the web UI. |
 | **M8** | Microsoft 365: Entra ID sign-in, a Teams connector, and Intune/winget packaging. | v0.6–v0.8 | A tenant user signs in with Entra, approvals can arrive in Teams, and Intune can deploy to a pilot group. |
 
+Patterns borrowed from OpenDots (MIT, ideas only, no code copied) are folded into M1 (per-profile workers and the SPA shell), M2, M4, M6, and the browser tool. See [OPENDOTS-BORROWED-PATTERNS.md](OPENDOTS-BORROWED-PATTERNS.md) and Addendum A §8.
+
 **Where this sits in the phase table.** M0–M3 complete the MVP (v0.2–0.3). M4, M5a, M5b, and M6 sit in **v0.5** beside the items already in that row. Microsoft Teams is **M8**. Tauri desktop is **M7** (v0.6–v0.8). Jury, Jarvis, swarm, and the other work already described below stay in the phase table and are sequenced after M3. PR-sized splits and exit detail are in the addendum §8.
 
 | Phase | Scope | Decision Engine milestone | Dials milestone | Exit criteria |
