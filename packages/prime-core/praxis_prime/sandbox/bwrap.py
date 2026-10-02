@@ -18,6 +18,7 @@ unsandboxed run.
 
 from __future__ import annotations
 
+import contextvars
 import os
 import shutil
 import signal
@@ -33,23 +34,76 @@ class SandboxError(RuntimeError):
 
 
 _profile_lock = threading.Lock()
-_bound_profile = ""
+_process_profiles: list[tuple[int, str]] = []
+_next_profile_token = 0
+# None: this context has not bound a profile, so read the process stack.
+# (): this context explicitly has no profile.
+# A non-empty tuple is this context's stack. The last frame wins.
+_local_profiles: contextvars.ContextVar[tuple[tuple[int, str], ...] | None] = (
+    contextvars.ContextVar("praxis_prime_profile", default=None)
+)
 
 
-def bind_profile(profile: str | None) -> None:
-    """Remember the runtime's profile id for worktree bind checks.
+def bind_profile(profile: str | None) -> int | None:
+    """Bind ``profile`` for this context. ``None`` or ``""`` clears it here.
 
-    ``None`` or ``""`` means no profile is bound. The shell sandbox uses
-    this to refuse a worktree whose profile segment is someone else's.
+    The binding is a stack, matching ``bind_data_root``. ``release_profile``
+    drops only the frame it was given. Worker threads that have not bound a
+    profile read the process stack. A context that has not bound a profile
+    does not clear another runtime's stack.
     """
-    global _bound_profile
+    if not profile:
+        _reset_profiles()
+        return None
+    return _push_profile(profile)
+
+
+def release_profile(token: int) -> None:
+    """Drop the frame ``bind_profile`` returned. Other frames stay."""
     with _profile_lock:
-        _bound_profile = profile or ""
+        _process_profiles[:] = [item for item in _process_profiles if item[0] != token]
+    current = _local_profiles.get()
+    if not current:
+        return
+    remaining = tuple(item for item in current if item[0] != token)
+    _local_profiles.set(remaining if remaining else None)
 
 
 def bound_profile() -> str:
+    """Profile id for this context, or the process stack when this context has not bound one."""
+    current = _local_profiles.get()
+    if current is not None:
+        if not current:
+            return ""
+        return current[-1][1]
     with _profile_lock:
-        return _bound_profile
+        if not _process_profiles:
+            return ""
+        return _process_profiles[-1][1]
+
+
+def _push_profile(profile: str) -> int:
+    global _next_profile_token
+    with _profile_lock:
+        _next_profile_token += 1
+        token = _next_profile_token
+        _process_profiles.append((token, profile))
+    current = _local_profiles.get()
+    frames = () if current is None else current
+    _local_profiles.set((*frames, (token, profile)))
+    return token
+
+
+def _reset_profiles() -> None:
+    """Clear this context's profile. Leave another context's bind on the process stack."""
+    current = _local_profiles.get()
+    with _profile_lock:
+        if current:
+            tokens = {token for token, _profile in current}
+            _process_profiles[:] = [
+                item for item in _process_profiles if item[0] not in tokens
+            ]
+    _local_profiles.set(())
 
 
 @dataclass(frozen=True, slots=True)

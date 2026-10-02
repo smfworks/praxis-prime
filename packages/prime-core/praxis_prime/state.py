@@ -166,18 +166,20 @@ def release_db_locks(fds: list[int]) -> None:
 
 
 def refuse_misplaced_database(path: Path) -> None:
-    """Refuse a data directory that is ``profiles/``, or an illegal profile id.
+    """Refuse ``<account-root>/profiles/prime.db``, or an illegal profile id.
 
     ``--data-dir <data>/profiles`` would otherwise create
-    ``profiles/prime.db`` beside the real profile folders. A folder such
-    as ``profiles/Bad_Name`` is not a profile id and must not open without
+    ``profiles/prime.db`` beside the real profile folders. A data directory
+    that is itself named ``profiles``, and is not that folder inside an
+    account root, is a normal data directory. A folder such as
+    ``profiles/Bad_Name`` is not a profile id and must not open without
     profile scoping.
     """
     candidate = Path(path)
     if candidate.name != DB_FILENAME:
         return
     parent = candidate.parent
-    if parent.name == "profiles":
+    if parent.name == "profiles" and _profiles_tree_inside_account_root(parent):
         raise ValueError(
             "refusing to use a profiles directory as the data directory; "
             "pass the account data root"
@@ -188,6 +190,39 @@ def refuse_misplaced_database(path: Path) -> None:
 
     if profile_id(parent.name) is None:
         raise ValueError(f"invalid profile id {parent.name!r}")
+
+
+def _profiles_tree_inside_account_root(profiles_dir: Path) -> bool:
+    """True when ``profiles_dir`` is the profile tree of an account root.
+
+    A directory that is merely named ``profiles`` is not that tree. The
+    default XDG data directory counts even before it holds files, and so
+    does a parent that already has account data or profile folders.
+    """
+    account = profiles_dir.parent
+    try:
+        if account.resolve() == Path(data_dir()).resolve():
+            return True
+    except (OSError, RuntimeError, ValueError):
+        return True
+    for name in ("accounts.db", "audit.db", "backups", "SOUL.md", "prime.db"):
+        if _path_exists(account / name):
+            return True
+    try:
+        children = list(profiles_dir.iterdir())
+    except OSError:
+        return True
+    from praxis_prime.profiles.ids import profile_id
+
+    return any(child.is_dir() and profile_id(child.name) is not None for child in children)
+
+
+def _path_exists(path: Path) -> bool:
+    try:
+        os.lstat(path)
+    except OSError:
+        return False
+    return True
 
 
 def default_db_path(env: Mapping[str, str] | None = None) -> Path:

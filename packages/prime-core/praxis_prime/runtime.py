@@ -64,6 +64,7 @@ class Runtime:
     tool_policy: ToolAllowlist | None = None
     profile_id: str = ""
     data_root_token: int | None = None
+    profile_token: int | None = None
 
     def close(self) -> None:
         if self.mcp is not None:
@@ -79,9 +80,12 @@ class Runtime:
             from praxis_prime.policy.boundary import release_data_root
 
             release_data_root(token)
-        from praxis_prime.sandbox.bwrap import bind_profile
+        profile_token = self.profile_token
+        self.profile_token = None
+        if profile_token is not None:
+            from praxis_prime.sandbox.bwrap import release_profile
 
-        bind_profile(None)
+            release_profile(profile_token)
 
     def set_model(self, spec: str) -> str:
         ref = parse_model_spec(spec)
@@ -283,7 +287,7 @@ def build_runtime(
     built.data_root_token = bind_data_root(
         Path(data_path).parent if data_path is not None else None
     )
-    bind_profile(layout.profile_id or None)
+    built.profile_token = bind_profile(layout.profile_id or None)
     return built
 
 

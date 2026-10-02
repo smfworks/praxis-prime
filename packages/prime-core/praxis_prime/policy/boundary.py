@@ -886,11 +886,47 @@ def _command_names_data_root(command: str, workspace: Path, root: Path) -> bool:
         work = str(Path(os.path.realpath(workspace, strict=False)))
     except OSError:
         return True
-    stripped = command.replace(work, "")
+    stripped = _strip_bounded_path(command, work)
     given = str(workspace)
     if given != work:
-        stripped = stripped.replace(given, "")
+        stripped = _strip_bounded_path(stripped, given)
     return needle in stripped
+
+
+def _strip_bounded_path(text: str, path: str) -> str:
+    """Remove ``path`` only where it is a whole path or a directory prefix.
+
+    ``<worktree>2/x`` keeps the data-root text. ``<worktree>/src`` does not,
+    because ``/`` continues a path inside the worktree.
+    """
+    if not path:
+        return text
+    pieces: list[str] = []
+    start = 0
+    while True:
+        index = text.find(path, start)
+        if index < 0:
+            pieces.append(text[start:])
+            break
+        before = text[index - 1] if index else ""
+        after_at = index + len(path)
+        after = text[after_at] if after_at < len(text) else ""
+        if _path_edge(before, trailing=False) and _path_edge(after, trailing=True):
+            pieces.append(text[start:index])
+            start = after_at
+            continue
+        pieces.append(text[start:after_at])
+        start = after_at
+    return "".join(pieces)
+
+
+def _path_edge(char: str, *, trailing: bool) -> bool:
+    """True when ``char`` does not continue a single path segment."""
+    if char == "":
+        return True
+    if trailing and char == "/":
+        return True
+    return char in " \t\n\r\"'`=;|&<>(){}$"
 
 
 _data_root_lock = threading.Lock()
@@ -992,8 +1028,8 @@ def _is_private_data(path: Path) -> bool:
     3.14 hide permission errors, so this uses ``os.stat`` / ``os.path.realpath``.
 
     When the inode walk stops early, inodes it already collected are still
-    secret. A hard link the partial walk did not reach is not. That
-    remaining check is fail-open; path rules above still refuse the tree.
+    secret. A regular file with more than one link is secret too, so a
+    hard link past the cap is not treated as readable.
     """
     roots = _account_data_roots()
     if not roots:
@@ -1008,10 +1044,21 @@ def _is_private_data(path: Path) -> bool:
         if _private_path(resolved, root):
             return True
     for root in roots:
-        inodes, _problem = _cached_private_inodes(root)
+        inodes, problem = _cached_private_inodes(root)
         if _inode_in(resolved, inodes):
             return True
+        if problem and _extra_link(resolved):
+            return True
     return False
+
+
+def _extra_link(path: Path) -> bool:
+    """True for a regular file that has another name on disk."""
+    try:
+        st = os.stat(path, follow_symlinks=True)
+    except OSError:
+        return False
+    return stat.S_ISREG(st.st_mode) and st.st_nlink > 1
 
 
 def _private_path(resolved: Path, root: Path) -> bool:
@@ -1499,9 +1546,11 @@ def _path_private_under(path: Path, root: Path) -> bool:
     if _private_path(resolved, root):
         return True
     inodes, problem = _cached_private_inodes(root)
-    if problem:
-        return False
-    return _inode_in(resolved, inodes)
+    if _inode_in(resolved, inodes):
+        return True
+    if problem and _extra_link(resolved):
+        return True
+    return False
 
 
 def _token_contains_data(token: str, workspace: Path, root: Path) -> bool:

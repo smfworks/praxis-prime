@@ -103,7 +103,10 @@ _FIRST_FEDERAL: tuple[Dial, ...] = (
     Dial(
         id="coppa",
         title="COPPA",
-        summary="Under-13 mode. Paired with FERPA in the blueprint. Not implemented.",
+        summary=(
+            "Under-13 signals. Local models only. Third-party egress denied. "
+            "Memory writes are redacted. Not a parental-consent system."
+        ),
         wave="first",
     ),
     Dial(
@@ -149,7 +152,10 @@ _V1: tuple[Dial, ...] = (
     Dial(
         id="pci",
         title="PCI DSS",
-        summary="Card-number redaction and a ban on storing PANs. Not implemented.",
+        summary=(
+            "Luhn-valid card numbers are denied on egress and redacted to the last four. "
+            "Not a PCI DSS attestation."
+        ),
         wave="v1.0",
     ),
     Dial(

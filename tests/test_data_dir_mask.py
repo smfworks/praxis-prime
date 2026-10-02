@@ -305,6 +305,8 @@ def test_cd_inside_a_worktree_is_allowed(
     assert not private_data_command("cd src; cat m.py", worktree)
     assert not private_data_command("cd src\ncat m.py", worktree)
     assert not private_data_command(f"cat {worktree}/src/m.py", worktree)
+    sibling = Path(str(worktree) + "2") / "x"
+    assert private_data_command(f"cat {sibling}", worktree)
     assert private_data_command("cd .. && cat src/m.py", worktree)
     assert private_data_command("cd ../../../profiles/work && cat SOUL.md", worktree)
     assert private_data_command(f"cat {worktree}/src/m.py {private}/accounts.db", worktree)

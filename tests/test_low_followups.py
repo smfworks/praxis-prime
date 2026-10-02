@@ -120,7 +120,8 @@ def test_partial_inode_set_is_checked_past_the_cap(
     assert missed is not None
     missed_link = home / "missed-link"
     os.link(missed, missed_link)
-    assert not is_secret_path(missed_link)
+    assert is_secret_path(missed_link)
+    assert not is_secret_path(home / "hello.txt")
     clear_data_inode_cache()
     bind_data_root(None)
 
@@ -139,14 +140,22 @@ def test_cd_from_home_into_the_data_dir_is_refused(
 
 def test_profiles_directory_is_not_a_data_dir(tmp_path: Path) -> None:
     root = tmp_path / "data"
+    root.mkdir()
+    (root / "accounts.db").write_text("hash\n", encoding="utf-8")
     profiles = root / "profiles"
-    profiles.mkdir(parents=True)
+    profiles.mkdir()
     misplaced = profiles / "prime.db"
     with pytest.raises(ValueError, match="profiles directory"):
         resolve_runtime_layout(None, data_file=misplaced, profile=None)
     with pytest.raises(ValueError, match="profiles directory"):
         StateDB(misplaced)
     assert not misplaced.exists()
+    named = tmp_path / "profiles"
+    named.mkdir()
+    database = named / "prime.db"
+    opened = StateDB(database)
+    opened.close()
+    assert database.is_file()
 
 
 def test_invalid_profile_directory_is_refused(tmp_path: Path) -> None:
@@ -213,3 +222,40 @@ def test_worktree_shape_follows_profiles_and_the_bound_profile(
     finally:
         bind_profile(None)
         bind_data_root(None)
+
+
+def test_bind_profile_is_per_context(tmp_path: Path) -> None:
+    import threading
+
+    from praxis_prime.sandbox.bwrap import bind_profile, bound_profile, release_profile
+
+    bind_profile(None)
+    token = bind_profile("work")
+    assert token is not None
+    seen: dict[str, str] = {}
+
+    def worker() -> None:
+        seen["worker"] = bound_profile()
+
+    try:
+        thread = threading.Thread(target=worker)
+        thread.start()
+        thread.join(5)
+        assert seen["worker"] == "work"
+        other = threading.Thread(target=lambda: bind_profile(None))
+        other.start()
+        other.join(5)
+        again = threading.Thread(target=worker)
+        again.start()
+        again.join(5)
+        assert seen["worker"] == "work"
+        assert bound_profile() == "work"
+        bind_profile(None)
+        assert bound_profile() == ""
+        cleared = threading.Thread(target=worker)
+        cleared.start()
+        cleared.join(5)
+        assert seen["worker"] == ""
+    finally:
+        release_profile(token)
+        bind_profile(None)
