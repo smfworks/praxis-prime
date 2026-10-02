@@ -9,6 +9,7 @@ The blueprint is the source of truth for layout, names, and stack.
 | [CAPABILITY-MATRIX.md](CAPABILITY-MATRIX.md) | Comparison with the source systems and the reuse plan |
 | [SOURCE-NOTES.md](SOURCE-NOTES.md) | Licenses, paths, unverified items |
 | [OPENDOTS-BORROWED-PATTERNS.md](OPENDOTS-BORROWED-PATTERNS.md) | Patterns borrowed from OpenDots (MIT, ideas only), the frontend decision, and the per-person agent plan, mapped to M1, M2, M4, M6, and the browser tool, with acceptance criteria |
+| [OPENCLAW-HERMES-GAPS.md](OPENCLAW-HERMES-GAPS.md) | Gaps against OpenClaw and Hermes Agent (ideas only), with milestones and the security lessons that are now requirements |
 | [architecture.html](architecture.html) | Rendered copy of the blueprint, the matrix, and the source notes |
 
 These files were approved as the design. The repository still points at later sections with `TODO: ARCHITECTURE §…` notes.

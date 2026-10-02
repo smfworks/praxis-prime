@@ -666,6 +666,17 @@ M0 packs/packaging ─┐
 - **M4:** L3 (OpenShell). L2 (per-profile Linux users) is unscheduled, after M4 ([Per-person agents](OPENDOTS-BORROWED-PATTERNS.md#per-person-agents)).
 - **M6:** per-account channel bindings, with approvals pushed to the requester ([Per-person agents](OPENDOTS-BORROWED-PATTERNS.md#per-person-agents)).
 
+**OpenClaw and Hermes gaps (2026-10-01):** see [OPENCLAW-HERMES-GAPS.md](OPENCLAW-HERMES-GAPS.md). Ideas only, with no code copied.
+
+- **MVP:** tool search, and the start of smarter approvals ([gaps 6 and 9](OPENCLAW-HERMES-GAPS.md#high-value-gaps)).
+- **M1b / M1 PR 6** per-person workers: one process, folder, secrets, and chat bindings per person, with approvals back to the requester ([gap 1](OPENCLAW-HERMES-GAPS.md#1-real-per-person-isolation)).
+- **M2:** API-key pools with fallback for side tasks, external secret-store pointers, and the start of doctor fixes ([gaps 2, 3, and 7](OPENCLAW-HERMES-GAPS.md#high-value-gaps)).
+- **M4 / M4a:** external secret stores, and isolated code execution ([gaps 3 and 5](OPENCLAW-HERMES-GAPS.md#high-value-gaps)).
+- **M5a:** doctor fixes, a security audit, safe updates, and backup ([gap 7](OPENCLAW-HERMES-GAPS.md#7-doctor-fixes-security-audit-updates-backup-and-recovery)).
+- **v0.5:** file undo, the skill lifecycle, smarter approvals, agent-level evals, memory upgrades, and a signed skill hub ([gaps 4 and 8–12](OPENCLAW-HERMES-GAPS.md#high-value-gaps)).
+
+The security lessons in that note are explicit requirements: a SECURITY.md response deadline, no gateway URL or token taken from a link, an owner check on settings-changing chat commands, policy enforced at dispatch and at the sandbox (including an outside harness's built-in tools), compression summaries treated as untrusted, webhook signatures verified before rate-limiting, and CSV formula-injection guards ([Security lessons](OPENCLAW-HERMES-GAPS.md#security-lessons)).
+
 ---
 
 ## 9. Risks and open questions
