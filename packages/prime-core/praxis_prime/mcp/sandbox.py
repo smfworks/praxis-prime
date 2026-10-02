@@ -4,6 +4,16 @@ bubblewrap is used when ``bwrap`` is on PATH and the server asks for it.
 The parent environment is never passed through. Only the allowlist, plus
 values the user wrote on that server, are visible to the child.
 
+The server's working directory is mounted read-only. A read-write bind is
+added only for an explicit per-server directory that a person approved.
+That directory is never ``$HOME``, never the main checkout, and never an
+account-data root or a directory that contains one. Every account-data
+root inside a bind is covered with a tmpfs, including the read-only cwd
+and argument mounts. Path arguments that name account data are not
+mounted. The mount decision is written to the audit log. When the sandbox
+is off or ``bwrap`` is missing, the audit row says ``host`` and no
+write-scope approval is requested.
+
 A failed bubblewrap start does not fall back to the host. A missing
 ``bwrap`` binary runs the command with the same allowlist and no extra
 variables. ARCHITECTURE §13.
@@ -13,9 +23,17 @@ from __future__ import annotations
 
 import subprocess
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
-from praxis_prime.sandbox.bwrap import bwrap_available
+from praxis_prime.sandbox.bwrap import (
+    _data_dir_mask,
+    _is_task_worktree,
+    _path_inside,
+    bwrap_available,
+    writable_scope_ok,
+)
 
 _PYTHON = ("python", "python3")
 
@@ -43,6 +61,78 @@ def child_environment(
     return env
 
 
+@dataclass(frozen=True, slots=True)
+class McpMount:
+    """How the server's filesystem is mounted.
+
+    ``mode`` is ``ro``, ``rw``, or ``host``. ``host`` means bubblewrap did
+    not run, so no read-only mount was applied.
+    """
+
+    mode: str
+    decision: str
+    scope: str
+
+
+def mcp_mount_decision(
+    cwd: Path,
+    write_scope: Path | None,
+    *,
+    write_approved: bool,
+    main_checkout: Path | None,
+) -> McpMount:
+    """Read-only cwd unless ``write_scope`` was approved and is a legal directory.
+
+    A missing scope is the default and is allowed. A scope that was asked
+    for and refused, that is ``$HOME`` or the main checkout, or that is or
+    contains an account-data root, stays read-only and is recorded as a
+    denial. A single task worktree under the data directory may still be
+    a write scope.
+    """
+    if write_scope is None:
+        return McpMount("ro", "allow", "")
+    try:
+        scope = write_scope.resolve()
+        work = cwd.resolve()
+    except OSError:
+        return McpMount("ro", "deny", str(write_scope))
+    legal = (
+        write_approved
+        and scope.is_dir()
+        and writable_scope_ok(scope, scope, main_checkout)
+        and not _mcp_write_scope_refused(scope)
+    )
+    if not legal:
+        return McpMount("ro", "deny", str(scope))
+    chosen = work if scope == work else scope
+    return McpMount("rw", "allow", str(chosen))
+
+
+def audit_mcp_mount(
+    audit: Any,
+    *,
+    server: str,
+    mount: McpMount,
+    main_checkout: Path | None,
+) -> None:
+    """Record the mount decision the way shell records ``shell_mount``."""
+    if audit is None or not hasattr(audit, "append"):
+        return
+    summary = f"{mount.mode} {mount.decision} {server}"
+    audit.append(
+        session_id=None,
+        kind="mcp_mount",
+        summary=summary[:300],
+        payload={
+            "server": server,
+            "mount": mount.mode,
+            "decision": mount.decision,
+            "write_scope": mount.scope,
+            "main_checkout": "" if main_checkout is None else str(main_checkout),
+        },
+    )
+
+
 def build_mcp_bwrap_argv(
     command: str,
     args: tuple[str, ...] | list[str],
@@ -50,8 +140,17 @@ def build_mcp_bwrap_argv(
     cwd: Path,
     env: Mapping[str, str],
     network: str,
+    write_scope: Path | None = None,
+    write_approved: bool = False,
+    main_checkout: Path | None = None,
 ) -> list[str]:
-    """Return a bwrap command that runs the server with ``--clearenv``."""
+    """Return a bwrap command that runs the server with ``--clearenv``.
+
+    The working directory is ``--ro-bind``. ``write_scope`` is ``--bind``
+    only when ``write_approved`` is set and the directory is not ``$HOME``,
+    ``main_checkout``, or an account-data root. Account data inside any
+    bind is masked. Arguments that point at account data are left unmounted.
+    """
     argv = [
         "bwrap",
         "--unshare-all",
@@ -65,21 +164,42 @@ def build_mcp_bwrap_argv(
         argv.extend(["--setenv", key, value])
     argv.extend(["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"])
     work = cwd.resolve()
+    mount = mcp_mount_decision(
+        work,
+        write_scope,
+        write_approved=write_approved,
+        main_checkout=main_checkout,
+    )
     bound: list[Path] = []
+    mounts: list[tuple[Path, str]] = []
     for optional in ("/usr", "/bin", "/lib", "/lib64", "/etc"):
         path = Path(optional)
         if path.exists():
             argv.extend(["--ro-bind", optional, optional])
             bound.append(path)
+            mounts.append((path, optional))
     if work.exists():
-        argv.extend(["--bind", str(work), str(work)])
+        flag = "--bind" if mount.mode == "rw" and mount.scope == str(work) else "--ro-bind"
+        argv.extend([flag, str(work), str(work)])
         bound.append(work)
+        mounts.append((work, str(work)))
+    if mount.mode == "rw" and mount.scope and mount.scope != str(work):
+        # A parent --ro-bind (the cwd, or /usr) does not make this directory
+        # writable. Mount it afterwards so the read-write bind sits on top.
+        scope = Path(mount.scope)
+        if scope.exists():
+            argv.extend(["--bind", str(scope), str(scope)])
+            bound.append(scope)
+            mounts.append((scope, str(scope)))
     for candidate in _bind_candidates(command, args):
         if _covered(candidate, bound):
             continue
-        flag = "--ro-bind"
-        argv.extend([flag, str(candidate), str(candidate)])
+        if _mcp_bind_refused(candidate):
+            continue
+        argv.extend(["--ro-bind", str(candidate), str(candidate)])
         bound.append(candidate)
+        mounts.append((candidate, str(candidate)))
+    argv.extend(_data_dir_mask(mounts))
     argv.extend(["--chdir", str(work), "--", command, *args])
     return argv
 
@@ -94,6 +214,11 @@ def popen_stdio(
     parent: Mapping[str, str],
     sandbox: str,
     network: str,
+    write_scope: Path | None = None,
+    write_approved: bool = False,
+    main_checkout: Path | None = None,
+    audit: Any = None,
+    server: str = "",
 ) -> subprocess.Popen[bytes]:
     """Start the server. The returned process speaks MCP on stdin and stdout."""
     env = child_environment(command, allow, explicit, parent)
@@ -101,7 +226,28 @@ def popen_stdio(
     work.mkdir(parents=True, exist_ok=True)
     use_bwrap = sandbox != "off" and bwrap_available()
     if use_bwrap:
-        argv = build_mcp_bwrap_argv(command, args, cwd=work, env=env, network=network)
+        mount = mcp_mount_decision(
+            work,
+            write_scope,
+            write_approved=write_approved,
+            main_checkout=main_checkout,
+        )
+    else:
+        # Nothing is mounted. Recording ``ro`` would claim a sandbox that
+        # did not run, and a write scope is not applied on the host.
+        mount = McpMount("host", "allow", "")
+    audit_mcp_mount(audit, server=server, mount=mount, main_checkout=main_checkout)
+    if use_bwrap:
+        argv = build_mcp_bwrap_argv(
+            command,
+            args,
+            cwd=work,
+            env=env,
+            network=network,
+            write_scope=write_scope,
+            write_approved=write_approved,
+            main_checkout=main_checkout,
+        )
     else:
         argv = [command, *args]
     try:
@@ -116,6 +262,56 @@ def popen_stdio(
         )
     except OSError as exc:
         raise RuntimeError(f"could not start MCP server: {exc}") from exc
+
+
+def _mcp_write_scope_refused(scope: Path) -> bool:
+    """True when a read-write bind of ``scope`` would expose account data.
+
+    The data directory, a profile directory, and any parent that contains
+    an account-data root are refused. One task worktree may be writable.
+    A root that cannot be resolved is refused.
+    """
+    from praxis_prime.policy.boundary import _account_data_roots
+
+    roots = _account_data_roots()
+    if not roots:
+        return True
+    for root in roots:
+        inside = _path_inside(scope, root)
+        if inside is not None:
+            if inside == Path(".") or not _is_task_worktree(scope, inside):
+                return True
+            continue
+        contains = _path_inside(root, scope)
+        if contains is not None and contains != Path("."):
+            return True
+    return False
+
+
+def _mcp_bind_refused(path: Path) -> bool:
+    """True when ``path`` must not be mounted into an MCP sandbox.
+
+    ``accounts.db``, profile files, and any other path inside an
+    account-data root stay on the host. A single task worktree may be
+    mounted. A path that cannot be classified is refused.
+    """
+    from praxis_prime.policy.boundary import _account_data_roots, _is_private_data
+
+    try:
+        if _is_private_data(path):
+            return True
+    except (OSError, RuntimeError, ValueError):
+        return True
+    roots = _account_data_roots()
+    if not roots:
+        return True
+    for root in roots:
+        relative = _path_inside(path, root)
+        if relative is None:
+            continue
+        if relative == Path(".") or not _is_task_worktree(path, relative):
+            return True
+    return False
 
 
 def _bind_candidates(command: str, args: tuple[str, ...] | list[str]) -> list[Path]:

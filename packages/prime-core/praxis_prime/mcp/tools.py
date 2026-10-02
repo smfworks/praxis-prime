@@ -14,6 +14,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from pathlib import Path
 
+from praxis_prime.approvals.gate import ApprovalGate
 from praxis_prime.audit.log import AuditLog
 from praxis_prime.mcp.client import McpClient, McpToolInfo
 from praxis_prime.mcp.config import ServerSpec, load_servers, mcp_settings
@@ -43,6 +44,8 @@ class McpManager:
         threshold: int,
         parent_env: Mapping[str, str] | None = None,
         connector: Connector | None = None,
+        gate: ApprovalGate | None = None,
+        main_checkout: Path | None = None,
     ) -> None:
         self.specs = {spec.name: spec for spec in specs}
         self.allowed_servers: frozenset[str] | None = None
@@ -51,6 +54,8 @@ class McpManager:
         self.audit = audit
         self.threshold = threshold
         self.parent_env = parent_env
+        self.gate = gate
+        self.main_checkout = cwd if main_checkout is None else main_checkout
         self._connector = connector or self._default_connector
         self._clients: dict[str, McpClient] = {}
         self._local: dict[str, Tool] = {}
@@ -214,6 +219,8 @@ class McpManager:
             cwd=self.cwd,
             audit=self.audit,
             parent_env=self.parent_env,
+            gate=self.gate,
+            main_checkout=self.main_checkout,
         )
 
 
@@ -225,6 +232,8 @@ def install_mcp_tools(
     audit: AuditLog | None,
     parent_env: Mapping[str, str] | None = None,
     connector: Connector | None = None,
+    gate: ApprovalGate | None = None,
+    main_checkout: Path | None = None,
 ) -> McpManager | None:
     """Register the MCP catalog tools when at least one server is configured."""
     specs = load_servers(config_path, cwd)
@@ -239,6 +248,8 @@ def install_mcp_tools(
         threshold=threshold,
         parent_env=parent_env,
         connector=connector,
+        gate=gate,
+        main_checkout=main_checkout,
     )
     if not registry.contains("mcp_find_tools"):
         registry.register(_find_tool(manager))

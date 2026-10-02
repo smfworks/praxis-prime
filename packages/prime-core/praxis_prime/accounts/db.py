@@ -16,7 +16,8 @@ import os
 import secrets
 import sqlite3
 import threading
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -37,9 +38,22 @@ LOCK_AFTER_FAILURES = 5
 LOCK_SECONDS = 15 * 60
 # argon2id uses about 19 MiB per verify. This caps how many run at once.
 LOGIN_CONCURRENCY = 4
-# Distinct usernames each take a lock. Drop the oldest unlocked ones.
+# Distinct usernames each take a lock. Drop the oldest ones that nobody
+# has pinned and that are not held. A pin covers the window between
+# lookup and acquire, so eviction cannot hand two threads different locks
+# for the same name.
 _NAME_LOCK_CAP = 256
 _COOKIE = "pp_session"
+
+
+class _NameLock:
+    """One username lock plus how many callers have reserved it."""
+
+    __slots__ = ("holders", "lock")
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.holders = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,7 +126,7 @@ class AccountStore:
         self.conn.execute("PRAGMA foreign_keys=ON")
         self._lock = threading.Lock()
         self._login_slots = threading.BoundedSemaphore(LOGIN_CONCURRENCY)
-        self._name_locks: dict[str, threading.Lock] = {}
+        self._name_locks: dict[str, _NameLock] = {}
         self._name_guard = threading.Lock()
         self._migrate()
         tighten_file(self.path)
@@ -799,22 +813,51 @@ class AccountStore:
         if column not in names:
             self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {declaration}")
 
-    def _account_gate(self, name: str) -> threading.Lock:
+    @contextmanager
+    def _account_gate(self, name: str) -> Iterator[None]:
+        """Serialize one username. The lock is pinned before it is acquired.
+
+        Eviction used to drop a lock that had been returned but not yet
+        acquired, or that a waiter had released and not yet re-acquired.
+        Those callers then took a new lock and the username was no longer
+        serialized. The holder count is incremented under the guard before
+        ``acquire``, and eviction skips any lock that is pinned or held.
+        """
+        entry = self._pin_name_lock(name)
+        try:
+            with entry.lock:
+                yield
+        finally:
+            self._unpin_name_lock(name)
+
+    def _pin_name_lock(self, name: str) -> _NameLock:
         with self._name_guard:
-            lock = self._name_locks.pop(name, None)
-            if lock is None:
-                lock = threading.Lock()
-            self._name_locks[name] = lock
-            overflow = len(self._name_locks) - _NAME_LOCK_CAP
-            if overflow > 0:
-                for old_name, old_lock in list(self._name_locks.items()):
-                    if overflow <= 0:
-                        break
-                    if old_lock is lock or old_lock.locked():
-                        continue
-                    del self._name_locks[old_name]
-                    overflow -= 1
-            return lock
+            entry = self._name_locks.pop(name, None)
+            if entry is None:
+                entry = _NameLock()
+            entry.holders += 1
+            self._name_locks[name] = entry
+            self._evict_name_locks()
+            return entry
+
+    def _unpin_name_lock(self, name: str) -> None:
+        with self._name_guard:
+            entry = self._name_locks.get(name)
+            if entry is not None and entry.holders > 0:
+                entry.holders -= 1
+
+    def _evict_name_locks(self) -> None:
+        """Caller holds ``_name_guard``."""
+        overflow = len(self._name_locks) - _NAME_LOCK_CAP
+        if overflow <= 0:
+            return
+        for old_name, old in list(self._name_locks.items()):
+            if overflow <= 0:
+                break
+            if old.holders > 0 or old.lock.locked():
+                continue
+            del self._name_locks[old_name]
+            overflow -= 1
 
     def _verify_bounded(self, encoded: str, presented: str) -> bool:
         with self._login_slots:

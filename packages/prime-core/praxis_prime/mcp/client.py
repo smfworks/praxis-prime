@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from praxis_prime import __version__
+from praxis_prime.approvals.gate import ApprovalDecision, ApprovalRequest
 from praxis_prime.audit.log import AuditLog
 from praxis_prime.mcp.auth import resolve_headers
 from praxis_prime.mcp.config import ServerSpec
@@ -30,8 +31,10 @@ from praxis_prime.mcp.protocol import (
     resource_text,
     tool_result_text,
 )
-from praxis_prime.mcp.sandbox import popen_stdio
+from praxis_prime.mcp.sandbox import mcp_mount_decision, popen_stdio
 from praxis_prime.mcp.transport import HttpTransport, StdioTransport
+from praxis_prime.sandbox.bwrap import bwrap_available, writable_scope_ok
+from praxis_prime.tools.registry import Risk
 
 _PAGE_LIMIT = 20
 
@@ -68,12 +71,16 @@ class McpClient:
         audit: AuditLog | None = None,
         parent_env: Mapping[str, str] | None = None,
         timeout: float = 30,
+        gate: Any = None,
+        main_checkout: Path | None = None,
     ) -> None:
         self.spec = spec
         self.cwd = cwd
         self.audit = audit
         self.parent_env = os.environ if parent_env is None else parent_env
         self.timeout = timeout
+        self.gate = gate
+        self.main_checkout = main_checkout
         self.protocol = ""
         self.server_info: dict[str, Any] = {}
         self.tools: list[McpToolInfo] = []
@@ -243,6 +250,7 @@ class McpClient:
 def _open_transport(client: McpClient) -> StdioTransport | HttpTransport:
     spec = client.spec
     if spec.transport == "stdio":
+        scope, approved = _stdio_write(client)
         proc = popen_stdio(
             spec.command,
             spec.args,
@@ -252,11 +260,67 @@ def _open_transport(client: McpClient) -> StdioTransport | HttpTransport:
             parent=client.parent_env,
             sandbox=spec.sandbox,
             network=spec.network,
+            write_scope=scope,
+            write_approved=approved,
+            main_checkout=client.main_checkout,
+            audit=client.audit,
+            server=spec.name,
         )
         return StdioTransport(proc, timeout=client.timeout)
     headers = resolve_headers(spec.headers, spec.token_env, client.parent_env)
     mode = "sse" if spec.transport == "sse" else ("http" if spec.transport == "http" else "auto")
     return HttpTransport(spec.url, headers, mode=mode, timeout=client.timeout)
+
+
+def _stdio_write(client: McpClient) -> tuple[Path | None, bool]:
+    """Return the configured scope and whether this launch may mount it read-write.
+
+    No scope means the working directory stays read-only and nobody is asked.
+    ``$HOME``, the main checkout, and any directory that is or contains an
+    account-data root are not asked: they cannot be a write scope. Any other
+    directory is mounted read-write only after the approval gate allows it.
+    When the sandbox is off or bubblewrap is missing, nothing is mounted, so
+    the gate is not asked.
+    """
+    if client.spec.sandbox == "off" or not bwrap_available():
+        return None, False
+    raw = client.spec.write_scope.strip()
+    if not raw:
+        return None, False
+    scope = Path(raw)
+    if not scope.is_absolute():
+        scope = Path(client.cwd) / scope
+    try:
+        resolved = scope.resolve()
+    except OSError:
+        return scope, False
+    if not writable_scope_ok(resolved, resolved, client.main_checkout):
+        return resolved, False
+    preview = mcp_mount_decision(
+        Path(client.cwd),
+        resolved,
+        write_approved=True,
+        main_checkout=client.main_checkout,
+    )
+    if preview.decision != "allow":
+        return resolved, False
+    gate = client.gate
+    if gate is None or not hasattr(gate, "authorize"):
+        return resolved, False
+    decision = gate.authorize(
+        ApprovalRequest(
+            tool=f"mcp:{client.spec.name}",
+            risk=Risk.DESTRUCTIVE,
+            reason="MCP server write scope",
+            summary=f"read-write bind {resolved}",
+            arguments={"server": client.spec.name, "write_scope": str(resolved)},
+            grant_key=f"mcp-write:{client.spec.name}:{resolved}",
+            sandboxed=client.spec.sandbox != "off",
+            mount="rw",
+        )
+    )
+    approved = decision in {ApprovalDecision.ALLOW_ONCE, ApprovalDecision.ALLOW_SESSION}
+    return resolved, approved
 
 
 def _initialize_params(version: str) -> dict[str, object]:

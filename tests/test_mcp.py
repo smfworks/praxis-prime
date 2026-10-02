@@ -6,8 +6,10 @@ import os
 import shutil
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 
+import pytest
 from tests.fakes import ScriptedProvider
 
 from praxis_prime.approvals.gate import ApprovalDecision
@@ -223,7 +225,7 @@ def test_bwrap_mounts_a_symlinked_interpreter_outside_usr(tmp_path: Path):
     assert _mount_flag(argv, str(bindir.resolve())) == "--ro-bind"
     if libdir is not None:
         assert _mount_flag(argv, str(libdir)) == "--ro-bind"
-    assert _mount_flag(argv, str(work.resolve())) == "--bind"
+    assert _mount_flag(argv, str(work.resolve())) == "--ro-bind"
     in_ci = os.environ.get("CI") == "true" or os.environ.get("GITHUB_ACTIONS") == "true"
     if not bwrap_available():
         if in_ci:
@@ -338,8 +340,11 @@ def test_untrusted_write_asks_and_echo_is_fenced(tmp_path: Path, monkeypatch):
 
 def test_allowed_write_is_audited(tmp_path: Path):
     config = tmp_path / "config"
-    log = tmp_path / "calls.txt"
-    add_server(config, _stdio_spec(tmp_path, log))
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    log = scratch / "calls.txt"
+    spec = _stdio_spec(tmp_path, log)
+    add_server(config, replace(spec, write_scope=str(scratch)))
     provider = ScriptedProvider(
         [
             _tool_reply("mcp__fake__write_note", {"text": "hello"}),
@@ -525,3 +530,285 @@ class _Stub:
     def get_prompt(self, name: str, *, session_id: str | None = None) -> str:
         del name, session_id
         return "prompt"
+
+
+def test_mcp_cwd_is_read_only_unless_a_scope_is_approved(tmp_path: Path) -> None:
+    work = tmp_path / "checkout"
+    work.mkdir()
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    note = work / "note.txt"
+    note.write_text("kept\n", encoding="utf-8")
+    planted = scratch / "planted.txt"
+    script = tmp_path / "write.py"
+    script.write_text(
+        "from pathlib import Path\n"
+        f"note = Path({str(note)!r})\n"
+        f"planted = Path({str(planted)!r})\n"
+        "try:\n"
+        "    note.write_text('changed\\n')\n"
+        "except OSError:\n"
+        "    pass\n"
+        "planted.write_text('nope\\n')\n",
+        encoding="utf-8",
+    )
+    env = {"PATH": "/usr/bin:/bin", "PYTHONUNBUFFERED": "1"}
+    denied = build_mcp_bwrap_argv(
+        sys.executable,
+        (str(script),),
+        cwd=work,
+        env=env,
+        network="off",
+        write_scope=scratch,
+        write_approved=False,
+        main_checkout=work,
+    )
+    assert _mount_flag(denied, str(work.resolve())) == "--ro-bind"
+    assert str(scratch.resolve()) not in denied
+    home = build_mcp_bwrap_argv(
+        sys.executable,
+        (str(script),),
+        cwd=work,
+        env=env,
+        network="off",
+        write_scope=Path.home(),
+        write_approved=True,
+        main_checkout=work,
+    )
+    assert _mount_flag(home, str(work.resolve())) == "--ro-bind"
+    checkout = build_mcp_bwrap_argv(
+        sys.executable,
+        (str(script),),
+        cwd=work,
+        env=env,
+        network="off",
+        write_scope=work,
+        write_approved=True,
+        main_checkout=work,
+    )
+    assert _mount_flag(checkout, str(work.resolve())) == "--ro-bind"
+    allowed = build_mcp_bwrap_argv(
+        sys.executable,
+        (str(script),),
+        cwd=work,
+        env=env,
+        network="off",
+        write_scope=scratch,
+        write_approved=True,
+        main_checkout=work,
+    )
+    assert _mount_flag(allowed, str(work.resolve())) == "--ro-bind"
+    assert _mount_flag(allowed, str(scratch.resolve())) == "--bind"
+    events: list[dict[str, object]] = []
+
+    class _Audit:
+        def append(self, **kwargs: object) -> str:
+            events.append(kwargs)
+            return "1"
+
+    from praxis_prime.mcp.sandbox import audit_mcp_mount, mcp_mount_decision
+
+    audit_mcp_mount(
+        _Audit(),
+        server="notes",
+        mount=mcp_mount_decision(
+            work, scratch, write_approved=False, main_checkout=work
+        ),
+        main_checkout=work,
+    )
+    assert events[0]["kind"] == "mcp_mount"
+    payload = events[0]["payload"]
+    assert isinstance(payload, dict)
+    assert payload["decision"] == "deny"
+    assert payload["mount"] == "ro"
+    if not bwrap_available():
+        in_ci = os.environ.get("CI") == "true" or os.environ.get("GITHUB_ACTIONS") == "true"
+        if in_ci:
+            raise AssertionError("bubblewrap must be installed in CI")
+        return
+    subprocess.run(denied, capture_output=True, text=True, timeout=30, check=False)
+    assert note.read_text(encoding="utf-8") == "kept\n"
+    assert not planted.exists()
+    granted = subprocess.run(
+        allowed, capture_output=True, text=True, timeout=30, check=False
+    )
+    assert granted.returncode == 0, granted.stderr
+    assert note.read_text(encoding="utf-8") == "kept\n"
+    assert planted.read_text(encoding="utf-8") == "nope\n"
+
+
+def test_mcp_write_scope_cannot_expose_account_data(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from praxis_prime.mcp.client import _stdio_write
+    from praxis_prime.mcp.sandbox import mcp_mount_decision, popen_stdio
+    from praxis_prime.policy.boundary import bind_data_root
+
+    home = tmp_path / "home"
+    data = home / ".local" / "share" / "praxis-prime"
+    profile = data / "profiles" / "work"
+    profile.mkdir(parents=True)
+    (profile / "SOUL.md").write_text("SECRET-XSOUL\n", encoding="utf-8")
+    (data / "accounts.db").write_text("SECRET-ACC\n", encoding="utf-8")
+    project = home / "proj"
+    project.mkdir()
+    (project / "f.txt").write_text("orig\n", encoding="utf-8")
+    other = tmp_path / "other.txt"
+    other.write_text("other\n", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_DATA_HOME", str(home / ".local" / "share"))
+    bind_data_root(None)
+    link = tmp_path / "ln"
+    link.symlink_to(data)
+    scopes = {
+        "data": data,
+        "local": home / ".local",
+        "profile": profile,
+        "symlink": link,
+    }
+    for name, scope in scopes.items():
+        decision = mcp_mount_decision(
+            project, scope, write_approved=True, main_checkout=project
+        )
+        assert decision.mode == "ro", name
+        assert decision.decision == "deny", name
+        argv = build_mcp_bwrap_argv(
+            sys.executable,
+            (str(data / "accounts.db"), str(profile / "SOUL.md"), str(other)),
+            cwd=project,
+            env={"PATH": "/usr/bin:/bin"},
+            network="off",
+            write_scope=scope,
+            write_approved=True,
+            main_checkout=project,
+        )
+        mounts = argv[: argv.index("--")]
+        assert "--bind" not in mounts, name
+        assert str((data / "accounts.db").resolve()) not in mounts
+        assert str((profile / "SOUL.md").resolve()) not in mounts
+        assert str(other.resolve()) in mounts
+    home_argv = build_mcp_bwrap_argv(
+        sys.executable,
+        (str(data / "accounts.db"), str(other)),
+        cwd=home,
+        env={"PATH": "/usr/bin:/bin"},
+        network="off",
+        main_checkout=project,
+    )
+    home_mounts = home_argv[: home_argv.index("--")]
+    assert "--tmpfs" in home_mounts
+    assert str(data.resolve()) in home_mounts
+    assert str((data / "accounts.db").resolve()) not in home_mounts
+    events: list[dict[str, object]] = []
+
+    class _Audit:
+        def append(self, **kwargs: object) -> str:
+            events.append(kwargs)
+            return "1"
+
+    class _Gate:
+        def authorize(self, request: object) -> ApprovalDecision:
+            del request
+            raise AssertionError("write scope must not be asked when nothing is mounted")
+
+    spec = ServerSpec(
+        name="notes",
+        transport="stdio",
+        command=sys.executable,
+        sandbox="off",
+        write_scope=str(tmp_path / "scratch"),
+    )
+    (tmp_path / "scratch").mkdir()
+    client = McpClient(spec, cwd=project, gate=_Gate(), main_checkout=project)
+    assert _stdio_write(client) == (None, False)
+    proc = popen_stdio(
+        sys.executable,
+        ("-c", "pass"),
+        cwd=project,
+        allow=(),
+        explicit={},
+        parent={"PATH": "/usr/bin:/bin"},
+        sandbox="off",
+        network="off",
+        write_scope=tmp_path / "scratch",
+        write_approved=True,
+        main_checkout=project,
+        audit=_Audit(),
+        server="notes",
+    )
+    proc.wait(timeout=30)
+    assert events[0]["kind"] == "mcp_mount"
+    payload = events[0]["payload"]
+    assert isinstance(payload, dict)
+    assert payload["mount"] == "host"
+    assert payload["write_scope"] == ""
+    if bwrap_available():
+        wrapped = ServerSpec(
+            name="notes",
+            transport="stdio",
+            command=sys.executable,
+            sandbox="bwrap",
+            write_scope=str(data),
+        )
+        scope, approved = _stdio_write(
+            McpClient(wrapped, cwd=project, gate=_Gate(), main_checkout=project)
+        )
+        assert approved is False
+        assert scope == data.resolve()
+    monkeypatch.setattr("praxis_prime.mcp.sandbox.bwrap_available", lambda: False)
+    monkeypatch.setattr("praxis_prime.mcp.client.bwrap_available", lambda: False)
+    missing = popen_stdio(
+        sys.executable,
+        ("-c", "pass"),
+        cwd=project,
+        allow=(),
+        explicit={},
+        parent={"PATH": "/usr/bin:/bin"},
+        sandbox="bwrap",
+        network="off",
+        write_scope=data,
+        write_approved=True,
+        main_checkout=project,
+        audit=_Audit(),
+        server="notes",
+    )
+    missing.wait(timeout=30)
+    missing_payload = events[1]["payload"]
+    assert isinstance(missing_payload, dict)
+    assert missing_payload["mount"] == "host"
+    if not bwrap_available():
+        return
+    script = tmp_path / "s.py"
+    script.write_text(
+        "import sys\n"
+        "from pathlib import Path\n"
+        "for raw in sys.argv[1:]:\n"
+        "    path = Path(raw)\n"
+        "    try:\n"
+        "        print('READ', path.read_text())\n"
+        "    except OSError:\n"
+        "        print('noread')\n"
+        "    try:\n"
+        "        (path.parent / 'pwn.txt').write_text('x')\n"
+        "        print('WROTE', path.parent)\n"
+        "    except OSError:\n"
+        "        print('nowrite')\n",
+        encoding="utf-8",
+    )
+    argv = build_mcp_bwrap_argv(
+        sys.executable,
+        (str(script), str(project / "f.txt"), str(data / "accounts.db"), str(profile / "SOUL.md")),
+        cwd=project,
+        env={"PATH": "/usr/bin:/bin"},
+        network="off",
+        write_scope=data,
+        write_approved=True,
+        main_checkout=project,
+    )
+    ran = subprocess.run(argv, capture_output=True, text=True, timeout=30, check=False)
+    assert ran.returncode == 0, ran.stderr
+    assert "SECRET" not in ran.stdout
+    assert "orig" in ran.stdout
+    assert not (data / "pwn.txt").exists()
+    assert not (profile / "pwn.txt").exists()
+    assert (profile / "SOUL.md").read_text(encoding="utf-8") == "SECRET-XSOUL\n"
