@@ -737,16 +737,20 @@ def private_data_command(command: str, workspace: Path) -> bool:
     leaves the worktree. ``cd -`` fails closed. When ``workspace`` is inside
     the data directory, mentioning that workspace's own absolute path is
     not by itself a refusal; any other occurrence of the data-root string
-    still is. A recursive reader (``grep -r``,
-    ``rg``, ``git grep``, ``ag``, ``ack``, ``find -exec``, ``tar``, ``cp -r``,
-    ``rsync``, ``zip -r``) is refused when a path it walks contains the data
-    directory. Every root ``account_data_present`` considers is checked, so
+    still is. A recursive reader is refused only when a parsed path operand
+    is the data directory or contains it. ``grep -r .``, ``rg``,
+    ``tar cf - .``, ``cp -r .``, and ``git grep --no-index`` are not refused
+    just because a hard link sits in the tree they walk. Every root
+    ``account_data_present`` considers is checked, so
     ``--data-dir`` does not leave the default XDG tree off the denylist.
 
-    ``pushd`` and ``popd`` are not tracked. The bubblewrap tmpfs over each
-    of those roots is the control that hides them; this walk is defence in
-    depth and only follows ``cd``. Without bubblewrap, host shell is refused
-    outright once account data exists.
+    The walk only sees paths it can parse. It does not refuse every
+    hard-link read before bubblewrap runs. A command that never names the
+    data directory can still be launched, and a hard link planted outside
+    that directory is still readable inside the sandbox. ``pushd`` and
+    ``popd`` are not tracked. The tmpfs hides each data-directory path on a
+    bind. It does not hide those links. Without bubblewrap, host shell is
+    refused outright once account data exists.
     """
     roots = _account_data_roots()
     if not roots:

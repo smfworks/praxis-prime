@@ -235,13 +235,14 @@ def build_bwrap_argv(
 def _data_dir_mask(mounts: list[tuple[Path, str]]) -> list[str]:
     """Hide every account-data root a bind mount contains.
 
-    A later ``--tmpfs`` covers that path inside the sandbox, so no command
-    string can read profiles, backups, ``accounts.db``, or ``audit.db``.
-    Containment is by real path and by ``(st_dev, st_ino)``, so a
-    bind-mount alias of a parent is masked too. A bind that sits inside a
-    data directory is refused. ``pushd`` and ``popd`` are not tracked by
-    the command denylist; this mask is the control that hides those
-    directories. Every root ``account_data_present`` considers is masked,
+    A later ``--tmpfs`` covers that directory path inside the sandbox.
+    Containment of the directory is by real path and by ``(st_dev, st_ino)``,
+    so a bind-mount alias of a parent is masked too. A hard link of a file
+    from that directory, planted outside the mount, is not covered, and the
+    command walk does not refuse every such read before bubblewrap runs.
+    A bind that sits inside a data directory is refused. ``pushd`` and
+    ``popd`` are not tracked. Every root ``account_data_present`` considers
+    is masked,
     including the default XDG tree when ``--data-dir`` points somewhere
     else. A root that is not on any mount is left alone.
     """
