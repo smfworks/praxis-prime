@@ -11,12 +11,12 @@ This file is for agents (and people) changing Praxis Prime. Read it before editi
 
 ## What this repo is
 
-Praxis Prime is an open-source (MIT), local-first agent for Ubuntu and Omarchy. It is pre-alpha. Most packages are stubs so the tree matches the blueprint. A stub's docstring should name the blueprint section and should not pretend the feature works.
+Praxis Prime is an open-source (MIT), local-first agent for Ubuntu and Omarchy. It is pre-alpha. The agent loop, gateway, policy, Decision Engine, and accounts are running. Swarm, voice, and the desktop UI are still stubs so the tree matches the blueprint. A stub's docstring should name the blueprint section and should not pretend the feature works.
 
 Preferred stack, from ARCHITECTURE §23:
 
 - Python 3.12+, asyncio, later FastAPI and Pydantic v2
-- SQLite for state, when state exists
+- SQLite for sessions, the audit log, and accounts
 - React and Vite for the SPA, Tauri 2 for the desktop shell
 - `uv` or pip, with Hatchling as the build backend
 
@@ -29,7 +29,7 @@ Identifiers:
 | CLI | `praxis-prime`, alias `pprime` |
 | Daemon | `praxis-primed` |
 | Config | `$XDG_CONFIG_HOME/praxis-prime/` or `~/.config/praxis-prime/` |
-| Loopback port | `127.0.0.1:18790` (do not bind it until the gateway exists) |
+| Loopback port | `127.0.0.1:18790` |
 | Env prefix | `PRAXIS_PRIME_` |
 
 Do not add a `prime` console script. That name collides with other tools.
@@ -42,7 +42,7 @@ Do not add a `prime` console script. That name collides with other tools.
 - Sandbox network stays `off` in the default config.
 - Gateway listen address stays on loopback.
 - Do not put secrets, API keys, tokens, or personal data in the repo, in tests, or in the default config. Secrets belong in the OS keychain or `secrets.env.age` (ARCHITECTURE §25).
-- `praxis-primed` must not listen until there is an explicit gateway implementation and tests for the bind address.
+- `praxis-primed` is the user service (`praxis-prime service install`, unit `praxis-prime.service`). It listens on loopback only. The default is `127.0.0.1:18790`. `localhost` is rewritten to that host. Any other host is refused before the socket is created. Tests cover the bind address. Do not move the listen address off loopback.
 
 ## Reuse rules
 
@@ -85,7 +85,7 @@ praxis-prime config --config-dir /tmp/praxis-prime-config
 
 CI runs `ruff check .` and `pytest` on Ubuntu with Python 3.12, 3.13, and 3.14. Keep that green.
 
-Style: Python 3.12, type hints, Ruff's default E/F/I/UP/B selection, line length 100. The standard library is enough for the skeleton. Add a dependency only when a real feature needs it.
+Style: Python 3.12, type hints, Ruff's default E/F/I/UP/B selection, line length 100. The gateway is still the standard library. Add a dependency only when a real feature needs it.
 
 ## Tests worth adding with behavior
 
