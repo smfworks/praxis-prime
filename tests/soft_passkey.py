@@ -20,7 +20,13 @@ class SoftPasskey:
         self.credential_id = secrets.token_bytes(32)
         self.counter = 0
 
-    def register(self, options: dict[str, object], *, origin: str) -> dict[str, object]:
+    def register(
+        self,
+        options: dict[str, object],
+        *,
+        origin: str,
+        verified: bool = True,
+    ) -> dict[str, object]:
         rp = options.get("rp")
         rp_id = rp.get("id") if isinstance(rp, dict) else None
         if not isinstance(rp_id, str):
@@ -33,6 +39,7 @@ class SoftPasskey:
             sign_count=0,
             attested=True,
             user_handle=b"",
+            verified=verified,
         )
 
     def authenticate(
@@ -42,6 +49,7 @@ class SoftPasskey:
         origin: str,
         user_handle: bytes,
         sign_count: int | None = None,
+        verified: bool = True,
     ) -> dict[str, object]:
         rp_id = options.get("rpId")
         if not isinstance(rp_id, str):
@@ -57,6 +65,7 @@ class SoftPasskey:
             sign_count=sign_count,
             attested=False,
             user_handle=user_handle,
+            verified=verified,
         )
 
     def _credential(
@@ -69,6 +78,7 @@ class SoftPasskey:
         sign_count: int,
         attested: bool,
         user_handle: bytes,
+        verified: bool = True,
     ) -> dict[str, object]:
         client = json.dumps(
             {
@@ -80,6 +90,8 @@ class SoftPasskey:
             separators=(",", ":"),
         ).encode("utf-8")
         flags = 0x01 | 0x04
+        if not verified:
+            flags = 0x01
         auth_data = hashlib.sha256(rp_id.encode("utf-8")).digest()
         auth_data += bytes([flags | (0x40 if attested else 0)])
         auth_data += sign_count.to_bytes(4, "big")

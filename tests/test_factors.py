@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import io
+import json
+import multiprocessing as mp
+import sqlite3
 import stat
+import threading
 from pathlib import Path
 
 import pyotp
@@ -13,6 +17,7 @@ from tests.test_accounts import _login, _request
 
 from praxis_prime.accounts.db import LOCK_AFTER_FAILURES, AccountStore
 from praxis_prime.accounts.factors import Factors
+from praxis_prime.accounts.seal import LEGACY_AAD, account_aad, seal, unseal
 from praxis_prime.accounts.totp import PERIOD
 from praxis_prime.approvals.queue import ApprovalQueue
 from praxis_prime.cli import main
@@ -141,6 +146,7 @@ def test_daemon_enrolls_and_signs_in_with_passkey_and_totp(tmp_path: Path):
     try:
         origin = f"http://localhost:{server.bound_port}"
         cookie, csrf, _body = _login(server.bound_port, "ada", _PASSWORD)
+        step = _step_up(server.bound_port, cookie, csrf, _PASSWORD)
         status, _headers, body = _request(
             server.bound_port,
             "POST",
@@ -148,6 +154,7 @@ def test_daemon_enrolls_and_signs_in_with_passkey_and_totp(tmp_path: Path):
             cookie=cookie,
             csrf=csrf,
             origin=origin,
+            body_json={"stepUpToken": step},
         )
         assert status == 200
         options = body["options"]
@@ -161,7 +168,7 @@ def test_daemon_enrolls_and_signs_in_with_passkey_and_totp(tmp_path: Path):
             cookie=cookie,
             csrf=csrf,
             origin=origin,
-            body_json={"credential": registered, "name": "laptop"},
+            body_json={"credential": registered, "name": "laptop", "stepUpToken": step},
         )
         assert status == 200
         assert created["passkey"]["name"] == "laptop"
@@ -220,12 +227,14 @@ def test_daemon_enrolls_and_signs_in_with_passkey_and_totp(tmp_path: Path):
         )
         assert cloned_status == 401
 
+        enroll_step = _step_up(server.bound_port, cookie, csrf, _PASSWORD)
         status, _headers, enrolled = _request(
             server.bound_port,
             "POST",
             "/v1/auth/totp/enroll",
             cookie=cookie,
             csrf=csrf,
+            body_json={"stepUpToken": enroll_step},
         )
         assert status == 200
         secret = str(enrolled["secret"])
@@ -338,6 +347,552 @@ def test_cli_lists_factors_without_printing_the_secret(tmp_path: Path, monkeypat
     assert main(["account", "passkey", "list", "ada", "--data-dir", str(data)]) == 0
     assert "no passkeys" in capsys.readouterr().out
     assert stat.S_IMODE((data / "accounts.db").stat().st_mode) == 0o600
+    recorded = sqlite3.connect(data / "prime.db").execute(
+        "SELECT summary, payload_json FROM audit_events"
+    ).fetchall()
+    text = " ".join(f"{summary} {payload}" for summary, payload in recorded)
+    assert "totp enrollment started" in text
+    assert "totp confirmed" in text
+    assert secret not in text
+
+
+def test_step_up_origin_mfa_token_and_challenge_cap(tmp_path: Path):
+    data = tmp_path / "data"
+    data.mkdir()
+    store = AccountStore(data / "accounts.db")
+    ada = store.create_account(username_text="ada", password=_PASSWORD, display_name="Ada")
+    store.create_account(username_text="bob", password=_PASSWORD, display_name="Bob")
+    runtime = build_runtime(
+        env={},
+        config_path=tmp_path / "missing.toml",
+        data_path=data / "prime.db",
+        cwd=tmp_path,
+        providers={"ollama": ScriptedProvider([AssistantFinal(content="ok")])},
+    )
+    host = Host(runtime, ApprovalQueue())
+    server = GatewayServer(
+        host="127.0.0.1",
+        port=0,
+        token="test-token",
+        agent=host,
+        approvals=host.queue,
+        logger=JsonLogger(tmp_path / "daemon.log"),
+        accounts=store,
+        audit=runtime.audit,
+        data_root=data,
+    )
+    server.start()
+    try:
+        port = server.bound_port
+        origin = f"http://localhost:{port}"
+        other = f"http://127.0.0.1:{port}"
+        cookie, csrf, _body = _login(port, "ada", _PASSWORD)
+
+        status, _headers, _body = _request(port, "POST", "/v1/auth/totp/enroll", origin=origin)
+        assert status == 401
+        status, _headers, _body = _request(
+            port,
+            "POST",
+            "/v1/auth/passkey/register/options",
+            cookie=cookie,
+            origin=origin,
+            body_json={"stepUpToken": "missing"},
+        )
+        assert status == 403
+        for path in (
+            "/v1/auth/step-up",
+            "/v1/auth/step-up/passkey/options",
+            "/v1/auth/step-up/passkey/verify",
+            "/v1/auth/passkey/register/verify",
+            "/v1/auth/passkey/remove",
+            "/v1/auth/totp/enroll",
+        ):
+            status, _headers, _body = _request(
+                port,
+                "POST",
+                path,
+                cookie=cookie,
+                origin=origin,
+                body_json={"password": _PASSWORD, "stepUpToken": "missing"},
+            )
+            assert status == 403, path
+        status, _headers, _body = _request(
+            port,
+            "POST",
+            "/v1/auth/totp/enroll",
+            cookie=cookie,
+            csrf=csrf,
+            origin=origin,
+            body_json={},
+        )
+        assert status == 401
+
+        step = _step_up(port, cookie, csrf, _PASSWORD)
+        status, _headers, options_body = _request(
+            port,
+            "POST",
+            "/v1/auth/passkey/register/options",
+            cookie=cookie,
+            csrf=csrf,
+            origin=origin,
+            body_json={"stepUpToken": step},
+        )
+        assert status == 200
+        options = options_body["options"]
+        assert isinstance(options, dict)
+        assert "required" in json.dumps(options)
+        bare = SoftPasskey()
+        refused = bare.register(options, origin=origin, verified=False)
+        status, _headers, _body = _request(
+            port,
+            "POST",
+            "/v1/auth/passkey/register/verify",
+            cookie=cookie,
+            csrf=csrf,
+            origin=origin,
+            body_json={"credential": refused, "stepUpToken": step},
+        )
+        assert status == 401
+        status, _headers, options_body = _request(
+            port,
+            "POST",
+            "/v1/auth/passkey/register/options",
+            cookie=cookie,
+            csrf=csrf,
+            origin=origin,
+            body_json={"stepUpToken": step},
+        )
+        assert status == 200
+        options = options_body["options"]
+        assert isinstance(options, dict)
+
+        device = SoftPasskey()
+        created = device.register(options, origin=origin)
+        status, _headers, _body = _request(
+            port,
+            "POST",
+            "/v1/auth/passkey/register/verify",
+            cookie=cookie,
+            csrf=csrf,
+            origin=origin,
+            body_json={"credential": created, "name": "laptop", "stepUpToken": step},
+        )
+        assert status == 200
+
+        status, _headers, listed = _request(
+            port, "GET", "/v1/auth/factors", cookie=cookie, csrf=csrf
+        )
+        assert status == 200
+        credential_id = listed["passkeys"][0]["id"]
+        assert isinstance(credential_id, str) and credential_id
+
+        shapes = []
+        for username in ("ada", "bob", "nosuchuser"):
+            status, _headers, body = _request(
+                port,
+                "POST",
+                "/v1/auth/passkey/options",
+                origin=origin,
+                body_json={"username": username},
+            )
+            assert status == 200
+            public = body["options"]
+            assert isinstance(public, dict)
+            assert not public.get("allowCredentials")
+            assert credential_id not in json.dumps(public)
+            shapes.append(public.get("allowCredentials"))
+        assert shapes[0] == shapes[1] == shapes[2]
+
+        for bad_origin in (
+            f"http://evil.example:{port}",
+            "null",
+            f"https://localhost:{port}",
+            f"http://localhost:{port + 1}",
+        ):
+            status, _headers, _body = _request(
+                port,
+                "POST",
+                "/v1/auth/passkey/options",
+                origin=bad_origin,
+                body_json={"username": "ada"},
+            )
+            assert status in {400, 403}
+        status, _headers, empty_origin = _request(
+            port,
+            "POST",
+            "/v1/auth/passkey/options",
+            body_json={"username": "ada"},
+        )
+        assert status == 200
+        assert empty_origin["options"]["rpId"] == "localhost"
+        for bad_host in ("evil.example", f"localhost:{port + 1}", f"127.0.0.1.nip.io:{port}"):
+            status, _headers, _body = _request(
+                port,
+                "POST",
+                "/v1/auth/passkey/options",
+                host=bad_host,
+                origin=origin,
+                body_json={"username": "ada"},
+            )
+            assert status == 403
+
+        status, _headers, foreign = _request(
+            port,
+            "POST",
+            "/v1/auth/passkey/options",
+            origin=other,
+            body_json={"username": "ada"},
+        )
+        assert status == 200
+        assertion = device.authenticate(
+            foreign["options"], origin=other, user_handle=ada.id.encode()
+        )
+        status, _headers, _body = _request(
+            port,
+            "POST",
+            "/v1/auth/passkey/verify",
+            origin=other,
+            body_json={"credential": assertion},
+        )
+        assert status == 401
+
+        store.conn.execute("DELETE FROM webauthn_challenges")
+        store.conn.commit()
+        status, _headers, first = _request(
+            port,
+            "POST",
+            "/v1/auth/passkey/options",
+            origin=origin,
+            body_json={"username": "ada"},
+        )
+        assert status == 200
+        for _ in range(6):
+            _request(
+                port,
+                "POST",
+                "/v1/auth/passkey/options",
+                origin=origin,
+                body_json={"username": "ada"},
+            )
+        kept = device.authenticate(
+            first["options"], origin=origin, user_handle=ada.id.encode()
+        )
+        status, _headers, signed = _request(
+            port,
+            "POST",
+            "/v1/auth/passkey/verify",
+            origin=origin,
+            body_json={"credential": kept},
+        )
+        assert status == 200
+        assert signed["account"]["username"] == "ada"
+
+        fresh = _step_up(port, cookie, csrf, _PASSWORD)
+        status, _headers, step_options = _request(
+            port,
+            "POST",
+            "/v1/auth/step-up/passkey/options",
+            cookie=cookie,
+            csrf=csrf,
+            origin=origin,
+        )
+        assert status == 200
+        proof = device.authenticate(
+            step_options["options"], origin=origin, user_handle=ada.id.encode()
+        )
+        status, _headers, minted = _request(
+            port,
+            "POST",
+            "/v1/auth/step-up/passkey/verify",
+            cookie=cookie,
+            csrf=csrf,
+            origin=origin,
+            body_json={"credential": proof},
+        )
+        assert status == 200
+        assert minted["stepUpToken"] != fresh
+        status, _headers, second_options = _request(
+            port,
+            "POST",
+            "/v1/auth/passkey/register/options",
+            cookie=cookie,
+            csrf=csrf,
+            origin=origin,
+            body_json={"stepUpToken": fresh},
+        )
+        assert status == 200
+        other_device = SoftPasskey()
+        other_created = other_device.register(second_options["options"], origin=origin)
+        status, _headers, _body = _request(
+            port,
+            "POST",
+            "/v1/auth/passkey/register/verify",
+            cookie=cookie,
+            csrf=csrf,
+            origin=origin,
+            body_json={
+                "credential": other_created,
+                "name": "backup",
+                "stepUpToken": fresh,
+            },
+        )
+        assert status == 200
+        status, _headers, _body = _request(
+            port,
+            "POST",
+            "/v1/auth/passkey/remove",
+            cookie=cookie,
+            csrf=csrf,
+            origin=origin,
+            body_json={"credentialId": credential_id, "stepUpToken": minted["stepUpToken"]},
+        )
+        assert status == 200
+        status, _headers, _body = _request(
+            port,
+            "POST",
+            "/v1/auth/passkey/remove",
+            cookie=cookie,
+            csrf=csrf,
+            origin=origin,
+            body_json={"credentialId": credential_id},
+        )
+        assert status == 401
+
+        enroll_step = _step_up(port, cookie, csrf, _PASSWORD)
+        status, _headers, enrolled = _request(
+            port,
+            "POST",
+            "/v1/auth/totp/enroll",
+            cookie=cookie,
+            csrf=csrf,
+            body_json={"stepUpToken": enroll_step},
+        )
+        assert status == 200
+        secret = str(enrolled["secret"])
+        code = pyotp.TOTP(secret).now()
+        status, _headers, _body = _request(
+            port,
+            "POST",
+            "/v1/auth/totp/confirm",
+            cookie=cookie,
+            csrf=csrf,
+            body_json={"code": code},
+        )
+        assert status == 200
+        status, _headers, _body = _request(
+            port,
+            "POST",
+            "/v1/auth/totp/enroll",
+            cookie=cookie,
+            csrf=csrf,
+            body_json={},
+        )
+        assert status == 409
+
+        status, headers, pending = _request(
+            port,
+            "POST",
+            "/v1/auth/login",
+            body_json={"username": "ada", "password": _PASSWORD},
+        )
+        assert pending["mfaRequired"] is True
+        mfa_token = str(pending["mfaToken"])
+        assert "pp_session=" not in headers.get("set-cookie", "")
+        for path in ("/v1/auth/session", "/v1/auth/factors", "/status"):
+            as_bearer, _headers, _body = _request(port, "GET", path, token=mfa_token)
+            as_cookie, _headers, _body = _request(port, "GET", path, cookie=mfa_token)
+            assert as_bearer == 401
+            assert as_cookie == 401
+        bob_cookie, bob_csrf, _bob = _login(port, "bob", _PASSWORD)
+        bob_step = _step_up(port, bob_cookie, bob_csrf, _PASSWORD)
+        status, _headers, bob_enrolled = _request(
+            port,
+            "POST",
+            "/v1/auth/totp/enroll",
+            cookie=bob_cookie,
+            csrf=bob_csrf,
+            body_json={"stepUpToken": bob_step},
+        )
+        assert status == 200
+        bob_secret = str(bob_enrolled["secret"])
+        bob_code = pyotp.TOTP(bob_secret).now()
+        status, _headers, _body = _request(
+            port,
+            "POST",
+            "/v1/auth/totp/confirm",
+            cookie=bob_cookie,
+            csrf=bob_csrf,
+            body_json={"code": bob_code},
+        )
+        assert status == 200
+        _reset_step(store, ada.id)
+        status, _headers, _body = _request(
+            port,
+            "POST",
+            "/v1/auth/login/totp",
+            body_json={"mfaToken": mfa_token, "code": pyotp.TOTP(bob_secret).now()},
+        )
+        assert status == 401
+        status, _headers, _body = _request(
+            port,
+            "POST",
+            "/v1/auth/login/totp",
+            body_json={"mfaToken": mfa_token, "code": bob_enrolled["recoveryCodes"][0]},
+        )
+        assert status == 401
+        store.conn.execute(
+            "UPDATE mfa_tokens SET expires_at = '2000-01-01T00:00:00+00:00' WHERE used = 0"
+        )
+        store.conn.commit()
+        _reset_step(store, ada.id)
+        status, _headers, _body = _request(
+            port,
+            "POST",
+            "/v1/auth/login/totp",
+            body_json={"mfaToken": mfa_token, "code": pyotp.TOTP(secret).now()},
+        )
+        assert status == 401
+
+        store.set_password("ada", "replacement-passphrase")
+        status, _headers, _body = _request(port, "GET", "/v1/auth/session", cookie=cookie)
+        assert status == 401
+        status, _headers, options_body = _request(
+            port,
+            "POST",
+            "/v1/auth/passkey/options",
+            origin=origin,
+            body_json={"username": "ada"},
+        )
+        assert status == 200
+        assertion = other_device.authenticate(
+            options_body["options"], origin=origin, user_handle=ada.id.encode()
+        )
+        status, _headers, _body = _request(
+            port,
+            "POST",
+            "/v1/auth/passkey/verify",
+            origin=origin,
+            body_json={"credential": assertion},
+        )
+        assert status == 401
+        assert secret not in (tmp_path / "daemon.log").read_text(encoding="utf-8")
+    finally:
+        server.shutdown()
+        host.close()
+        store.close()
+
+
+def test_one_totp_step_succeeds_once_under_contention(tmp_path: Path):
+    store = AccountStore(tmp_path / "accounts.db")
+    ada = store.create_account(username_text="ada", password=_PASSWORD, display_name="Ada")
+    factors = Factors(store)
+    enrollment = factors.begin_totp(ada.id)
+    factors.confirm_totp(ada.id, _otp(enrollment.secret, _NOW), now=_NOW)
+    _reset_step(store, ada.id)
+    code = _otp(enrollment.secret, _NOW + 3 * PERIOD)
+    moment = _NOW + 3 * PERIOD
+    tokens = [factors.issue_mfa(ada.id) for _ in range(4)]
+    results: list[bool] = []
+    barrier = threading.Barrier(len(tokens))
+
+    def submit(token: str) -> None:
+        barrier.wait()
+        results.append(factors.complete_mfa(token, code, now=moment) is not None)
+
+    threads = [threading.Thread(target=submit, args=(token,)) for token in tokens]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert results.count(True) == 1
+    store.close()
+
+
+def test_seed_is_bound_to_the_account_and_key_is_not_created_on_read(tmp_path: Path):
+    store = AccountStore(tmp_path / "accounts.db")
+    ada = store.create_account(username_text="ada", password=_PASSWORD, display_name="Ada")
+    bob = store.create_account(username_text="bob", password=_PASSWORD, display_name="Bob")
+    factors = Factors(store)
+    enrollment = factors.begin_totp(ada.id)
+    blob = bytes(
+        store.conn.execute(
+            "SELECT secret_enc FROM totp WHERE account_id = ?", (ada.id,)
+        ).fetchone()[0]
+    )
+    assert factors._secret(bob.id, blob) is None
+    assert factors._secret(ada.id, blob) == enrollment.secret
+    key = factors._read_key()
+    assert key is not None
+    legacy = seal(key, enrollment.secret.encode("ascii"), aad=LEGACY_AAD)
+    store.conn.execute(
+        "UPDATE totp SET secret_enc = ? WHERE account_id = ?",
+        (legacy, ada.id),
+    )
+    store.conn.commit()
+    assert factors._secret(ada.id, legacy) == enrollment.secret
+    store.conn.commit()
+    rewritten = bytes(
+        store.conn.execute(
+            "SELECT secret_enc FROM totp WHERE account_id = ?", (ada.id,)
+        ).fetchone()[0]
+    )
+    assert rewritten != legacy
+    assert unseal(key, rewritten, aad=account_aad(ada.id)) == enrollment.secret.encode("ascii")
+    assert factors._secret(bob.id, rewritten) is None
+    store.conn.execute("DELETE FROM auth_meta")
+    store.conn.commit()
+    assert factors._secret(ada.id, rewritten) is None
+    assert factors._read_key() is None
+    store.close()
+
+
+def test_concurrent_open_adds_the_second_factor_column(tmp_path: Path):
+    path = tmp_path / "accounts.db"
+    store = AccountStore(path)
+    store.create_account(username_text="ada", password=_PASSWORD, display_name="Ada")
+    store.conn.execute("ALTER TABLE accounts DROP COLUMN second_factor_failures")
+    store.conn.commit()
+    store.close()
+    ctx = mp.get_context("spawn")
+    queue: mp.Queue[str] = ctx.Queue()
+    processes = [ctx.Process(target=_open_accounts, args=(str(path), queue)) for _ in range(6)]
+    for process in processes:
+        process.start()
+    for process in processes:
+        process.join()
+    assert [queue.get() for _ in processes] == ["ok"] * 6
+    reopened = AccountStore(path)
+    try:
+        assert reopened.authenticate("ada", _PASSWORD) is not None
+    finally:
+        reopened.close()
+
+
+def _open_accounts(path: str, queue: mp.Queue[str]) -> None:
+    try:
+        opened = AccountStore(Path(path))
+        row = opened.conn.execute(
+            "SELECT second_factor_failures FROM accounts"
+        ).fetchone()
+        opened.close()
+        queue.put("ok" if row is not None else "missing")
+    except Exception as exc:
+        queue.put(repr(exc))
+
+
+def _step_up(port: int, cookie: str, csrf: str, password: str, code: str = "") -> str:
+    status, _headers, body = _request(
+        port,
+        "POST",
+        "/v1/auth/step-up",
+        cookie=cookie,
+        csrf=csrf,
+        body_json={"password": password, "code": code},
+    )
+    assert status == 200, body
+    token = body["stepUpToken"]
+    assert isinstance(token, str) and token
+    return token
 
 
 def _otp(secret: str, moment: float) -> str:

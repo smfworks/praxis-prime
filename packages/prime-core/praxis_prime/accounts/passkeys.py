@@ -79,7 +79,7 @@ def registration_options(
         user_display_name=user_display_name,
         authenticator_selection=AuthenticatorSelectionCriteria(
             resident_key=ResidentKeyRequirement.PREFERRED,
-            user_verification=UserVerificationRequirement.PREFERRED,
+            user_verification=UserVerificationRequirement.REQUIRED,
         ),
         exclude_credentials=excluded,
     )
@@ -95,7 +95,7 @@ def authentication_options(*, rp_id: str, origin: str, allow: list[bytes]) -> Ce
     options = generate_authentication_options(
         rp_id=rp_id,
         allow_credentials=[PublicKeyCredentialDescriptor(id=item) for item in allow] or None,
-        user_verification=UserVerificationRequirement.PREFERRED,
+        user_verification=UserVerificationRequirement.REQUIRED,
     )
     return Ceremony(
         challenge=options.challenge,
@@ -117,7 +117,7 @@ def verify_registration(
         expected_challenge=challenge,
         expected_rp_id=rp_id,
         expected_origin=origin,
-        require_user_verification=False,
+        require_user_verification=True,
     )
 
 
@@ -137,7 +137,7 @@ def verify_authentication(
         expected_origin=origin,
         credential_public_key=public_key,
         credential_current_sign_count=sign_count,
-        require_user_verification=False,
+        require_user_verification=True,
     )
 
 

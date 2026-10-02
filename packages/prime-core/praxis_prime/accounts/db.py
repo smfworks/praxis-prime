@@ -220,6 +220,10 @@ class AccountStore:
                     (account_id,),
                 )
                 self.conn.execute(
+                    "DELETE FROM step_up WHERE account_id = ?",
+                    (account_id,),
+                )
+                self.conn.execute(
                     "DELETE FROM recovery_codes WHERE account_id = ?",
                     (account_id,),
                 )
@@ -370,6 +374,17 @@ class AccountStore:
                 WHERE id = ?
                 """,
                 (encoded, now, row["id"]),
+            )
+            # A passkey enrolled from a stolen session must not survive the
+            # reset. Step-up tokens from that session die with it too.
+            self.conn.execute("DELETE FROM passkeys WHERE account_id = ?", (row["id"],))
+            self.conn.execute("DELETE FROM step_up WHERE account_id = ?", (row["id"],))
+            self.conn.execute(
+                """
+                UPDATE webauthn_challenges SET used = 1
+                WHERE account_id = ? AND used = 0
+                """,
+                (row["id"],),
             )
             self._revoke_credentials(str(row["id"]))
             self.conn.commit()
@@ -865,6 +880,14 @@ class AccountStore:
                 used INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS step_up (
+                token_hash TEXT PRIMARY KEY,
+                account_id TEXT NOT NULL REFERENCES accounts(id),
+                session_id TEXT NOT NULL DEFAULT '',
+                expires_at TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
             """
         )
         self._ensure_column("ws_tickets", "session_id", "session_id TEXT NOT NULL DEFAULT ''")
@@ -947,10 +970,22 @@ class AccountStore:
         )
 
     def _ensure_column(self, table: str, column: str, declaration: str) -> None:
+        """Add a column. A concurrent first open may add it first.
+
+        Six processes opening an M1a database all see ``second_factor_failures``
+        missing, and all issue ``ALTER TABLE``. SQLite accepts one and raises
+        ``duplicate column name`` for the rest. That error means the column
+        is present.
+        """
         rows = self.conn.execute(f"PRAGMA table_info({table})").fetchall()
         names = {str(row[1]) for row in rows}
-        if column not in names:
+        if column in names:
+            return
+        try:
             self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {declaration}")
+        except sqlite3.OperationalError as exc:
+            if "duplicate column" not in str(exc).lower():
+                raise
 
     @contextmanager
     def _account_gate(self, name: str) -> Iterator[None]:

@@ -38,7 +38,7 @@ from praxis_prime.accounts.passkeys import (
     verify_authentication,
     verify_registration,
 )
-from praxis_prime.accounts.seal import new_key, seal, unseal
+from praxis_prime.accounts.seal import LEGACY_AAD, account_aad, new_key, seal, unseal
 from praxis_prime.accounts.totp import (
     matching_step,
     new_recovery_codes,
@@ -50,6 +50,7 @@ from praxis_prime.accounts.totp import (
 
 MFA_TTL_SECONDS = 5 * 60
 CHALLENGE_TTL_SECONDS = 5 * 60
+STEP_UP_TTL_SECONDS = 5 * 60
 _OPEN_CHALLENGES = 5
 
 
@@ -101,7 +102,7 @@ class Factors:
                     self.store.conn.rollback()
                     raise FactorError("totp is already enrolled", status=409, code="conflict")
                 key = self._key()
-                sealed = seal(key, secret.encode("ascii"))
+                sealed = seal(key, secret.encode("ascii"), aad=account_aad(account.id))
                 self.store.conn.execute("DELETE FROM totp WHERE account_id = ?", (account.id,))
                 self.store.conn.execute(
                     "DELETE FROM recovery_codes WHERE account_id = ?",
@@ -135,7 +136,7 @@ class Factors:
                 ).fetchone()
                 if row is None or int(row["confirmed"]) == 1:
                     raise FactorError("totp is not pending")
-                secret = self._secret(row["secret_enc"])
+                secret = self._secret(account.id, row["secret_enc"])
                 step = matching_step(secret or "", code, now=moment)
                 if secret is None or step is None or step <= int(row["last_step"]):
                     self.store._note_second_factor_failure(account.id)
@@ -284,21 +285,25 @@ class Factors:
             raise FactorError("origin is not allowed")
         rp_id, origin = selected
         with self.store._lock:
-            rows = self.store.conn.execute(
-                "SELECT credential_id FROM passkeys WHERE account_id = ? AND rp_id = ?",
-                (account.id, rp_id),
-            ).fetchall()
-            exclude = [_decode_id(str(row["credential_id"])) for row in rows]
-            ceremony = registration_options(
-                rp_id=rp_id,
-                origin=origin,
-                user_id=account.id.encode("ascii"),
-                user_name=account.username,
-                user_display_name=account.display_name,
-                exclude=[item for item in exclude if item],
-            )
-            self._store_challenge(account.id, "register", ceremony.challenge, rp_id, origin)
-            self.store.conn.commit()
+            try:
+                rows = self.store.conn.execute(
+                    "SELECT credential_id FROM passkeys WHERE account_id = ? AND rp_id = ?",
+                    (account.id, rp_id),
+                ).fetchall()
+                exclude = [_decode_id(str(row["credential_id"])) for row in rows]
+                ceremony = registration_options(
+                    rp_id=rp_id,
+                    origin=origin,
+                    user_id=account.id.encode("ascii"),
+                    user_name=account.username,
+                    user_display_name=account.display_name,
+                    exclude=[item for item in exclude if item],
+                )
+                self._store_challenge(account.id, "register", ceremony.challenge, rp_id, origin)
+                self.store.conn.commit()
+            except Exception:
+                self.store.conn.rollback()
+                raise
         return ceremony.options
 
     def finish_registration(
@@ -375,6 +380,119 @@ class Factors:
             raise FactorError("no such passkey", status=404, code="not_found")
         return True
 
+    def prove_password(
+        self,
+        account_id: str,
+        password: str,
+        code: str,
+        *,
+        session_id: str,
+        now: float | None = None,
+    ) -> str:
+        """Mint a step-up token from the password and, when set, a TOTP code.
+
+        A recovery code counts as that second factor and is consumed. The
+        token is bound to ``session_id`` (empty for the loopback bearer) and
+        lasts five minutes. It can be presented more than once in that window
+        so a registration ceremony can use options and then verify.
+        """
+        account = self._active(account_id)
+        if not isinstance(session_id, str) or len(session_id) > 128:
+            raise FactorError("invalid step-up", status=401, code="unauthorized")
+        if self.store.authenticate(account.username, password) is None:
+            raise FactorError("invalid step-up", status=401, code="unauthorized")
+        if self.totp_active(account.id) and not self._consume_totp(account, code, now=now):
+            raise FactorError("invalid step-up", status=401, code="unauthorized")
+        return self._mint_step_up(account.id, session_id)
+
+    def begin_passkey_step_up(
+        self,
+        account: Account,
+        *,
+        origin_header: str,
+        port: int,
+    ) -> dict[str, object]:
+        """Authentication options for this account's own passkeys.
+
+        The caller is already signed in, so the allow list is not an
+        anonymous username oracle. The assertion is a step-up, not a login.
+        """
+        selected = loopback_ceremony(origin_header, port)
+        if selected is None:
+            raise FactorError("origin is not allowed")
+        rp_id, origin = selected
+        with self.store._lock:
+            try:
+                rows = self.store.conn.execute(
+                    "SELECT credential_id FROM passkeys WHERE account_id = ? AND rp_id = ?",
+                    (account.id, rp_id),
+                ).fetchall()
+                allow = [
+                    item
+                    for item in (_decode_id(str(row["credential_id"])) for row in rows)
+                    if item
+                ]
+                if not allow:
+                    raise FactorError("no passkey on this account")
+                ceremony = authentication_options(rp_id=rp_id, origin=origin, allow=allow)
+                self._store_challenge(account.id, "authenticate", ceremony.challenge, rp_id, origin)
+                self.store.conn.commit()
+            except Exception:
+                self.store.conn.rollback()
+                raise
+        return ceremony.options
+
+    def finish_passkey_step_up(
+        self,
+        account: Account,
+        credential: object,
+        *,
+        session_id: str,
+    ) -> str:
+        """Turn a fresh passkey assertion into a five-minute step-up token."""
+        if not isinstance(session_id, str) or len(session_id) > 128:
+            raise FactorError("passkey was rejected", status=401, code="unauthorized")
+        signed_in = self.finish_authentication(credential)
+        if signed_in is None or signed_in.id != account.id:
+            raise FactorError("passkey was rejected", status=401, code="unauthorized")
+        return self._mint_step_up(account.id, session_id)
+
+    def step_up_valid(self, account_id: str, token: str, session_id: str) -> bool:
+        """True when ``token`` was minted for this account and session and is fresh."""
+        if not isinstance(token, str) or not token or len(token) > 256:
+            return False
+        if not isinstance(session_id, str) or len(session_id) > 128:
+            return False
+        with self.store._lock:
+            row = self.store.conn.execute(
+                """
+                SELECT account_id, session_id, expires_at
+                FROM step_up WHERE token_hash = ?
+                """,
+                (_hash(token),),
+            ).fetchone()
+        if row is None or str(row["expires_at"]) <= _now():
+            return False
+        return str(row["account_id"]) == account_id and str(row["session_id"]) == session_id
+
+    def _mint_step_up(self, account_id: str, session_id: str) -> str:
+        raw = secrets.token_urlsafe(32)
+        expires = (datetime.now(UTC) + timedelta(seconds=STEP_UP_TTL_SECONDS)).isoformat(
+            timespec="seconds"
+        )
+        with self.store._lock:
+            self.store.conn.execute("DELETE FROM step_up WHERE expires_at <= ?", (_now(),))
+            self.store.conn.execute(
+                """
+                INSERT INTO step_up (
+                    token_hash, account_id, session_id, expires_at, created_at
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (_hash(raw), account_id, session_id, expires, _now()),
+            )
+            self.store.conn.commit()
+        return raw
+
     def begin_authentication(
         self,
         username_text: str,
@@ -387,24 +505,19 @@ class Factors:
             raise FactorError("origin is not allowed")
         rp_id, origin = selected
         account = self.store.get_username(username_text) if username_text else None
-        allow: list[bytes] = []
         bound = ""
         if account is not None and account.status == "active":
             bound = account.id
-            with self.store._lock:
-                rows = self.store.conn.execute(
-                    "SELECT credential_id FROM passkeys WHERE account_id = ? AND rp_id = ?",
-                    (account.id, rp_id),
-                ).fetchall()
-            allow = [
-                item
-                for item in (_decode_id(str(row["credential_id"])) for row in rows)
-                if item
-            ]
+        # The response never lists credential ids. A username still binds the
+        # challenge, so another account's passkey cannot finish it.
         with self.store._lock:
-            ceremony = authentication_options(rp_id=rp_id, origin=origin, allow=allow)
-            self._store_challenge(bound, "authenticate", ceremony.challenge, rp_id, origin)
-            self.store.conn.commit()
+            try:
+                ceremony = authentication_options(rp_id=rp_id, origin=origin, allow=[])
+                self._store_challenge(bound, "authenticate", ceremony.challenge, rp_id, origin)
+                self.store.conn.commit()
+            except Exception:
+                self.store.conn.rollback()
+                raise
         return ceremony.options
 
     def finish_authentication(self, credential: object) -> Account | None:
@@ -561,7 +674,7 @@ class Factors:
         ).fetchone()
         if row is None or int(row["confirmed"]) != 1:
             return False
-        secret = self._secret(row["secret_enc"])
+        secret = self._secret(account_id, row["secret_enc"])
         step = matching_step(secret or "", code, now=moment)
         if step is not None:
             if step <= int(row["last_step"]):
@@ -610,30 +723,66 @@ class Factors:
             raise FactorError("authentication required", status=401, code="unauthorized")
         return account
 
-    def _key(self) -> bytes:
+    def _read_key(self) -> bytes | None:
+        """Return the data key, or None. Does not insert one."""
         row = self.store.conn.execute(
             "SELECT value FROM auth_meta WHERE key = 'data'"
         ).fetchone()
-        if row is not None:
-            value = bytes(row["value"])
-            if len(value) == 32:
-                return value
-        key = new_key()
+        if row is None:
+            return None
+        value = bytes(row["value"])
+        if len(value) != 32:
+            return None
+        return value
+
+    def _key(self) -> bytes:
+        """Insert a missing key, then re-read the stored row.
+
+        Caller holds the write transaction. ``ON CONFLICT DO NOTHING`` keeps
+        a concurrent insert. This does not overwrite a key that is already
+        there, and ``_secret`` does not call this.
+        """
+        existing = self._read_key()
+        if existing is not None:
+            return existing
         self.store.conn.execute(
             "INSERT INTO auth_meta (key, value) VALUES ('data', ?) "
-            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            (key,),
+            "ON CONFLICT(key) DO NOTHING",
+            (new_key(),),
         )
-        return key
+        stored = self._read_key()
+        if stored is None:
+            raise FactorError("account data key is missing", status=500, code="error")
+        return stored
 
-    def _secret(self, blob: object) -> str | None:
+    def _secret(self, account_id: str, blob: object) -> str | None:
+        """Decrypt a seed for ``account_id``. A legacy blob is rewritten.
+
+        A ciphertext sealed for another account does not decrypt. A blob
+        sealed with ``LEGACY_AAD`` (no account id) decrypts once and is
+        stored again under ``account_aad``. ``_read_key`` never creates a key.
+        """
+        key = self._read_key()
+        if key is None:
+            return None
+        raw = _decrypt(key, blob, account_aad(account_id))
+        legacy = False
+        if raw is None:
+            raw = _decrypt(key, blob, LEGACY_AAD)
+            legacy = raw is not None
+        if raw is None:
+            return None
         try:
-            raw = unseal(self._key(), bytes(blob))  # type: ignore[arg-type]
             text = raw.decode("ascii")
-        except Exception:
+        except UnicodeError:
             return None
         if not text or len(text) > 128:
             return None
+        if legacy:
+            self.store.conn.execute(
+                "UPDATE totp SET secret_enc = ? WHERE account_id = ?",
+                (seal(key, raw, aad=account_aad(account_id)), account_id),
+            )
         return text
 
     def _insert_codes(self, account_id: str, codes: list[str], now: str) -> None:
@@ -664,15 +813,17 @@ class Factors:
         rows = self.store.conn.execute(
             """
             SELECT challenge FROM webauthn_challenges
-            WHERE account_id = ? AND used = 0 ORDER BY expires_at
+            WHERE account_id = ? AND used = 0
             """,
             (account_id,),
         ).fetchall()
-        overflow = len(rows) - (_OPEN_CHALLENGES - 1)
-        for old in rows[: max(overflow, 0)]:
-            self.store.conn.execute(
-                "DELETE FROM webauthn_challenges WHERE challenge = ?",
-                (old["challenge"],),
+        # Leave outstanding challenges in place. Deleting the oldest one let
+        # an anonymous caller evict a sign-in the user had already started.
+        if len(rows) >= _OPEN_CHALLENGES:
+            raise FactorError(
+                "too many sign-in challenges",
+                status=429,
+                code="too_many",
             )
         expires = (datetime.now(UTC) + timedelta(seconds=CHALLENGE_TTL_SECONDS)).isoformat(
             timespec="seconds"
@@ -735,6 +886,13 @@ class Factors:
         if row is None or str(row["status"]) != "active":
             return True
         return _is_locked(str(row["locked_until"]))
+
+def _decrypt(key: bytes, blob: object, aad: bytes) -> bytes | None:
+    try:
+        return unseal(key, bytes(blob), aad=aad)  # type: ignore[arg-type]
+    except Exception:
+        return None
+
 
 def _passkey_public(row: Any) -> dict[str, object]:
     return {

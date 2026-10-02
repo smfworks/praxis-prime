@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 
 from praxis_prime.accounts.db import AccountStore
-from praxis_prime.accounts.factors import FactorError, Factors
+from praxis_prime.accounts.factors import STEP_UP_TTL_SECONDS, FactorError, Factors
 from praxis_prime.audit.log import AuditLog
 from praxis_prime.gateway.authz import (
     Principal,
@@ -138,7 +138,12 @@ def _totp_enroll(
     origin: str,
     port: int,
 ) -> _Result:
-    del body, origin, port
+    del origin, port
+    if Factors(store).totp_active(principal.account_id):
+        return 409, _error("conflict", "totp is already enrolled"), []
+    denied = _step_up_or_deny(store, principal, body)
+    if denied is not None:
+        return denied
     enrollment = Factors(store).begin_totp(principal.account_id)
     if not _audit_factor(audit, principal, "auth.mfa", "totp enrollment started", "totp"):
         return 503, _error("unavailable", "audit log is busy"), []
@@ -232,7 +237,10 @@ def _register_options(
     origin: str,
     port: int,
 ) -> _Result:
-    del body, audit
+    del audit
+    denied = _step_up_or_deny(store, principal, body)
+    if denied is not None:
+        return denied
     account = store.get_id(principal.account_id)
     if account is None:
         return 401, _error("unauthorized", "authentication required"), []
@@ -250,6 +258,9 @@ def _register_verify(
     port: int,
 ) -> _Result:
     del origin, port
+    denied = _step_up_or_deny(store, principal, body)
+    if denied is not None:
+        return denied
     parsed = _object(body)
     if parsed is None:
         return 400, _error("bad_request", "passkey body must be JSON"), []
@@ -276,6 +287,9 @@ def _passkey_remove(
     port: int,
 ) -> _Result:
     del origin, port
+    denied = _step_up_or_deny(store, principal, body)
+    if denied is not None:
+        return denied
     parsed = _object(body)
     if parsed is None:
         return 400, _error("bad_request", "passkey body must be JSON"), []
@@ -288,7 +302,98 @@ def _passkey_remove(
     return 200, {"ok": True}, []
 
 
+def _step_up_password(
+    store: AccountStore,
+    principal: Principal,
+    body: bytes,
+    audit: AuditLog | None,
+    *,
+    origin: str,
+    port: int,
+) -> _Result:
+    del origin, port
+    parsed = _object(body)
+    if parsed is None:
+        return 400, _error("bad_request", "body must be JSON"), []
+    password = parsed.get("password", "")
+    code = parsed.get("code", "")
+    if not isinstance(password, str) or not isinstance(code, str):
+        return 400, _error("bad_request", "password and code must be strings"), []
+    token = Factors(store).prove_password(
+        principal.account_id,
+        password,
+        code,
+        session_id=principal.session_id,
+    )
+    if not _audit_factor(audit, principal, "auth.mfa", "step-up", "password"):
+        return 503, _error("unavailable", "audit log is busy"), []
+    return 200, {"ok": True, "stepUpToken": token, "expiresIn": STEP_UP_TTL_SECONDS}, []
+
+
+def _step_up_passkey_options(
+    store: AccountStore,
+    principal: Principal,
+    body: bytes,
+    audit: AuditLog | None,
+    *,
+    origin: str,
+    port: int,
+) -> _Result:
+    del body, audit
+    account = store.get_id(principal.account_id)
+    if account is None:
+        return 401, _error("unauthorized", "authentication required"), []
+    options = Factors(store).begin_passkey_step_up(account, origin_header=origin, port=port)
+    return 200, {"ok": True, "options": options}, []
+
+
+def _step_up_passkey_verify(
+    store: AccountStore,
+    principal: Principal,
+    body: bytes,
+    audit: AuditLog | None,
+    *,
+    origin: str,
+    port: int,
+) -> _Result:
+    del origin, port
+    parsed = _object(body)
+    if parsed is None:
+        return 400, _error("bad_request", "passkey body must be JSON"), []
+    account = store.get_id(principal.account_id)
+    if account is None:
+        return 401, _error("unauthorized", "authentication required"), []
+    token = Factors(store).finish_passkey_step_up(
+        account,
+        parsed.get("credential"),
+        session_id=principal.session_id,
+    )
+    if not _audit_factor(audit, principal, "auth.mfa", "step-up", "passkey"):
+        return 503, _error("unavailable", "audit log is busy"), []
+    return 200, {"ok": True, "stepUpToken": token, "expiresIn": STEP_UP_TTL_SECONDS}, []
+
+
+def _step_up_or_deny(
+    store: AccountStore,
+    principal: Principal,
+    body: bytes,
+) -> _Result | None:
+    """Refuse a factor change that has no fresh step-up for this session."""
+    parsed = _object(body)
+    if parsed is None:
+        return 400, _error("bad_request", "body must be JSON"), []
+    token = parsed.get("stepUpToken", "")
+    if not isinstance(token, str):
+        return 400, _error("bad_request", "step-up token must be a string"), []
+    if Factors(store).step_up_valid(principal.account_id, token, principal.session_id):
+        return None
+    return 401, _error("unauthorized", "step-up required"), []
+
+
 _AUTHED = {
+    ("POST", "/v1/auth/step-up"): _step_up_password,
+    ("POST", "/v1/auth/step-up/passkey/options"): _step_up_passkey_options,
+    ("POST", "/v1/auth/step-up/passkey/verify"): _step_up_passkey_verify,
     ("POST", "/v1/auth/totp/enroll"): _totp_enroll,
     ("POST", "/v1/auth/totp/confirm"): _totp_confirm,
     ("POST", "/v1/auth/totp/disable"): _totp_disable,

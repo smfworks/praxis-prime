@@ -5,8 +5,10 @@ migrates single-user state into the ``default`` profile. Passwords are read
 from stdin, never from an argument.
 
 ``totp`` and ``passkey`` write ``accounts.db`` as the local OS user, the
-same trust as ``passwd``. Passkey enrollment itself is the daemon HTTP
-ceremony; this CLI can only list and remove credentials.
+same trust as ``passwd``. Each of those commands appends an audit event
+and does not record the secret. Passkey enrollment itself is the daemon
+HTTP ceremony and requires a step-up there; this CLI can only list and
+remove credentials.
 
 docs/blueprint-addendum-2026-09.md §4.3, §6.2, and §6.3.
 """
@@ -15,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -24,7 +27,7 @@ from praxis_prime.accounts.roles import SERVER_ROLES
 from praxis_prime.audit.log import AuditLog
 from praxis_prime.paths import config_dir, data_dir
 from praxis_prime.profiles.migrate import MigrationBusy, migrate_single_user, migrate_under_lock
-from praxis_prime.state import StateDB
+from praxis_prime.state import DatabaseBusy, StateDB
 from praxis_prime.statfile import StatKind, lstat_kind
 
 
@@ -198,11 +201,23 @@ def _passwd(args: argparse.Namespace) -> int:
     password = _read_password(args, confirm=True)
     if password is None:
         return 2
+    store = _store(args)
     try:
-        account = _store(args).set_password(args.username, password)
+        existing = store.get_username(args.username)
+        removed = 0
+        if existing is not None:
+            keys = Factors(store).summary(existing.id).get("passkeys")
+            removed = len(keys) if isinstance(keys, list) else 0
+        account = store.set_password(args.username, password)
     except AccountError as exc:
         print(f"praxis-prime account: {exc}", file=sys.stderr)
         return 2
+    _audit_account(
+        _data(args),
+        account,
+        "password changed",
+        {"method": "password", "passkeys_revoked": removed},
+    )
     print(f"updated password for {account.username}")
     return 0
 
@@ -250,6 +265,12 @@ def _totp_enroll(args: argparse.Namespace) -> int:
     except FactorError as exc:
         print(f"praxis-prime account: {exc}", file=sys.stderr)
         return 2
+    _audit_account(
+        _data(args),
+        account,
+        "totp enrollment started",
+        {"method": "totp"},
+    )
     print(f"totp pending for {account.username}")
     print(f"secret {enrollment.secret}")
     print(f"otpauth {enrollment.otpauth_uri}")
@@ -276,6 +297,7 @@ def _totp_confirm(args: argparse.Namespace) -> int:
     except FactorError as exc:
         print(f"praxis-prime account: {exc}", file=sys.stderr)
         return 2
+    _audit_account(_data(args), account, "totp confirmed", {"method": "totp"})
     print(f"totp on for {account.username}")
     return 0
 
@@ -290,6 +312,7 @@ def _totp_disable(args: argparse.Namespace) -> int:
     except FactorError as exc:
         print(f"praxis-prime account: {exc}", file=sys.stderr)
         return 2
+    _audit_account(_data(args), account, "totp disabled", {"method": "totp"})
     print(f"totp off for {account.username}")
     return 0
 
@@ -321,6 +344,12 @@ def _passkey(args: argparse.Namespace) -> int:
         except FactorError as exc:
             print(f"praxis-prime account: {exc}", file=sys.stderr)
             return 2
+        _audit_account(
+            _data(args),
+            account,
+            "passkey removed",
+            {"method": "passkey"},
+        )
         print(f"removed passkey for {account.username}")
         return 0
     print("usage: praxis-prime account passkey {list|remove}", file=sys.stderr)
@@ -360,6 +389,60 @@ def _transfer_owner(args: argparse.Namespace) -> int:
     print(f"owner is now {current.username} ({current.id})")
     print(f"previous owner {former.username} is admin")
     return 0
+
+
+def _audit_account(
+    root: Path,
+    account: Account,
+    summary: str,
+    payload: dict[str, object],
+) -> None:
+    """Append one hash-chained event. Callers must not put secrets in ``payload``."""
+    path, profile = _audit_target(root)
+    if path is None:
+        return
+    stamped = {"username": account.username, **payload}
+    try:
+        db = StateDB(path)
+    except (OSError, sqlite3.Error, DatabaseBusy, ValueError) as exc:
+        print(f"praxis-prime account: audit event was not written ({exc})", file=sys.stderr)
+        return
+    try:
+        AuditLog(db).append(
+            session_id=None,
+            kind="auth.mfa",
+            summary=summary,
+            payload=stamped,
+            actor_account=account.id,
+            profile=profile,
+        )
+    except (OSError, sqlite3.Error) as exc:
+        print(f"praxis-prime account: audit event was not written ({exc})", file=sys.stderr)
+    finally:
+        db.close()
+
+
+def _audit_target(root: Path) -> tuple[Path, str] | None:
+    """Return ``(prime.db, profile)`` for a CLI audit event, or None."""
+    profile_db = root / "profiles" / "default" / "prime.db"
+    kind = lstat_kind(profile_db)
+    if kind in {StatKind.SYMLINK, StatKind.UNREADABLE}:
+        print(
+            "praxis-prime account: profile database cannot be opened for the audit event",
+            file=sys.stderr,
+        )
+        return None
+    if kind is StatKind.FILE:
+        return profile_db, "default"
+    path = root / "prime.db"
+    legacy = lstat_kind(path)
+    if legacy in {StatKind.SYMLINK, StatKind.UNREADABLE}:
+        print(
+            "praxis-prime account: state database cannot be opened for the audit event",
+            file=sys.stderr,
+        )
+        return None
+    return path, ""
 
 
 def _audit_transfer(root: Path, former: Account, current: Account) -> None:
