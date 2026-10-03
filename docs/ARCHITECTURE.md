@@ -573,7 +573,7 @@ The Jury is a **micro-swarm** of judges. Each is a swarm worker with **no tools*
 | T3 microVM | Firecracker / Cloud Hypervisor (needs KVM) | high-risk code, unknown binaries | Optional; Linux + KVM only. |
 | T4 remote | SSH, Daytona, Modal, Vercel Sandbox | heavy or GPU jobs | Backends follow Hermes `tools/environments/`. Blocked by residency dials unless allowlisted. |
 
-- **No vendor sandbox.** NVIDIA OpenShell and other NVIDIA security containers are not used; isolation is Praxis Prime's own local sandbox: the tiers in this table. T1 bubblewrap is what the code runs today (`praxis_prime.sandbox`), including the account-data tmpfs mask and the shell denylist. See [Addendum A §3](blueprint-addendum-2026-09.md#3-local-sandbox).
+- **No vendor sandbox.** NVIDIA OpenShell and other NVIDIA security containers are not used; isolation is Praxis Prime's own local sandbox: the tiers in this table. T1 bubblewrap is what the code runs today (`praxis_prime.sandbox`), including the account-data tmpfs mask and the shell denylist. The mask does not hide a hard link planted outside the data folder, and the denylist does not catch every such read ([Shell and the data directory](SECURITY.md#shell-and-the-data-directory), [#42](https://github.com/smfworks/praxis-prime/issues/42), [#44](https://github.com/smfworks/praxis-prime/issues/44)). See [Addendum A §3](blueprint-addendum-2026-09.md#3-local-sandbox).
 - **Network** is off by default inside T1 and T2 (as in Codex). Per-task host allowlists go through a local egress proxy that logs every host. Policy hook H3 decides.
 - **Secrets:**
   - They are stored in the OS keychain (Secret Service / libsecret, as in Praxis) or in `age`-encrypted files.

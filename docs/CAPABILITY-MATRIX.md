@@ -87,7 +87,7 @@
 
 | Capability | Hermes | OpenClaw | Grok Bot | Cursor | Claude Code | Codex | Praxis | Swarm 2.0 | Jev | Jarvis | **Praxis Prime plan** |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| Shell sandbox | ✅ local/docker/ssh/singularity/modal/daytona/vercel | ✅ Docker/Podman/SSH/Crabbox (off by default) | ✅ isolated box | ✅ cloud VMs | ✅ bubblewrap + seccomp (Linux) | ✅ bubblewrap (Linux), network off | ◐ `sandbox.py` | ✗ | — | — | **A** tiers T1–T4 |
+| Shell sandbox | ✅ local/docker/ssh/singularity/modal/daytona/vercel | ✅ Docker/Podman/SSH/openshell/Crabbox (off by default) | ✅ isolated box | ✅ cloud VMs | ✅ bubblewrap + seccomp (Linux) | ✅ bubblewrap (Linux), network off | ◐ `sandbox.py` | ✗ | — | — | **A** tiers T1–T4 |
 | Browser automation | ✅ CDP/Camofox/Lightpanda | ✅ | ✅ box browser | ✅ | ◐ (MCP) | ◐ | ✗ | ✗ | — | ◐ | **A** |
 | Desktop computer use (Linux) | ◐ cua-driver (Linux backend "future" per docstring) | ◐ cua-computer ext.; linux-node (notify, camera, location) | ✅ in its box desktop | ✅ cloud VM desktop | ◐ | ✗ | ✗ | ✗ | — | ★ host control | **N** Wayland/X11 adapters + virtual desktop |
 | Git worktrees per task | ✅ `subagent_worktree.py` | ◐ | ◐ | ✅ | ✅ | ✅ (cloud) | ✗ | ✗ | — | — | **A** |

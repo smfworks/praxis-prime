@@ -1010,7 +1010,7 @@ footer{color:var(--muted);font-size:.8rem;margin-top:4rem}
 </tbody>
 </table></div>
 <ul>
-<li><strong>No vendor sandbox.</strong> NVIDIA OpenShell and other NVIDIA security containers are not used; isolation is Praxis Prime's own local sandbox: the tiers in this table. T1 bubblewrap is what the code runs today, including the account-data tmpfs mask and the shell denylist. See Addendum A §3.</li>
+<li><strong>No vendor sandbox.</strong> NVIDIA OpenShell and other NVIDIA security containers are not used; isolation is Praxis Prime's own local sandbox: the tiers in this table. T1 bubblewrap is what the code runs today, including the account-data tmpfs mask and the shell denylist. The mask does not hide a hard link planted outside the data folder, and the denylist does not catch every such read (<a href="SECURITY.md#shell-and-the-data-directory">Shell and the data directory</a>, <a href="https://github.com/smfworks/praxis-prime/issues/42">#42</a>, <a href="https://github.com/smfworks/praxis-prime/issues/44">#44</a>). See Addendum A §3.</li>
 <li><strong>Network</strong> is off by default inside T1 and T2 (as in Codex). Per-task host allowlists go through a local egress proxy that logs every host. Policy hook H3 decides.</li>
 <li><strong>Secrets:</strong>
 <ul>
@@ -3143,7 +3143,7 @@ praxis-prime omarchy install       # installs bar plugin, theme template, keybin
 <tr>
 <td>Shell sandbox</td>
 <td>✅ local/docker/ssh/singularity/modal/daytona/vercel</td>
-<td>✅ Docker/Podman/SSH/Crabbox (off by default)</td>
+<td>✅ Docker/Podman/SSH/openshell/Crabbox (off by default)</td>
 <td>✅ isolated box</td>
 <td>✅ cloud VMs</td>
 <td>✅ bubblewrap + seccomp (Linux)</td>
@@ -4138,7 +4138,7 @@ Clones live in <code>/workspace/agent-arch/src/</code>. The notes reflect the co
 <tr>
 <td>Sandboxing</td>
 <td>—</td>
-<td>Off by default. Backends: Docker, Podman, SSH, Crabbox.</td>
+<td>Off by default. Backends: Docker, Podman, SSH, openshell, Crabbox.</td>
 </tr>
 <tr>
 <td>Multi-agent</td>
