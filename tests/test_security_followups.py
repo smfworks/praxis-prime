@@ -46,6 +46,7 @@ from praxis_prime.sandbox.bwrap import (
     build_bwrap_argv,
     bwrap_available,
     hardlink_cover_argv,
+    release_profile,
     run_bwrap,
 )
 from praxis_prime.state import StateDB, refuse_misplaced_database
@@ -1223,9 +1224,242 @@ def test_unreadable_profile_names_the_folder(
         os.chmod(hidden, 0o700)
     text = str(caught.value)
     assert "permission denied" in text
-    assert "profiles" in text
+    assert "another profile's data" in text
+    assert "bob" not in text
     assert str(home) not in text
     assert "hard-link cap" not in text
+
+
+def test_another_profiles_folder_is_redacted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = _isolate(tmp_path, monkeypatch)
+    root = home / ".local" / "share" / "praxis-prime" / "profiles"
+    own = root / "amy" / "mem"
+    other = root / "bob" / "mem"
+    own.mkdir(parents=True)
+    other.mkdir(parents=True)
+    (own.parent / "SOUL.md").write_text("s\n", encoding="utf-8")
+    os.chmod(other, 0o300)
+    work = home / "proj"
+    work.mkdir()
+    token = bind_profile("amy")
+    clear_data_inode_cache()
+    try:
+        with pytest.raises(SandboxError, match="did not finish") as caught:
+            build_bwrap_argv("true", work)
+    finally:
+        os.chmod(other, 0o700)
+        release_profile(token)
+    text = str(caught.value)
+    assert "another profile's data" in text
+    assert "bob" not in text
+    own_hidden = own
+    os.chmod(own_hidden, 0o300)
+    token = bind_profile("amy")
+    clear_data_inode_cache()
+    try:
+        with pytest.raises(SandboxError, match="did not finish") as caught:
+            build_bwrap_argv("true", work)
+    finally:
+        os.chmod(own_hidden, 0o700)
+        release_profile(token)
+    assert "profiles/amy" in str(caught.value)
+    assert "another profile's data" not in str(caught.value)
+
+
+def test_mcp_home_covers_a_link_beside_the_data_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = _isolate(tmp_path, monkeypatch)
+    soul = home / ".local" / "share" / "praxis-prime" / "profiles" / "bob" / "SOUL.md"
+    soul.parent.mkdir(parents=True)
+    soul.write_text("SECRET-PSOUL\n", encoding="utf-8")
+    notes = home / "notes"
+    notes.mkdir()
+    os.link(soul, notes / "soul.txt")
+    clear_data_inode_cache()
+    argv = build_mcp_bwrap_argv(
+        "/bin/sh",
+        ("-c", "cat notes/soul.txt"),
+        cwd=home,
+        env={"PATH": "/usr/bin:/bin"},
+        network="off",
+    )
+    covers = _null_covers(argv)
+    assert str(notes / "soul.txt") in covers
+    assert str(soul) not in covers
+    if not bwrap_available():
+        return
+    ran = subprocess.run(argv, capture_output=True, text=True, timeout=30, check=False)
+    assert "SECRET" not in ran.stdout
+
+
+def test_approved_worktree_link_is_covered_inside_a_home_mount(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home, secret = _private_file(tmp_path, monkeypatch)
+    data = secret.parent
+    (data / "profiles").mkdir()
+    worktree = data / "worktrees" / "ada" / "repo" / "task"
+    worktree.mkdir(parents=True)
+    (worktree / ".git").write_text("gitdir: /tmp/unused\n", encoding="utf-8")
+    os.link(secret, worktree / "notes.txt")
+    project = home / "proj"
+    project.mkdir()
+    clear_data_inode_cache()
+    argv = build_mcp_bwrap_argv(
+        "/bin/sh",
+        ("-c", f"cat {worktree / 'notes.txt'}"),
+        cwd=home,
+        env={"PATH": "/usr/bin:/bin"},
+        network="off",
+        write_scope=worktree,
+        write_approved=True,
+        main_checkout=project,
+    )
+    assert str(worktree / "notes.txt") in _null_covers(argv)
+    if not bwrap_available():
+        return
+    ran = subprocess.run(argv, capture_output=True, text=True, timeout=30, check=False)
+    assert "SECRET" not in ran.stdout
+
+
+def test_shell_custom_data_dir_covers_a_project_link(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = _isolate(tmp_path, monkeypatch)
+    proj = home / "proj"
+    data = proj / ".pdata"
+    soul = data / "profiles" / "amy" / "SOUL.md"
+    soul.parent.mkdir(parents=True)
+    soul.write_text("SECRET-CUSTOM\n", encoding="utf-8")
+    (proj / "src").mkdir(parents=True)
+    os.link(soul, proj / "src" / "n.txt")
+    inode_boundary.bind_data_root(data)
+    clear_data_inode_cache()
+    try:
+        argv = build_bwrap_argv("f=n; cat src/$f.txt", proj)
+        covers = _null_covers(argv)
+        assert "/workspace/src/n.txt" in covers
+        assert not any(".pdata" in cover for cover in covers)
+        if not bwrap_available():
+            return
+        from praxis_prime.tools.registry import ToolContext
+        from praxis_prime.tools.shell import execute_shell
+
+        output = execute_shell(
+            {"command": "f=n; cat src/$f.txt"},
+            ToolContext(cwd=str(proj), cancelled=lambda: False, shell_approved=True),
+        )
+        assert "SECRET" not in output
+    finally:
+        inode_boundary.bind_data_root(None)
+
+
+def test_parent_of_the_data_root_covers_every_outside_link(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """probe_overlap4 case I: one link, and the mount contains the data root."""
+    home = _isolate(tmp_path, monkeypatch)
+    soul = home / ".local" / "share" / "praxis-prime" / "profiles" / "bob" / "SOUL.md"
+    soul.parent.mkdir(parents=True)
+    soul.write_text("SECRET-PSOUL\n", encoding="utf-8")
+    parent = tmp_path
+    for name in ("a", "m", "z", "0", "zzzz"):
+        link = parent / name / "L.txt"
+        link.parent.mkdir(parents=True)
+        os.link(soul, link)
+        clear_data_inode_cache()
+        shell = build_bwrap_argv("cat " + name + "/L.txt", parent)
+        assert f"/workspace/{name}/L.txt" in _null_covers(shell)
+        clear_data_inode_cache()
+        mcp = build_mcp_bwrap_argv(
+            "/bin/sh",
+            ("-c", f"cat {link}"),
+            cwd=parent,
+            env={"PATH": "/usr/bin:/bin"},
+            network="off",
+        )
+        assert str(link) in _null_covers(mcp)
+        if bwrap_available():
+            ran = subprocess.run(mcp, capture_output=True, text=True, timeout=30, check=False)
+            assert "SECRET" not in ran.stdout
+        link.unlink()
+
+
+def test_overlap4_aliases_cover_every_sandbox_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = _isolate(tmp_path, monkeypatch)
+    soul = home / ".local" / "share" / "praxis-prime" / "profiles" / "bob" / "SOUL.md"
+    soul.parent.mkdir(parents=True)
+    soul.write_text("SECRET-PSOUL\n", encoding="utf-8")
+    (home / ".local" / "share" / "praxis-prime" / "SOUL.md").write_text(
+        "SECRET-RSOUL\n", encoding="utf-8"
+    )
+    proj = tmp_path / "proj"
+    out = proj / "out"
+    out.mkdir(parents=True)
+    other = tmp_path / "other"
+    (other / "sub").mkdir(parents=True)
+    (out / "deep").mkdir(parents=True)
+    os.link(soul, out / "L1.txt")
+    os.link(soul, other / "L2.txt")
+    os.link(soul, out / "deep" / "L3.txt")
+    os.link(soul, proj / "L4.txt")
+    root_soul = home / ".local" / "share" / "praxis-prime" / "SOUL.md"
+    os.link(root_soul, other / "sub" / "L5.txt")
+    os.link(soul, other / "sub" / "L6.txt")
+    clear_data_inode_cache()
+    argv = build_mcp_bwrap_argv(
+        "/bin/sh",
+        ("-c", "true", str(other / "sub"), str(other)),
+        cwd=proj,
+        env={"PATH": "/usr/bin:/bin"},
+        network="off",
+        write_scope=out,
+        write_approved=True,
+    )
+    covers = _null_covers(argv)
+    for path in (
+        out / "L1.txt",
+        other / "L2.txt",
+        out / "deep" / "L3.txt",
+        proj / "L4.txt",
+        other / "sub" / "L5.txt",
+        other / "sub" / "L6.txt",
+    ):
+        assert str(path) in covers
+    clear_data_inode_cache()
+    shell = build_bwrap_argv(
+        "true",
+        proj,
+        ro_binds=[
+            (str(proj), "/alias"),
+            (str(out), "/alias2"),
+            (str(other), "/a"),
+            (str(other), "/b"),
+        ],
+    )
+    shell_covers = _null_covers(shell)
+    for path in (
+        "/workspace/L4.txt",
+        "/workspace/out/L1.txt",
+        "/alias/L4.txt",
+        "/alias/out/L1.txt",
+        "/alias2/L1.txt",
+        "/alias2/deep/L3.txt",
+        "/a/L2.txt",
+        "/b/L2.txt",
+        "/a/sub/L6.txt",
+        "/b/sub/L5.txt",
+    ):
+        assert path in shell_covers
+    if not bwrap_available():
+        return
+    ran = subprocess.run(argv, capture_output=True, text=True, timeout=30, check=False)
+    assert "SECRET" not in ran.stdout
 
 
 def test_vanished_profile_file_does_not_refuse(
@@ -1440,6 +1674,14 @@ def _private_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path
     secret.parent.mkdir(parents=True)
     secret.write_text(_SECRET, encoding="utf-8")
     return home, secret
+
+
+def _null_covers(argv: list[str]) -> list[str]:
+    return [
+        argv[index + 2]
+        for index in range(len(argv) - 2)
+        if argv[index] == "--ro-bind" and argv[index + 1] == "/dev/null"
+    ]
 
 
 def _cover(argv: list[str], sandbox: str) -> list[str]:
