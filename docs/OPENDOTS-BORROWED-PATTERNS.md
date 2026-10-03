@@ -243,7 +243,8 @@ A2UI, OpenGenerativeUI, and MCP Apps iframes are listed under [Not adopting](#no
   - When an id appears in more than one of the path, the body, and the query, the values must match. A mismatch is rejected.
   - The gateway rejects a frame whose `sessionId` disagrees with `payload.sessionId` on `session.drop` and `chat.send`. The SPA client for this allowlist stays M1d.
 - **Milestone:** M1d, with pattern 7. Re-checked in M6 for remote exposure.
-- **Landed with M1c (gateway only):** an unknown HTTP route returns 404, a frame whose `sessionId` disagrees with `payload.sessionId` is rejected, and an approval id that disagrees across the path, the body, and the query is rejected. The SPA client and pattern 7 stay M1d.
+- **Landed with M1c (gateway only):** an unknown HTTP route returns 404, a frame whose `sessionId` disagrees with `payload.sessionId` is rejected, and an approval id that disagrees across the path, the body, and the query is rejected. Pattern 7 landed with the M1d web API.
+- **Landed in M1d (SPA):** the web app calls allowlisted routes only. An approval decision sends the same id in the path and the body.
 - **Effort [E]:** about 1 day.
 - **Acceptance criteria:**
   - A frame whose `sessionId` disagrees with `payload.sessionId` is rejected.

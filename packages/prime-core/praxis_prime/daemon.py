@@ -634,3 +634,7 @@ def _telegram(
         offset_path=state_dir(env) / "telegram-offset.txt",
         policy=agent.runtime.policy,
     )
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
