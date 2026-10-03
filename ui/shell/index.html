@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Praxis Prime</title>
+  <link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+  <main class="wrap">
+    <h1>Praxis Prime</h1>
+    <p id="banner" class="banner" hidden></p>
+
+    <section id="login">
+      <h2>Sign in</h2>
+      <form id="password-form">
+        <label>Username
+          <input id="username" name="username" autocomplete="username" required>
+        </label>
+        <label>Password
+          <input id="password" name="password" type="password" autocomplete="current-password" required>
+        </label>
+        <button type="submit">Sign in</button>
+      </form>
+      <div id="providers"></div>
+      <form id="totp-form" hidden>
+        <label>Authentication code
+          <input id="totp" name="code" inputmode="numeric" autocomplete="one-time-code">
+        </label>
+        <button type="submit">Continue</button>
+      </form>
+    </section>
+
+    <section id="security" hidden>
+      <h2>Security</h2>
+      <p id="who"></p>
+      <h3>Linked identities</h3>
+      <ul id="identities"></ul>
+      <form id="link-form">
+        <label>Provider
+          <select id="link-provider"></select>
+        </label>
+        <label>Password
+          <input id="link-password" type="password" autocomplete="current-password">
+        </label>
+        <label>Code
+          <input id="link-code" autocomplete="one-time-code">
+        </label>
+        <button type="submit" id="link-button">Link identity</button>
+      </form>
+      <button type="button" id="logout">Sign out</button>
+    </section>
+  </main>
+  <script src="/assets/app.js"></script>
+</body>
+</html>

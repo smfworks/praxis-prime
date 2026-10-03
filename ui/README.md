@@ -6,4 +6,6 @@ React 19, Vite, TypeScript, Tailwind, and TanStack Query (ARCHITECTURE §21 and 
 
 Hash routes (`#/chat`, `#/approvals`, `#/security`) keep the daemon's route allowlist to `/` and `/assets/*`. Themes are M3. The CSS variables in `src/styles.css` are the hook for that later.
 
+OIDC sign-in, link, and unlink call the loopback `/v1/auth/oidc/*` routes from this SPA. The older static mockup under `ui/shell/` is not served.
+
 The Tauri shell in `apps/desktop` is still a stub.
