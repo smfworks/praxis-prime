@@ -160,7 +160,7 @@ A2UI, OpenGenerativeUI, and MCP Apps iframes are listed under [Not adopting](#no
   - `deployment/computers/LICENSE.openbot` covers the computers directory this pattern cites. It is MIT, © 2026 CopilotKit. See [Credit and licence](#credit-and-licence).
   - The activity log records the action name, actor and outcome. It does **not** record typed values, file contents, or full commands.
   - This works only on the sandboxed desktop. Host control stays the separate `desktop.control` permission.
-- **Milestone:** M4 (T2 / OpenShell virtual desktop). The UI is in the M1d shell.
+- **Milestone:** M4 (T2 rootless Podman virtual desktop, [ARCHITECTURE §13.2](ARCHITECTURE.md#132-desktop-computer-use-host)). The UI is in the M1d shell.
 - **Effort [E]:** 2–3 weeks, after M4.
 - **Acceptance criteria:**
   - While the human holds control, every agent browser or desktop action is refused.
@@ -292,7 +292,7 @@ Suggested placement, folded into [Addendum A §8](blueprint-addendum-2026-09.md#
 - **M1 PR 4/5:** personal profile, admin boundary with break-glass, requester-routed approvals, per-session visibility.
 - **M1 PR 6:** supervisor, run-as routines, revocation (pattern 3), per-worker credentials with a generation counter, systemd slice (`MemoryMax`, `CPUQuota`, `TasksMax`).
 - **M2:** per-profile provider keys.
-- **M4:** L3 (OpenShell). L2 (per-profile Linux users) is unscheduled, after M4.
+- **M4:** L3 (local sandbox: T1 bubblewrap and T2 Podman). L2 (per-profile Linux users) is unscheduled, after M4.
 - **M6:** per-account channel bindings with approvals pushed to the requester.
 
 ## Not adopting
@@ -307,5 +307,5 @@ Suggested placement, folded into [Addendum A §8](blueprint-addendum-2026-09.md#
 | Cloud "Automatic Learning" and learned-skill delivery | Skills are learned, reviewed and published inside Intelligence (`src/server/learning.ts`). Praxis Prime keeps skills as local `SKILL.md` folders ([SKILLS.md](SKILLS.md)). |
 | OpenAI Realtime voice | Hard-wired to `api.openai.com` (`src/server/voice.ts`). Praxis Prime plans local voice (ARCHITECTURE §19, §23). |
 | Managed Slack (Channels SDK) | Delivery is run by Intelligence (`docs/SETUP.md`, "Slack"). Praxis Prime runs its own channel adapters (`plugins/channels/`). |
-| OpenBot Docker-socket supervisor | The supervisor mounts the Docker socket. Containers share the host kernel, and there is no egress policy by default (`docs/COMPUTERS.md`). That is weaker than bubblewrap now and OpenShell later ([Addendum A §3](blueprint-addendum-2026-09.md#3-nvidia-openshell)). We borrow its UX and credential ideas (patterns 5 and 6), not its runtime. |
+| OpenBot Docker-socket supervisor | The supervisor mounts the Docker socket. Containers share the host kernel, and there is no egress policy by default (`docs/COMPUTERS.md`). That is weaker than bubblewrap now and the T2 rootless Podman desktop in M4 ([Addendum A §3](blueprint-addendum-2026-09.md#3-local-sandbox)). We borrow its UX and credential ideas (patterns 5 and 6), not its runtime. |
 | TanStack AI loop and the OpenDots memory model | The loop is capped at 5–10 steps (`src/server/dot-agent.ts`). `dot-agent.ts:87-127` does gate on pause and permissions. The Decision Engine stays Praxis Prime's. Memory is a flat list of preference strings (`src/server/store.ts`). Praxis Prime's loop and three-tier memory ([MEMORY.md](MEMORY.md)) already go further. |

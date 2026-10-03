@@ -81,7 +81,7 @@
 | Agent loop | `docs/concepts/*`, `openclaw-agent-runtime.md` | Serialized per-session lane plus a global lane. Queue modes: steer / followup / collect / interrupt. Writer-claim fencing on the SQLite transcript. |
 | Plugin hooks | — | `before_model_resolve`, `before_prompt_build`, `before_tool_call` / `after_tool_call`, `agent_end`, compaction hooks. |
 | Permission modes | `docs/gateway/permission-modes.md` | **read-only / guarded** (human) **/ workspace** (LLM reviewer allow/deny/ask; 3 denials escalate to a human) **/ full**. Approval cards in channels, or `/approve <id> allow-once|deny`. A free-text "yes" never authorizes. |
-| Sandboxing | — | Off by default. Backends: Docker, Podman, SSH, OpenShell, Crabbox. |
+| Sandboxing | — | Off by default. Backends: Docker, Podman, SSH, Crabbox. |
 | Multi-agent | `docs/concepts/parallel-specialist-lanes.md` | Isolated agents (workspace, agentDir, SQLite) bound to channels. `openclaw agents team create` gives coordinator / researcher / writer / reviewer lanes. |
 | Automation | `docs/automation/cron-jobs.md`, `standing-orders.md`, `/gateway/heartbeat` | Cron jobs, standing orders, **heartbeat** (periodic main-session turns). |
 | Extensions (173) | `extensions/*` | Channels (Telegram, Slack, Discord, Signal, WhatsApp, Matrix, MS Teams, iMessage…), providers (Ollama, llama-cpp, vLLM, SGLang, LM Studio, OpenAI, Anthropic, xAI…), memory-core / lancedb / wiki / active-memory, cua-computer, **linux-node** (notify-send, camera via FFmpeg, GeoClue location), talk-voice (voice selection only), tts-local-cli, voice-call (Twilio/Telnyx/Plivo phone calls), azure-speech, onnx, **typesafe**, vault, onepassword, diagnostics-otel / prometheus, migrate-hermes / migrate-claude. |

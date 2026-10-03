@@ -1,16 +1,16 @@
 # Praxis Prime — Blueprint Addendum A (2026-09-30)
 
-> **Status:** owner-approved design, landed as this file on 2026-09-30. It stays one document (themes, onboarding, OpenShell, remote access, Windows, and profiles together). [`ARCHITECTURE.md`](ARCHITECTURE.md) §29 follows the M0–M8 order in §8. The other stance changes in the table below stay in this addendum until those sections are revised.
-> **Requested by:** Michael (SMF Works), 2026-09-30.
-> **Scope:** five additions (themes, no default LLM, NVIDIA OpenShell, any-device + Windows, multi-user/multi-profile) and a re-ordered roadmap.
-> **Baseline:** `smfworks/praxis-prime` main @ `029b5ccc` (2026-09-30 07:44 ET). Reference clones, all read-only: NVIDIA/OpenShell @ `5acaaba1`, NousResearch/hermes-agent @ `f42f579c`, openclaw/openclaw @ `1de9a42f`, and the six `smfworks/smf-praxis-*` pack repos (HEADs as of 2026-09-30 08:29 ET).
+> **Status:** owner-approved design, landed as this file on 2026-09-30. Decision C was revised on 2026-10-03: isolation is Praxis Prime's own local sandbox (§3). It stays one document (themes, onboarding, the local sandbox, remote access, Windows, and profiles together). [`ARCHITECTURE.md`](ARCHITECTURE.md) §29 follows the M0–M8 order in §8. The other stance changes in the table below stay in this addendum until those sections are revised.
+> **Requested by:** Michael (SMF Works), 2026-09-30. The sandbox revision was requested by Michael on 2026-10-03.
+> **Scope:** five additions (themes, no default LLM, the local sandbox, any-device + Windows, multi-user/multi-profile) and a re-ordered roadmap.
+> **Baseline:** `smfworks/praxis-prime` main @ `029b5ccc` (2026-09-30 07:44 ET). Reference clones, all read-only: NousResearch/hermes-agent @ `f42f579c`, openclaw/openclaw @ `1de9a42f`, and the six `smfworks/smf-praxis-*` pack repos (HEADs as of 2026-09-30 08:29 ET). Sandbox behavior cited in §3 was read on main after that baseline.
 
 ### How to read this document
 
 - **[V]** = verified against a primary source (repo file or official doc) cited in §10.
 - **[U]** = unverified. It needs a test on real hardware or a follow-up before we rely on it.
 - **[E]** = an estimate or judgment call by the author, not a fact.
-- **Attribution.** SMF Works does **not** own Hermes Agent (MIT, © 2025 Nous Research) or OpenClaw (MIT, © 2026 OpenClaw Foundation). This addendum borrows *ideas and patterns* from them. If code is ever copied, keep their MIT notices, per ARCHITECTURE §32. NVIDIA OpenShell is Apache-2.0 **[V]**. Praxis would call it as an external runtime; it is not vendored.
+- **Attribution.** SMF Works does **not** own Hermes Agent (MIT, © 2025 Nous Research) or OpenClaw (MIT, © 2026 OpenClaw Foundation). This addendum borrows *ideas and patterns* from them. If code is ever copied, keep their MIT notices, per ARCHITECTURE §32. Isolation is Praxis Prime's own local sandbox (§3). No NVIDIA security container is called or vendored.
 
 ---
 
@@ -20,11 +20,11 @@
 |---|---|---|
 | A | Themes | Declarative **theme packages** (`theme.toml` tokens + local assets + optional *restricted* `theme.css` + `THEME.md`). **No JavaScript, no remote resources, no raw CSS injection.** Validated on install: schema, size caps, WCAG 2.2 AA contrast, font licence allowlist. Seven built-in themes. Per-profile selection; an admin can lock it. Omarchy `colors.toml` stays as a live "system" theme. |
 | B | No default LLM | Delete the hard-coded `ollama:qwen3:32b` defaults. On first run, chat is blocked until the user **explicitly picks** a provider in one of three lanes (this machine / my network / cloud) and it passes a **real completion test**. Nothing ever silently falls back to another provider. The web wizard and the `praxis-prime setup` CLI share one backend. |
-| C | OpenShell | NVIDIA OpenShell is an Apache-2.0, Rust, policy-enforced sandbox runtime for agents. **No GPU is required.** It needs Linux ≥ 6.2 (Landlock ABI 3) plus Docker ≥ 28, Podman 5, k8s, or a microVM. **Make it the default sandbox tier for "regulated" installs on supported hosts**, with telemetry off and version pinning. Praxis's own approval spine stays in charge of SEND/SPEND. **Fallback:** bubblewrap + rootless Podman, with a visible "OpenShell unavailable" status. |
+| C | Local sandbox | **NVIDIA OpenShell and other NVIDIA security containers are not used; isolation is Praxis Prime's own local sandbox.** Owner decision, 2026-10-03. The 2026-09-30 proposal to adopt a vendor sandbox as the regulated default is withdrawn. Tiers stay [ARCHITECTURE §13.1](ARCHITECTURE.md#131-sandbox-tiers): T1 bubblewrap (running, with the data-root mask and the shell denylist), T2 rootless Podman, T3 microVM (Firecracker or Cloud Hypervisor, optional), T4 remote. No new runtime is added. The approval spine still gates SEND/SPEND. See §3. |
 | D | Any device / Windows | Keep **loopback as the default**. Add opt-in `gateway.bind = tailnet | lan | proxy` modes that fail closed without account auth and TLS. Add an installable PWA. Windows = **WSL2-only** "supported beta" via a PowerShell/winget bootstrap. Difficulty: medium **[E]**. M365 (Entra OIDC, Teams connector, Intune/winget) is a separate, later milestone. |
 | E | Multi-user / profiles | Real **accounts** (local passwords + passkeys, or OIDC) with roles `owner/admin`, `operator`, `viewer`, `auditor`. **Profiles** are separate homes: memory, skills, routines, dials, theme, provider allowlist. One worker process per active profile. Hash-chained audit records `actor=user, profile=…`. There is a profile picker. We say plainly where the isolation boundary is. |
 | F | Packs | M0: ship `packs/compliance` inside the wheel, and write a **loader/port for the legacy `pack.json` + `knowledge.md` format** used by the six public MIT packs. It must ignore their `ollama-cloud/*` model pins and must not serve their dashboard JS. |
-| G | Roadmap | M0 packaging/packs → M1 web shell + accounts + profiles → M2 onboarding (remove the Ollama default) → M3 themes → M4 OpenShell → M5 installers (Ubuntu/Omarchy, then WSL2) → M6 remote access + PWA hardening → M7 Tauri desktop → M8 Microsoft 365. See §8. |
+| G | Roadmap | M0 packaging/packs → M1 web shell + accounts + profiles → M2 onboarding (remove the Ollama default) → M3 themes → M4 local sandbox → M5 installers (Ubuntu/Omarchy, then WSL2) → M6 remote access + PWA hardening → M7 Tauri desktop → M8 Microsoft 365. See §8. |
 
 ### Changes to existing ARCHITECTURE.md stances
 
@@ -35,7 +35,7 @@
 | §2 Non-goals | "No Windows or macOS builds in v1.0"; "single-user or small-team" | Windows **via WSL2** becomes a supported beta target, with no native Windows build. "Small team" becomes "small team with accounts/roles on one server". Multi-tenant SaaS remains a non-goal. |
 | §4 Gateway / remote | "Remote only via tunnel + pairing" | Add exposure modes (§4.2). The loopback-only assert in `gateway/server.py` becomes a *policy* check: allowed only when accounts auth + TLS are configured. |
 | §6 Model router | "Ollama/llama.cpp + 2 cloud providers" with Ollama the default | No default provider. There is an explicit first-run choice (§2). |
-| §13.1 Sandbox tiers | T1 bwrap, T2 Podman, T3 microVM, T4 remote | Add **T2-OS: OpenShell** (§3.5). It is the default for regulated installs. |
+| §13.1 Sandbox tiers | T1 bwrap, T2 Podman, T3 microVM, T4 remote | **Applied.** Keep these tiers. Do not add a vendor tier. M4 deepens the running T1 bubblewrap sandbox (data-root mask, denylist) and brings up T2 for builds and the virtual desktop (§3). |
 | §21 UX / UI | "Themes itself from Omarchy (§28.2)" | Add the theme engine (§1). Omarchy becomes one theme *source*. |
 | §25 Config & paths | `profiles/<name>.toml` | Profiles become directories with an account/ACL model (§6). |
 | §29 Roadmap | MVP / v0.5 / v1.0 | **Applied in this landing.** [`ARCHITECTURE.md`](ARCHITECTURE.md) §29 nests M0–M8 (§8) inside the same phases. |
@@ -262,7 +262,7 @@ If nothing is found, show one-click-copy install instructions per distro (Ubuntu
   - (b) the Tailscale peer list via `tailscale status --json` when Tailscale is present;
   - (c) a bounded probe of the /24 on known ports 11434/8000/8080/1234, only when the user clicks "Scan my network". It is rate-limited and logged.
 - **Test:** `GET /v1/models` → pick a model → a real chat completion with a tool call → read the context length (from `max_model_len`/`/props`/`/api/show`, else ask). Show latency and tokens/s.
-- **Egress policy:** a network endpoint is recorded as `locality = "lan"`. Compliance dials treat `lan` as on-prem when the host is in the admin's "trusted inference hosts" list; otherwise they warn. OpenShell blocks private IPs by default, so regulated installs add an `allowed_ips` entry for exactly this host (§3.5).
+- **Egress policy:** a network endpoint is recorded as `locality = "lan"`. Compliance dials treat `lan` as on-prem when the host is in the admin's "trusted inference hosts" list; otherwise they warn. Tool calls do not get that path for free: the sandbox network stays off, and a regulated profile reaches that host only through the egress proxy allowlist (§3, [ARCHITECTURE §13.1](ARCHITECTURE.md#131-sandbox-tiers)).
 - **Hardware notes shown in UI** (informational):
   - DGX Spark = GB10, 128 GB unified memory, DGX OS (Ubuntu-based, arm64) **[V]** (nvidia.com product page); typical servers are vLLM / Ollama / NIM **[U]**, whichever is installed.
   - AMD boxes: vLLM-ROCm, llama.cpp-HIP, or Ollama-ROCm all expose OpenAI-compatible endpoints. Praxis does not care which GPU is behind the URL.
@@ -286,109 +286,48 @@ If nothing is found, show one-click-copy install instructions per distro (Ubuntu
 7. **Per-profile:** each profile (§6) can have its own provider/model selection, restricted by the admin's provider allowlist.
 
 ---
-## 3. NVIDIA OpenShell
+## 3. Local sandbox
 
-### 3.1 What it is **[V]**
+### 3.1 Decision (2026-10-03)
 
-NVIDIA OpenShell (`github.com/NVIDIA/OpenShell`, docs at `docs.nvidia.com/openshell/latest/`) describes itself as "the safe, private runtime for fleets of autonomous AI agents". It is an **open-source sandbox runtime and control plane for agents**, written in Rust. It is not a model, not a GPU runtime, and not a shell replacement.
+**NVIDIA OpenShell and other NVIDIA security containers are not used; isolation is Praxis Prime's own local sandbox.**
 
-| Component | Role |
-|---|---|
-| **Gateway** | Control plane: sandbox lifecycle, policy, provider (credential) management, and the API/CLI endpoint. Package installs run it as a **systemd user service** `openshell-gateway` (config `~/.config/openshell/gateway.toml`), listening on `https://127.0.0.1:17670` with mTLS for local single-user use. |
-| **Supervisor** | Trusted process *outside* the workload. It mediates the workload's network and process activity and enforces policy. If it disconnects, **the sandbox freezes the agent** (fail closed) (`docs/about/architecture.mdx`). |
-| **Sandbox** | The workload: an OCI image (default `nvcr.io/nvidia/base/ubuntu:24.04`), run on Docker, Podman, Kubernetes, or a libkrun microVM, as a non-root user with no capabilities. |
+The 2026-09-30 draft of this section proposed NVIDIA OpenShell as an extra tier and as the default for regulated installs, and with it NemoClaw and NVIDIA container-toolkit isolation. That proposal is withdrawn. Praxis Prime does not install, vendor, pin, or call those runtimes. There is no install helper, no policy compiler aimed at a vendor control plane, no second audit stream, and no config flag that requires one. The approval spine still gates SEND, SPEND, and destructive actions. The sandbox only limits what a process can touch.
 
-Security and compliance controls it provides:
-- **Filesystem:** Landlock rules (`filesystem_policy`, `landlock`). A mandatory baseline protects OpenShell's private files.
-- **Process:** seccomp, non-root, no capabilities.
-- **Network:** default deny. All TCP/DNS goes through the supervisor. Rules are **per binary**, with **L7 inspection** of HTTP, GraphQL, and MCP methods (`network_policies`, `network_middlewares`).
-  - Private IPs are blocked for undeclared, wildcard, or hostless endpoints.
-  - **Loopback, link-local, and `0.0.0.0` are always blocked** and cannot be re-allowed (`docs/security/best-practices.mdx`).
-  - Host-local services are reached via `host.openshell.internal` (`docs/how-it-works/inference.mdx`).
-- **Credential isolation:** "providers" hold real credentials and substitute them **only at endpoints authorised by the provider profile**. The agent never sees raw keys.
-- **Policy lifecycle:**
-  - Declarative YAML (`version: 1`). Layers: global admin policy → sandbox policy → image policy → restrictive default.
-  - A **policy advisor** lets the agent *propose* rules for a human to approve.
-  - A **formal-verification policy prover** (`openshell-prover`, usable in CI) checks policies.
-  - Blocked actions return descriptive errors so agents can adapt.
-- **Audit:** OCSF JSON event export for SIEM. NVIDIA explicitly calls collection "best-effort, not a guarantee of complete audit history" (`docs/observability/ocsf-json-export.mdx`).
-- **Multi-user:** "workspaces" with Platform Admin / Workspace Admin / User roles and OIDC (`docs/how-it-works/workspaces.mdx`). A broader multi-player design is still an RFC draft (`rfc/0011-multi-player-design`).
-- **SDKs:** Python (`openshell` package, e.g. `sandbox.create/exec/delete/wait_ready`), TypeScript, Go, Rust.
+### 3.2 Tiers (no new runtime)
 
-### 3.2 Licence **[V]**: Apache-2.0 (the owner's belief is correct)
+The tiers stay [ARCHITECTURE §13.1](ARCHITECTURE.md#131-sandbox-tiers). This decision does not add a runtime.
 
-- The `LICENSE` file is Apache License 2.0, "Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES". The Cargo workspace declares `license = "Apache-2.0"`, and `docs/resources/license.mdx` agrees. Source files carry SPDX headers.
-- Compatible with Praxis's MIT licence. If we ever **redistribute** OpenShell binaries, we must ship the Apache-2.0 licence text and any NOTICE, and mark modifications. Calling an installed binary or SDK needs nothing beyond attribution in docs.
-- **Separately:** container images such as `nvcr.io/nvidia/base/ubuntu:24.04` come from NGC and may carry their own terms **[U]**. Check before a regulated default depends on that image. Praxis should default to its own Ubuntu/Debian-based sandbox image.
-
-### 3.3 Platform requirements **[V]** (`docs/about/support-matrix.mdx`)
-
-| Requirement | Detail | Consequence for Praxis |
+| Tier | What it is | Status |
 |---|---|---|
-| Host OS | **Supported:** Linux Debian/Ubuntu x86_64 **and arm64**; macOS Apple Silicon (Docker Desktop). **Experimental:** Windows (WSL 2 + Docker Desktop), x86_64 only. | Ubuntu is first-class. Arch/Omarchy is **not listed**, so it is best-effort **[U]**: the static binaries should run if kernel features pass, but that is untested. WSL2 is experimental, so it is not a regulated default. |
-| Kernel | **Landlock ABI ≥ 3 (Linux ≥ 6.2) and enabled**; seccomp user-notification features; `WAIT_KILLABLE_RECV` (5.19+) recommended. "A kernel version alone does not establish support." The sandbox probes actively and **fails closed**. | Ubuntu 24.04 (6.8) passes. **Ubuntu 22.04 GA (5.15) fails**; it needs the HWE kernel. Arch (current kernel) passes if Landlock is in the LSM list **[U]** per machine. DGX OS: Ubuntu-based arm64 **[U]** kernel version per release; the doctor check decides. |
-| Runtime | Docker Engine/Desktop **≥ 28.0**, or **Podman 5.x** (rootless, cgroups v2, user socket), or **Kubernetes ≥ 1.29** via Helm (the CNI must enforce NetworkPolicy), or **MicroVM** (libkrun; needs KVM). | Praxis already prefers rootless Podman (§13.1), so default to Podman 5. Docker 28 is an alternative. |
-| libc | CLI is static musl; `openshell-gateway` needs glibc ≥ 2.28. | Fine on all targets. |
-| **GPU** | **Not required.** Optional GPU access via NVIDIA CDI (Docker/Podman), `nvidia.com/gpu` (k8s), or single-GPU passthrough (VM) (`docs/how-it-works/sandboxes/runtimes.mdx`). | Works on any Praxis host. GPU passthrough only matters if a sandboxed *tool* needs the GPU. Inference usually runs outside the sandbox. |
-| Install | `curl -LsSf https://raw.githubusercontent.com/NVIDIA/OpenShell/main/install.sh \| sh` installs a `.deb`/`.rpm` (systemd user service), or a snap (needs non-snap Docker), or Homebrew. | Praxis installer offers it with consent and a pinned version. We verify the package checksum/signature rather than piping to sh. |
-| Telemetry | **On by default** (anonymous). Disable with `OPENSHELL_TELEMETRY_ENABLED=false` (Helm: `server.telemetryEnabled=false`); it propagates to supervisors. Telemetry-free builds are possible with `--no-default-features --features defaults-without-telemetry` (`docs/observability/telemetry.mdx`). | **Praxis always sets telemetry off** and asserts it in `doctor`. This is required for regulated installs. |
-| Maturity | Latest tags **v0.1.0 → v0.1.2**, published between about 2026-09-25 and 2026-09-27 (ET), after a long v0.0.x series (GitHub releases page). Weekly stable cadence; security fixes for N and N-1 (`rfc/0014-release-stability`). Native Windows (`rfc/0013-native-windows-mxc`) is in review, not shipped. | Young and fast-moving. Pin versions, run a compatibility test matrix, and track N/N-1. |
+| **T1 bubblewrap** | External `bwrap` (LGPL-2.0+, not linked into the process). `--unshare-all` drops the network namespace. The workspace is read-only unless the caller has an approved write scope, and that scope is never `$HOME` and never the main checkout. `HOME` is an empty tmpfs. Every account-data root is masked with a later `--tmpfs`, including the default XDG tree when `--data-dir` points somewhere else. A bind of the account-data directory, or of a path inside it, is refused, except one task worktree. | **Running** in `praxis_prime.sandbox` (`sandbox/bwrap.py`). |
+| Shell denylist | `policy/boundary.py` refuses a shell command that names account or profile data. Quotes, `cd`, and globs are parsed. A missing `bwrap` does not fall back to a host shell once account data exists. | **Running.** |
+| **T2 rootless Podman** | The per-project image for builds, untrusted repos, swarm workers, and the nested virtual desktop ([§13.2](ARCHITECTURE.md#132-desktop-computer-use-host): `cage`, `weston --backend=headless`, or Xvfb). Network off unless the egress proxy allowlist says otherwise. The supervisor does not mount a container socket. | Planned. Already the T2 row in §13.1. M4 brings it up. |
+| **T3 microVM** | Firecracker or Cloud Hypervisor, only when KVM is present. High-risk code and unknown binaries. | Planned. Optional. Already the T3 row in §13.1. |
+| **T4 remote** | SSH, Daytona, Modal, Vercel Sandbox. Blocked by residency dials unless allowlisted. | Planned. Already the T4 row in §13.1. |
 
-### 3.4 Ecosystem precedent **[V]**
+Landlock and seccomp are named on the T1 row in §13.1. The running launcher uses namespaces, read-only binds, and the tmpfs mask. Landlock on the worker is still **[E]**, as in §6.4 L1. M4 does not treat those kernel features as already enforced.
 
-- **NVIDIA NemoClaw** (`github.com/NVIDIA/NemoClaw`, **Apache-2.0**): "an open source reference stack for running supported AI agents more safely inside NVIDIA OpenShell sandboxes". It supports **OpenClaw (default), Hermes, and LangChain Deep Agents Code**, with guided onboarding, managed inference, and network policy. It offers express install presets for **DGX and WSL** hosts (README).
-- NVIDIA's DGX Spark product page markets "NVIDIA Agent Toolkit with NVIDIA OpenShell".
-- **OpenClaw** has an OpenShell sandbox backend (`docs/gateway/openshell.md`). It drives the `openshell` CLI + SSH, requires OpenShell ≥ v0.0.88, and offers "mirror" (sync the workspace in and out) and "remote" workspace modes.
-- **Implication:** OpenShell is becoming the NVIDIA-blessed containment layer for exactly Praxis's product category. Being a well-behaved OpenShell citizen (and possibly a NemoClaw-supported agent later [E]) is strategically useful, especially on DGX Spark.
+### 3.3 What M4 builds
 
-### 3.5 How Praxis integrates it: sandbox tier **T2-OS**
+M4 is the agent computer on these tiers. The daemon, gateway, approval spine, audit chain, and UI stay on the host.
 
-**Two stages:**
+1. **M4a, tool sandbox.** `shell`, code execution, and untrusted MCP run in T1 bubblewrap. Builds, the browser, and the virtual desktop run in T2 rootless Podman. The workspace is the approved worktree. Network stays off. A new egress host is an approval card, then one entry on the local proxy allowlist (§13.1). If `bwrap` is missing, the command is not run on the host once account data exists. If Podman is missing, the build or desktop does not start on the host.
+2. **M4b, contained worker.** For a profile with a regulated dial at monitor or enforce, the per-profile worker (§6.4 L1) opens only its own profile directory, and its tools go out only through T1 and T2. This tightens the process boundary M1 starts. It is not a second control plane.
 
-1. **M4a: tool sandbox (T2-OS).** The daemon stays on the host. Every `shell`, code-execution, build, browser, and untrusted-MCP tool call for a session runs inside a per-session OpenShell sandbox, created through the Python SDK (preferred) or the CLI (OpenClaw's approach). The workspace sync pattern follows OpenClaw's "mirror" mode.
-2. **M4b: contained agent worker.** For regulated profiles, the **whole per-profile agent worker** (§6.4) runs inside an OpenShell sandbox. That is the NemoClaw model. The gateway, approval spine, audit chain, and UI stay on the host outside the sandbox. LLM calls leave only through an OpenShell provider bound to the admin-approved inference endpoint, and connectors go through per-binary L7 rules. This gives kernel-enforced egress control over the agent itself, not just its tools.
+Policy stays Praxis policy (§16–17). Dials are not compiled into another product's policy language. The compliance dashboard shows the tier in use (`bwrap`, `podman`, or `microvm` when an admin has turned T3 on) and whether the data-root mask is active. `doctor` reports `bwrap` on `PATH`, user namespaces, and the mask. The hash-chained audit of tool calls is the system of record.
 
-**Policy compilation.** Praxis dials and policy (§16–17) compile to OpenShell policy YAML:
-- `filesystem_policy`: workspace rw, `/tmp`, nothing from `$HOME` unless mounted.
-- `network_policies`: one entry per allowed destination, e.g. the chosen inference host (with `allowed_ips: ["10.0.5.20/32"]` for a LAN DGX), package mirrors during builds only, MCP servers with method-level rules.
-- `providers`: inference keys and connector tokens injected only at their endpoints, which replaces Praxis's env-var injection.
+Host-local inference (Ollama on `127.0.0.1`, llama.cpp, vLLM) stays **outside** the tool sandbox. The model server is not moved into the sandbox, and a tool does not reach it by opening loopback from inside the sandbox. A tool that needs the network uses the egress proxy.
 
-The compiled policy is:
-- checked by `openshell-prover` in Praxis CI (golden policies per dial pack) and at runtime before activation;
-- hash-recorded in the Praxis audit chain (`sandbox.policy.applied`).
+### 3.4 Regulated installs and other hosts
 
-**Division of responsibility (important):**
-- OpenShell enforces *what the process can touch*. It does **not** replace Praxis's **approval spine**: human approval of SEND/SPEND/destructive actions, dual approval, Telegram/UI approval cards, and the Decision Engine.
-- OpenShell's policy advisor proposals are routed into Praxis approval cards ("Agent requests network access to api.example.com:443 for `curl`"). They are approved by a user with the `admin` role, or `operator` if policy allows.
+A regulated profile uses the same local tiers. It does not switch to a vendor runtime.
 
-**Audit:** OCSF JSONL from OpenShell is tailed into the Praxis hash-chained audit as a separate stream. It is labelled "best-effort (per NVIDIA)", so Praxis's own audit of tool calls remains the system of record.
+- Ubuntu and Omarchy/Arch are the same design. `doctor` qualifies the host: `bwrap` on `PATH`, user namespaces, and Podman when a build or desktop is requested.
+- WSL2 uses T1 when user namespaces work **[U]**. It is not a stronger boundary than the Linux host. See §5.2.
+- T3 is opt-in and needs KVM. A regulated profile can run without it.
 
-**Compliance dashboard** shows the containment tier per profile ("OpenShell 0.1.x · policy hash · prover ✓ · telemetry off"), or "Fallback: bubblewrap/Podman — reason: kernel lacks Landlock ABI 3".
-
-### 3.6 Verdict: OpenShell as the default for regulated installs
-
-**Recommendation [E]:** **Yes.** Make OpenShell the **default containment tier for the "Regulated" install profile** (any of HIPAA/FERPA/COPPA/GDPR/PCI/state packs at monitor or enforce) **when the host qualifies**:
-
-- Ubuntu 24.04+ (or 22.04 with HWE ≥ 6.2), Debian (NVIDIA lists "Debian/Ubuntu"; the version floor is set by the kernel check [E]), or DGX OS, on x86_64 or arm64;
-- `openshell doctor`-style qualification passes (Landlock ABI ≥ 3 active, seccomp features, cgroups v2);
-- Podman 5.x rootless, or Docker ≥ 28;
-- telemetry disabled; version pinned to a Praxis-tested release.
-
-Arch/Omarchy: offer it and run qualification, but label it **"best-effort (not on NVIDIA's support matrix)"**.
-
-**Fallback (automatic, visible, never silent):**
-- Host does not qualify (WSL2, macOS, old kernel, no container runtime, user declines) → **T1 bubblewrap + Landlock/seccomp for shell, and T2 rootless Podman with egress proxy for builds/untrusted code**, i.e. the current §13.1 design.
-- `doctor` and the compliance dashboard show "OpenShell unavailable: <reason>".
-- **Admin option:** `sandbox.require_openshell = true` refuses to start regulated profiles without it (fail closed) instead of falling back.
-- Non-regulated installs: OpenShell is opt-in (Settings → Security → "Use NVIDIA OpenShell").
-
-**Do not bundle binaries initially.** Install via NVIDIA's packages with explicit consent and a pinned version. Revisit bundling (with the Apache NOTICE) once OpenShell hits a stable API.
-
-**Caveats to state in docs:**
-- OpenShell is 0.1.x.
-- Its OCSF export is best-effort.
-- It is technical containment, **not a certification**; HIPAA still needs BAAs, risk analysis, and so on.
-- Loopback is always blocked from inside sandboxes, so host-local model servers must be reached via `host.openshell.internal` or a LAN address. That needs testing with each local server (Ollama binds 127.0.0.1 by default; it must listen on the bridge interface) **[U]**.
+This is technical containment, not a certification. HIPAA still needs the agreements, risk analysis, and counsel review already stated in ARCHITECTURE §30.
 
 ---
 ## 4. Any device: central server install + browser UI + PWA
@@ -398,7 +337,7 @@ Arch/Omarchy: offer it and run qualification, but label it **"best-effort (not o
 ```
                         ┌──────────── Praxis server (DGX Spark / RTX box / any Linux host) ─────────────┐
  phone (PWA) ─┐         │  praxis-primed (gateway :18790, loopback)  ← reverse proxy / tailscale serve  │
- laptop ──────┼─ TLS ──▶│  per-profile agent workers (optionally inside OpenShell, §3.5)               │
+ laptop ──────┼─ TLS ──▶│  per-profile agent workers (tools inside the local sandbox, §3)              │
  Windows PC ──┘         │  inference: vLLM / Ollama / llama.cpp (local GPU) or LAN/cloud per profile    │
                         └────────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -466,9 +405,9 @@ Praxis is Linux-native (systemd user units, bubblewrap, Landlock, Secret Service
 |---|---|---|
 | **WSL idles out; systemd does not keep it alive** | "systemd services do NOT keep a WSL instance alive" **[V]** (MS systemd doc). OpenClaw documents WSL ≥ 2.6.1 idle-terminating distros (microsoft/WSL #13416) and uses a **scheduled task at logon running `wsl.exe -d Ubuntu --exec dbus-launch true` as the user (not SYSTEM)** plus `loginctl enable-linger` **[V]** (`docs/platforms/windows.md`). Hermes uses a similar keep-alive trick **[V]**. | Installer registers a per-user Scheduled Task (at logon + on-idle restart). Optional `vmIdleTimeout` in `.wslconfig` **[U]** (confirm semantics per WSL version). Tray/status indicator in M7. |
 | **Networking** | Default **NAT**: Windows→WSL `localhost` forwarding works, but LAN devices can't reach WSL without `netsh interface portproxy` + firewall rule, and the WSL IP changes. **Mirrored** mode (`networkingMode=mirrored`, Windows 11 22H2+) gives LAN access and two-way localhost, but needs a **Hyper-V firewall** rule (`New-NetFirewallHyperVRule`) **[V]** (learn.microsoft.com/windows/wsl/networking). DNS/VPN quirks in mirrored mode; `dnsTunneling`/`autoProxy` settings exist **[V]**. | Single-PC use: NAT + `localhost` is enough. "Serve other devices": prefer **Tailscale inside WSL** (`tailnet` mode, no port forwarding). Else mirrored mode + Hyper-V firewall rule written by the installer. Else (Win10) portproxy with an IP-refresh task, following OpenClaw's recipe. |
-| **GPU** | CUDA on WSL needs the **Windows** NVIDIA driver only. Never install a Linux NVIDIA driver inside WSL. Windows 11 or Windows 10 21H2+, WSL kernel ≥ 5.10.43.3; NVIDIA Container Toolkit works **[V]** (MS "GPU accelerated ML training in WSL"). AMD: ROCm on WSL via ROCDXG for selected Radeon RX 7000/9000, PRO W7000/R9700, and Strix Halo, with specific Adrenalin + ROCm versions, Ubuntu 22.04/24.04 **[V]** (rocm.docs.amd.com WSL how-to). | Installer runs `nvidia-smi` inside WSL and reports. It warns if a Linux driver package is present. Most Windows users will pick **Lane 2 (network)** or **Lane 3 (cloud)** in onboarding, or run Ollama/LM Studio *on Windows* and point Praxis at `http://<windows-host>:11434` (mirrored mode makes this `localhost`). |
+| **GPU** | CUDA on WSL uses the **Windows** NVIDIA driver only. Never install a Linux NVIDIA driver inside WSL. Windows 11 or Windows 10 21H2+, WSL kernel ≥ 5.10.43.3 **[V]** (MS "GPU accelerated ML training in WSL"). AMD: ROCm on WSL via ROCDXG for selected Radeon RX 7000/9000, PRO W7000/R9700, and Strix Halo, with specific Adrenalin + ROCm versions, Ubuntu 22.04/24.04 **[V]** (rocm.docs.amd.com WSL how-to). | Installer runs `nvidia-smi` inside WSL and reports whether a GPU is visible for inference. It warns if a Linux driver package is present. A GPU driver is not a sandbox, and Praxis does not install a container runtime for isolation. Most Windows users will pick **Lane 2 (network)** or **Lane 3 (cloud)** in onboarding, or run Ollama/LM Studio *on Windows* and point Praxis at `http://<windows-host>:11434` (mirrored mode makes this `localhost`). |
 | **Filesystem** | `/mnt/c` via 9P is much slower than the Linux filesystem, and inotify there is unreliable (Hermes WSL guide cites 10–100× slower) **[V]**. | Keep Praxis data and workspaces in the Linux filesystem (`~`). Expose them to Windows via `\\wsl$\Ubuntu-24.04\home\…`. Warn when a coding-mode repo lives under `/mnt/c`. |
-| **Sandboxing** | bubblewrap works in WSL2 if user namespaces are enabled **[U]**. OpenShell on WSL2 is **Experimental** and documented only with Docker Desktop **[V]**. WSL kernel Landlock ABI/enablement **[U]** (the WSL kernel is 6.6-based in recent releases **[U]**). | Regulated profiles on WSL: fallback tier (T1/T2) with the dashboard warning. **Don't market WSL as a regulated-grade host** until OpenShell's WSL status leaves Experimental. |
+| **Sandboxing** | bubblewrap works in WSL2 if user namespaces are enabled **[U]**. Rootless Podman is the T2 path when it runs inside WSL **[U]**. WSL kernel Landlock ABI/enablement **[U]** (the WSL kernel is 6.6-based in recent releases **[U]**). | Same tiers as §3. `doctor` reports user namespaces and `bwrap`. **Don't market WSL as a stronger boundary than the Linux host sandbox.** |
 | **Keychain** | No Secret Service daemon by default in WSL. | Use `secrets.env.age` with a key protected by Windows DPAPI via a small helper [E], or `gnome-keyring` headless. Decide in M5b. |
 | **Enterprise policy** | Intune can allow/deny WSL (`AllowWSL`, `AllowInboxWSL`, `*UserSettingConfigurable`) **[V]** (learn.microsoft.com/windows/wsl/intune). A WSL compliance plugin can require allowed distros/versions **[V]** (Intune WSL compliance doc). | Document the Intune settings an IT admin must allow. Ship distro/version values for the compliance plugin. |
 
@@ -481,7 +420,7 @@ Praxis is Linux-native (systemd user units, bubblewrap, Landlock, Secret Service
 | GPU detection + guidance; Windows-side Ollama/LM Studio lane | 0.5 week | low |
 | Secrets on WSL; sandbox fallback; CI on a Windows runner with WSL | 1–1.5 weeks | medium |
 | **WSL2 supported beta total** | **≈ 3–5 weeks** | **Medium.** No kernel work; most risk is environmental. |
-| Native Windows (no WSL) | 3–6+ months | high. Not recommended now; revisit if OpenShell native Windows (RFC 0013) ships. |
+| Native Windows (no WSL) | 3–6+ months | high. Not recommended. No native Windows sandbox is planned. |
 
 ### 5.4 Microsoft 365 tenant deployment (M8)
 
@@ -516,7 +455,7 @@ Praxis is Linux-native (systemd user units, bubblewrap, Landlock, Secret Service
 **What Praxis takes:**
 - Hermes's "profile = separate home + one writer".
 - OpenClaw's bindings, per-agent skill allowlists, scopes, and above all its **honest trust-boundary statement**.
-- Added on top: real accounts, roles, and compliance-aware isolation (OpenShell workspaces / OS users) for regulated deployments.
+- Added on top: real accounts, roles, and compliance-aware isolation (the local sandbox in §3, and OS users at L2) for regulated deployments.
 
 ### 6.2 Concepts
 
@@ -558,13 +497,13 @@ Praxis is Linux-native (systemd user units, bubblewrap, Landlock, Secret Service
 | L0 Logical | One daemon. Per-profile DB files and directories; authorization checks in the gateway on every call. | Personal/home use. Honest label: "profiles are organisational, not a security boundary", as OpenClaw says. |
 | **L1 Process** (default for server installs) | **One agent worker process per active profile** (spawned by `praxis-primed`, supervised, idle-stopped). A worker opens only its own profile dir (enforced by Landlock on the worker [E]). The "one writer per profile" rule holds with a lock file, as Hermes warns. | Small office. |
 | L2 OS user | Worker runs as a dedicated Linux user per profile (`praxis-p-<id>`), with systemd `DynamicUser=`/templated units, so file permissions separate profiles. | Mixed-sensitivity profiles (e.g. "Billing" vs "Clinical"). |
-| **L3 OpenShell** | Worker runs inside an OpenShell sandbox (§3.5 M4b), with its own policy, providers, and egress rules. Optionally mapped to an **OpenShell workspace** with OIDC. | Regulated profiles (default when a regulated dial is on and the host qualifies). |
+| **L3 local sandbox** | The worker stays on the host. Its tools run in T1 bubblewrap, and builds plus the virtual desktop run in T2 rootless Podman (§3, M4b). Optional T3 microVM when an admin enables it and KVM is present. | Regulated profiles (default when a regulated dial is on). |
 | L4 Separate host | Separate Praxis server. | Hostile tenants. Out of scope (multi-tenant SaaS is a non-goal). |
 
 ### 6.5 Audit
 
 - Every audit event gains `actor_account`, `actor_role`, `profile`, `device`, `auth_method`, and `via` (web/pwa/cli/telegram/teams/routine).
-- New event types: `auth.login/logout/fail/mfa`, `account.create/disable/role_change`, `profile.create/clone/export/delete`, `membership.change`, `policy.floor_change`, `theme.install/activate`, `provider.configured/tested`, `exposure.change`, `sandbox.policy.applied`, `openshell.ocsf` (ingested stream).
+- New event types: `auth.login/logout/fail/mfa`, `account.create/disable/role_change`, `profile.create/clone/export/delete`, `membership.change`, `policy.floor_change`, `theme.install/activate`, `provider.configured/tested`, `exposure.change`, `sandbox.policy.applied`.
 - Auditors can export a profile's evidence bundle. The PHI-bearing payload is redacted by default. Access to raw content is itself audited.
 
 ### 6.6 UI
@@ -627,7 +566,7 @@ M0 packs/packaging ─┐
                     ├─▶ M1 web shell + accounts + profiles ─▶ M2 onboarding (no default LLM) ─▶ M3 themes
                     │                                   │                                        │
                     │                                   └──────────────▶ M6 remote access + PWA ◀─┘
-                    └─▶ M4 OpenShell (M4a tools; M4b contained workers needs M1 workers) ─┐
+                    └─▶ M4 sandbox (M4a tools; M4b contained workers needs M1 workers) ───┐
                                                    M5a Ubuntu/Omarchy installers ◀────────┘ (M2, M4a)
                                                    M5b WSL2 bootstrap (needs M5a, M6 tailnet mode helps)
                                                    M7 Tauri desktop wrapper (needs M1–M3)
@@ -640,8 +579,8 @@ M0 packs/packaging ─┐
 | **M1** | **Web UI shell + auth + accounts + profiles** | (1) SPA scaffold (React 19 + Vite + Tailwind + TanStack, the existing `ui/` stub), responsive layout, protocol client; (2) `accounts.db` + argon2id + sessions/CSRF + WS tickets + Host guard; (3) passkeys + TOTP; (4) roles/memberships + gateway authz middleware; (5) profile dirs + migration of single-user state → `default`; (6) per-profile worker processes (L1) + lock; (7) profile picker + admin console v0; (8) audit actor/profile fields; (9) generic OIDC | M0 (pack loading per profile) | Two accounts, two profiles, isolated memory; admin can create/assign; audit shows actors; still loopback-only | 4–6 wk |
 | **M2** | **Onboarding wizard + remove Ollama default** | (1) remove defaults in `router/settings.py`, `config.py`, `router/types.py`; `InferenceNotConfigured`; README/doctor; (2) `onboarding.*` API (detect/probe/test/save); (3) local detectors (Ollama, llama.cpp, vLLM, LM Studio); (4) network lane (manual + TLS pin + consented mDNS/tailnet/port scan); (5) cloud lane + keychain; (6) web wizard; (7) `praxis-prime setup` CLI/TUI + `--non-interactive`; (8) compliance-aware warnings + per-profile provider allowlist | M1 (per-profile selection, web shell) | Fresh install cannot chat until a provider is chosen and passes a live completion + tool call; no implicit fallback (tests) | 2–3 wk |
 | **M3** | **Theme engine + 7 themes** | (1) token pipeline + CSS generation + CSP; (2) `theme.toml` schema + JSON Schema + validator (contrast, licences, CSS parser allowlist, SVG sanitizer, zip limits); (3) install/select/lock UI + CLI; (4) Omarchy source adapter onto the new pipeline; (5) 7 built-in themes + fonts + `OFL.txt`; (6) `THEME-AUTHORING.md` + AI round-trip test (a model generates a package from a brief → lint passes); (7) legacy pack `theme` hint mapping | M1 (profiles), M2 (wizard uses theme) | All 7 themes pass AA in both modes; malicious test packages (JS, `@import`, remote url, hidden approval button) are rejected | 2–3 wk |
-| **M4** | **OpenShell integration** | (1) `doctor` qualification (kernel/Landlock ABI/runtime/telemetry); (2) consented pinned install helper; (3) policy compiler (dials → OpenShell YAML) + prover in CI; (4) **M4a** T2-OS tool sandbox (Python SDK), mirror workspace; (5) providers for inference/connectors; (6) advisor → approval cards; (7) OCSF ingest into audit; (8) **M4b** contained per-profile workers; (9) fallback + dashboard status + `require_openshell` | M0; M1 workers for M4b; M2 for provider binding | On Ubuntu 24.04 + Podman 5: regulated profile runs tools in OpenShell with telemetry off, prover ✓; on an unsupported host it falls back visibly | 3–5 wk |
-| **M5a** | **Installers: Ubuntu + Omarchy/Arch** | (1) `.deb` (+ APT repo already planned in §27) including packs/themes; (2) AUR `praxis-prime` + Omarchy integration (theme hook, keybind); (3) `install.sh` wizard: server vs desktop, regulated profile toggles OpenShell, systemd units (user or system `praxis` service for server mode); (4) DGX OS / arm64 CI | M2, M4a | One-command install on Ubuntu 24.04 x86_64/arm64 and Omarchy lands in the web onboarding wizard | 2–3 wk |
+| **M4** | **Local sandbox and agent computer** | (1) `doctor` reports `bwrap`, user namespaces, and whether the data-root mask applies; (2) **M4a** shell, code execution, and untrusted MCP stay on T1 bubblewrap (network off, denylist, data-root mask; no host fallback once account data exists); (3) **M4a** T2 rootless Podman for builds and the nested virtual desktop (§13.2), network off, supervisor does not mount a container socket; (4) egress only through the local proxy allowlist, with an approval card for a new host; (5) **M4b** a regulated-profile worker opens only its profile directory, and its tools run only through T1/T2; (6) dashboard shows the tier in use | M0; M1 workers for M4b | On Ubuntu 24.04, a regulated profile's shell runs in bubblewrap with the data-root mask and network off. A build or virtual desktop runs in rootless Podman with network off, or does not start if Podman is absent. No vendor sandbox is installed | 3–5 wk |
+| **M5a** | **Installers: Ubuntu + Omarchy/Arch** | (1) `.deb` (+ APT repo already planned in §27) including packs/themes; (2) AUR `praxis-prime` + Omarchy integration (theme hook, keybind); (3) `install.sh` wizard: server vs desktop, systemd units (user or system `praxis` service for server mode); `doctor` reports the local sandbox; (4) arm64 CI | M2, M4a | One-command install on Ubuntu 24.04 x86_64/arm64 and Omarchy lands in the web onboarding wizard | 2–3 wk |
 | **M5b** | **Windows WSL2 bootstrap** | (1) PowerShell bootstrap; (2) wsl.conf/.wslconfig + keep-alive task; (3) networking modes; (4) GPU checks; (5) secrets on WSL; (6) winget manifest (unsigned preview → signed) | M5a; M6 tailnet mode recommended | Windows 11 box: `winget install SMFWorks.PraxisPrime` → browser onboarding in ≤ 10 minutes | 3–5 wk |
 | **M6** | **Remote access + PWA hardening** | (1) exposure modes `tailnet/proxy/lan` + fail-closed gates; (2) Tailscale identity mapping via `whois`; (3) Caddy recipe + trusted-proxy JWT; (4) Praxis-managed CA for `lan`; (5) PWA manifest + SW + Web Push approvals; (6) mobile approval sheets + passkey re-auth; (7) external pen-test checklist | M1, M3 | Phone on tailnet installs PWA, logs in with passkey, approves a SEND; non-loopback start without auth is refused | 2–3 wk |
 | **M7** | **Desktop wrapper (Tauri 2)** | (1) Tauri shell loading the same SPA (local or remote server URL); (2) tray, notifications, deep links; (3) Linux packages (AppImage/.deb/Flatpak per §27); (4) optional Windows Tauri client that connects to a WSL/remote server (client only) | M1–M3 (M6 for remote) | Desktop app connects to local or remote Praxis server with the same accounts | 2–3 wk |
@@ -667,7 +606,7 @@ M0 packs/packaging ─┐
 - **M1**, PRs (4) and (5): a personal profile, an admin boundary with break-glass, requester-routed approvals, and per-session visibility ([Per-person agents](OPENDOTS-BORROWED-PATTERNS.md#per-person-agents)).
 - **M1**, PR (6): a supervisor, run-as routines, revocation (pattern 3), per-worker credentials with a generation counter, and a systemd slice (`MemoryMax`, `CPUQuota`, `TasksMax`) ([Per-person agents](OPENDOTS-BORROWED-PATTERNS.md#per-person-agents)).
 - **M2:** per-profile provider keys ([Per-person agents](OPENDOTS-BORROWED-PATTERNS.md#per-person-agents)).
-- **M4:** L3 (OpenShell). L2 (per-profile Linux users) is unscheduled, after M4 ([Per-person agents](OPENDOTS-BORROWED-PATTERNS.md#per-person-agents)).
+- **M4:** L3 (local sandbox, §3). L2 (per-profile Linux users) is unscheduled, after M4 ([Per-person agents](OPENDOTS-BORROWED-PATTERNS.md#per-person-agents)).
 - **M6:** per-account channel bindings, with approvals pushed to the requester ([Per-person agents](OPENDOTS-BORROWED-PATTERNS.md#per-person-agents)).
 
 **OpenClaw and Hermes gaps (2026-10-01):** see [OPENCLAW-HERMES-GAPS.md](OPENCLAW-HERMES-GAPS.md). Ideas only, with no code copied.
@@ -687,31 +626,22 @@ The security lessons in that note are explicit requirements: a SECURITY.md respo
 
 | Risk / question | Note |
 |---|---|
-| OpenShell API churn (0.1.x, weekly releases) | Pin versions; run a compatibility matrix in CI; wrap it behind Praxis's own `SandboxBackend` interface so T1/T2 remain drop-in. |
-| OpenShell on Arch/Omarchy and WSL2 | Not on NVIDIA's supported list (Arch) or Experimental (WSL2) **[V]**; actual behaviour **[U]**. Test on real Omarchy and Windows 11 hardware in M4/M5. |
-| Host-local inference from inside OpenShell | Loopback is always blocked; must use `host.openshell.internal`. Local servers must bind a reachable interface **[U]** per server. |
-| NGC base image terms | **[U]**. Prefer a Praxis-built image. |
+| bubblewrap or user namespaces unavailable | Shell fails closed once account data exists. `doctor` says why. User namespaces on Omarchy and WSL2 are **[U]** until M4/M5 test them on hardware. |
+| Podman absent | Builds and the virtual desktop do not run on the host. They wait. |
+| WSL2 sandbox | bubblewrap needs user namespaces **[U]**. Do not market WSL as a stronger boundary than the Linux host (§5.2). |
+| Host-local inference | The model server stays outside the tool sandbox. Tool egress uses the proxy allowlist (§3.3). |
 | Multi-user raises the security bar | Accounts + remote exposure make Praxis an internet-facing app if misconfigured. Fail-closed defaults, a doctor red flag, and an external review before marketing M6. |
 | Teams requires a public endpoint | Conflicts with local-first. Keep it optional and clearly labelled. |
 | Legacy pack semantics | Old `enforced` vs new `enforce`, and tool names differ. The mapping report must list every gap; no silent drops. |
-| Owner decisions needed | (1) Confirm "Regulated profile ⇒ OpenShell default when supported" and whether `require_openshell` should be the default for HIPAA enforce. (2) Choose default exposure recommendation (tailnet vs proxy) for office installs. (3) Priority order for porting legacy pack modules. (4) Whether to add the 8th "High Contrast" theme. (5) Code-signing certificate for Windows. (6) Context-length floor (32K proposed vs Hermes 64K). |
+| Owner decisions needed | (1) **Decided 2026-10-03** (decision C): NVIDIA OpenShell and other NVIDIA security containers are not used; isolation is Praxis Prime's own local sandbox. (2) Choose default exposure recommendation (tailnet vs proxy) for office installs. (3) Priority order for porting legacy pack modules. (4) Whether to add the 8th "High Contrast" theme. (5) Code-signing certificate for Windows. (6) Context-length floor (32K proposed vs Hermes 64K). |
 
 ---
 
 ## 10. Sources (primary; accessed 2026-09-30)
 
-**Praxis Prime (smfworks/praxis-prime @ 029b5ccc):** `docs/ARCHITECTURE.md` (§2, §4, §6, §13.1, §21, §21.7, §25, §28.2, §29, §31), `packages/prime-core/praxis_prime/router/settings.py`, `config.py`, `router/types.py`, `gateway/server.py`, `gateway/auth.py`, `compliance/packs.py`, `pyproject.toml`, `packs/`, `ui/`, `apps/desktop/`, `apps/omarchy/praxis-prime.json.tpl`.
+**Praxis Prime (smfworks/praxis-prime @ 029b5ccc):** `docs/ARCHITECTURE.md` (§2, §4, §6, §13.1, §21, §21.7, §25, §28.2, §29, §31), `packages/prime-core/praxis_prime/router/settings.py`, `config.py`, `router/types.py`, `gateway/server.py`, `gateway/auth.py`, `compliance/packs.py`, `pyproject.toml`, `packs/`, `ui/`, `apps/desktop/`, `apps/omarchy/praxis-prime.json.tpl`. Sandbox behavior in §3 was read later on main: `sandbox/bwrap.py`, `policy/boundary.py`.
 
 **Legacy packs (MIT):** https://github.com/smfworks/smf-praxis-homeschool, -education, -forensic, -legal, -medical, -mbh (`*/packs/*/pack.json`, `knowledge.md`, `registration.py`, `pyproject.toml`).
-
-**NVIDIA OpenShell (Apache-2.0) @ 5acaaba1:**
-- Repo: https://github.com/NVIDIA/OpenShell (LICENSE, Cargo.toml, `rfc/0011`, `rfc/0013`, `rfc/0014`)
-- Docs: https://docs.nvidia.com/openshell/latest/ (repo `docs/`)
-- Pages used: `about/overview.mdx`, `about/architecture.mdx`, `about/support-matrix.mdx`, `about/installation.mdx`, `how-it-works/inference.mdx`, `how-it-works/workspaces.mdx`, `how-it-works/sandboxes/runtimes.mdx`, `how-it-works/policies/*`, `security/best-practices.mdx`, `observability/telemetry.mdx`, `observability/ocsf-json-export.mdx`, `resources/license.mdx`
-- Releases: https://github.com/NVIDIA/OpenShell/releases
-- Blog: https://developer.nvidia.com/blog/add-runtime-controls-to-ai-agents-with-nvidia-openshell/
-- NemoClaw (Apache-2.0): https://github.com/NVIDIA/NemoClaw
-- DGX Spark: https://www.nvidia.com/en-us/products/workstations/dgx-spark/
 
 **Hermes Agent (MIT, © 2025 Nous Research) @ f42f579c** — https://github.com/NousResearch/hermes-agent:
 - `hermes_cli/setup.py`, `setup_quick.py`, `models_local.py`, `model_setup_flows_custom.py`, `models_detect.py`, `profiles.py`, `skin_engine.py`
@@ -722,7 +652,7 @@ The security lessons in that note are explicit requirements: a SECURITY.md respo
 **OpenClaw (MIT, © 2026 OpenClaw Foundation) @ 1de9a42f** — https://github.com/openclaw/openclaw:
 - `docs/start/wizard.md`, `docs/cli/onboard.md`, `docs/cli/users.md`
 - `src/commands/onboard-{guided,inference,inference-ambient,custom}.ts`
-- `docs/gateway/{local-model-services,operator-scopes,multi-tenant-hosting,remote,openshell}.md`
+- `docs/gateway/{local-model-services,operator-scopes,multi-tenant-hosting,remote}.md`
 - `docs/concepts/{multi-agent,multi-user}.md`
 - `docs/tools/theme.md`, `docs/platforms/windows.md`
 
@@ -738,6 +668,7 @@ The security lessons in that note are explicit requirements: a SECURITY.md respo
 - Bot Framework / Azure Bot Service docs (public messaging endpoint requirement)
 
 **Other:**
+- DGX Spark hardware (a LAN inference host in §2.3, not a sandbox): https://www.nvidia.com/en-us/products/workstations/dgx-spark/
 - AMD ROCm on WSL https://rocm.docs.amd.com/projects/radeon-ryzen/en/latest/docs/install/installrad/wsl/howto_wsl.html
 - Tailscale Serve https://tailscale.com/docs/features/tailscale-serve
 - MDN PWA installability https://developer.mozilla.org/en-US/docs/Web/Progressive_web_apps/Guides/Making_PWAs_installable

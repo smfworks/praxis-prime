@@ -104,7 +104,7 @@ footer{color:var(--muted);font-size:.8rem;margin-top:4rem}
 <tr>
 <td>9</td>
 <td><strong>Sandbox tiers</strong>: bubblewrap + Landlock/seccomp (default) → rootless Podman → microVM (Firecracker, optional) → remote (SSH, Daytona, Modal)</td>
-<td>Matches the Codex and Claude Code Linux approach (bubblewrap), plus Hermes's remote backends.</td>
+<td>Matches the Codex and Claude Code Linux approach (bubblewrap), plus Hermes's remote backends. No NVIDIA security container (Addendum A decision C).</td>
 </tr>
 <tr>
 <td>10</td>
@@ -1010,6 +1010,7 @@ footer{color:var(--muted);font-size:.8rem;margin-top:4rem}
 </tbody>
 </table></div>
 <ul>
+<li><strong>No vendor sandbox.</strong> NVIDIA OpenShell and other NVIDIA security containers are not used; isolation is Praxis Prime's own local sandbox: the tiers in this table. T1 bubblewrap is what the code runs today, including the account-data tmpfs mask and the shell denylist. See Addendum A §3.</li>
 <li><strong>Network</strong> is off by default inside T1 and T2 (as in Codex). Per-task host allowlists go through a local egress proxy that logs every host. Policy hook H3 decides.</li>
 <li><strong>Secrets:</strong>
 <ul>
@@ -2102,7 +2103,7 @@ praxis-prime omarchy install       # installs bar plugin, theme template, keybin
 <tr><td><strong>M1</strong></td><td>Web shell, accounts, and profiles. Loopback only.</td><td>MVP completion (v0.2–0.3)</td></tr>
 <tr><td><strong>M2</strong></td><td>First-run wizard. Remove the hard-coded Ollama default.</td><td>MVP completion (v0.2–0.3)</td></tr>
 <tr><td><strong>M3</strong></td><td>Theme packages and seven built-in themes. Contrast check: <code>scripts/contrast_check.py</code>.</td><td>MVP completion (v0.2–0.3)</td></tr>
-<tr><td><strong>M4</strong></td><td>NVIDIA OpenShell for regulated installs, with a visible bubblewrap/Podman fallback.</td><td>v0.5</td></tr>
+<tr><td><strong>M4</strong></td><td>Local sandbox and agent computer: T1 bubblewrap (data-root mask and denylist) for shell, T2 rootless Podman for builds and the virtual desktop.</td><td>v0.5</td></tr>
 <tr><td><strong>M5a</strong> / <strong>M5b</strong></td><td>Ubuntu and Omarchy installers, then a WSL2 supported beta.</td><td>v0.5</td></tr>
 <tr><td><strong>M6</strong></td><td>Opt-in remote access and a PWA. Loopback stays the default.</td><td>v0.5</td></tr>
 <tr><td><strong>M7</strong></td><td>Tauri 2 desktop shell.</td><td>v0.6–v0.8</td></tr>
@@ -2129,7 +2130,7 @@ praxis-prime omarchy install       # installs bar plugin, theme template, keybin
 </tr>
 <tr>
 <td><strong>v0.5</strong></td>
-<td>M4 OpenShell, M5a Ubuntu/Omarchy installers, M5b WSL2 bootstrap, and M6 remote access + PWA, alongside: Omarchy Quickshell bar plugin; channels: Signal, Slack, Discord, WhatsApp, Matrix, webhooks (Teams is M8); event triggers; swarm runtime (spawn tokens, blackboard, visualizer); <code>auto</code> mode with reviewer; hooks; Podman tier; plugin SDK v1; <strong>Jarvis alpha</strong> (wake word, STT/TTS, Home Assistant, heartbeat briefings); APT repo + AppImage. Tauri desktop is M7</td>
+<td>M4 local sandbox, M5a Ubuntu/Omarchy installers, M5b WSL2 bootstrap, and M6 remote access + PWA, alongside: Omarchy Quickshell bar plugin; channels: Signal, Slack, Discord, WhatsApp, Matrix, webhooks (Teams is M8); event triggers; swarm runtime (spawn tokens, blackboard, visualizer); <code>auto</code> mode with reviewer; hooks; Podman tier; plugin SDK v1; <strong>Jarvis alpha</strong> (wake word, STT/TTS, Home Assistant, heartbeat briefings); APT repo + AppImage. Tauri desktop is M7</td>
 <td><strong>DE v1: the Jury.</strong> 3–5 judges (Swarm 2.0 personas × ≥2 base models), log-opinion pooling, isotonic calibration, disagreement escalation to T4; IdentityRegistry / PermissionEngine for judges; SetFit/ModernBERT heads for the top 5 templates, <strong>distilled from Jury + human labels</strong>; online recalibration from approval outcomes; reliability dashboard; voice fast path ≤ 300 ms (DE portion)</td>
 <td><strong>Enforce: HIPAA, FERPA/COPPA, GDPR, 13 state packs, NC pack</strong> (including NC professional overlays and the incident workflow); regulated packs modified for Praxis Prime; dial regression suites</td>
 <td>First-wave dials pass their regression suites; Jury beats the single judge on Brier score for risk triage and injection; swarm runs a 4-worker task under budget; Jarvis handles 20 home/desktop intents offline</td>
@@ -3142,7 +3143,7 @@ praxis-prime omarchy install       # installs bar plugin, theme template, keybin
 <tr>
 <td>Shell sandbox</td>
 <td>✅ local/docker/ssh/singularity/modal/daytona/vercel</td>
-<td>✅ Docker/Podman/SSH/OpenShell/Crabbox (off by default)</td>
+<td>✅ Docker/Podman/SSH/Crabbox (off by default)</td>
 <td>✅ isolated box</td>
 <td>✅ cloud VMs</td>
 <td>✅ bubblewrap + seccomp (Linux)</td>
@@ -4137,7 +4138,7 @@ Clones live in <code>/workspace/agent-arch/src/</code>. The notes reflect the co
 <tr>
 <td>Sandboxing</td>
 <td>—</td>
-<td>Off by default. Backends: Docker, Podman, SSH, OpenShell, Crabbox.</td>
+<td>Off by default. Backends: Docker, Podman, SSH, Crabbox.</td>
 </tr>
 <tr>
 <td>Multi-agent</td>
