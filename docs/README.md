@@ -5,7 +5,7 @@ The blueprint is the source of truth for layout, names, and stack.
 | File | Contents |
 |---|---|
 | [ARCHITECTURE.md](ARCHITECTURE.md) | Architecture blueprint. §29 follows milestones M0–M8 |
-| [blueprint-addendum-2026-09.md](blueprint-addendum-2026-09.md) | Addendum A (2026-09-30): themes, no default LLM, NVIDIA OpenShell, any-device access (central server, WSL2, Microsoft 365), multi-user profiles, and the M0–M8 build order. **[V]** verified, **[U]** unverified, **[E]** estimate |
+| [blueprint-addendum-2026-09.md](blueprint-addendum-2026-09.md) | Addendum A (2026-09-30; sandbox decision revised 2026-10-02): themes, no default LLM, the local sandbox, any-device access (central server, WSL2, Microsoft 365), multi-user profiles, and the M0–M8 build order. **[V]** verified, **[U]** unverified, **[E]** estimate |
 | [CAPABILITY-MATRIX.md](CAPABILITY-MATRIX.md) | Comparison with the source systems and the reuse plan |
 | [SOURCE-NOTES.md](SOURCE-NOTES.md) | Licenses, paths, unverified items |
 | [OPENDOTS-BORROWED-PATTERNS.md](OPENDOTS-BORROWED-PATTERNS.md) | Patterns borrowed from OpenDots (MIT, ideas only), the frontend decision, and the per-person agent plan, mapped to M1, M2, M4, M6, and the browser tool, with acceptance criteria |
