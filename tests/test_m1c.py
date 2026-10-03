@@ -1039,9 +1039,13 @@ def test_stale_lock_reap_checks_supervisor_start_time(
         kept.wait(timeout=5)
 
     forged = hold(f"{os.getpid()} {started} other-token")
-    assert _reap_stale_holder(lock) is True
-    forged.wait(timeout=5)
-    assert forged.returncode is not None
+    try:
+        # A different token belongs to another live supervisor. Do not kill it.
+        assert _reap_stale_holder(lock) is False
+        assert forged.poll() is None
+    finally:
+        forged.kill()
+        forged.wait(timeout=5)
 
     mismatched = hold(f"{os.getpid()} 1 token")
     assert _reap_stale_holder(lock) is True

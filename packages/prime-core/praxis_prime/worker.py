@@ -588,11 +588,14 @@ def _stamp_lock(fd: int) -> None:
 
 
 def _reap_stale_holder(path: Path) -> bool:
-    """Stop a holder whose supervisor cannot be shown to still be that process.
+    """Stop a holder whose supervisor is dead or whose start time does not match.
 
     A live pid is not enough: the pid may have been reused. The stamp has to
     carry the same start time. A stamp with no start time is reaped, and the
     signal goes to the holder recorded in the lock, not to the supervisor pid.
+    A different ``PRAXIS_PRIME_SUPERVISOR_TOKEN`` does not make a live
+    supervisor stale. Two supervisors on one data root have different tokens;
+    the second worker refuses while the first supervisor is still that process.
     """
     try:
         text = path.read_text(encoding="utf-8").split()
@@ -606,8 +609,7 @@ def _reap_stale_holder(path: Path) -> bool:
     except ValueError:
         return False
     started = text[2] if len(text) >= 3 and text[2] not in {"", "-"} else None
-    token = text[3] if len(text) >= 4 else ""
-    if worker_pid <= 1 or _same_supervisor(supervisor_pid, started, token):
+    if worker_pid <= 1 or _supervisor_still_running(supervisor_pid, started):
         return False
     for sig in (signal.SIGTERM, signal.SIGKILL):
         try:
@@ -620,16 +622,13 @@ def _reap_stale_holder(path: Path) -> bool:
     return not _pid_alive(worker_pid)
 
 
-def _same_supervisor(pid: int, started: str | None, token: str) -> bool:
-    """True when this process is the supervisor named in the lock.
+def _supervisor_still_running(pid: int, started: str | None) -> bool:
+    """True when the stamped supervisor is alive with that ``/proc`` start time.
 
-    The pid and start time have to match, and so does
-    ``PRAXIS_PRIME_SUPERVISOR_TOKEN``. A lock stamped with another token is
-    a leftover, even when the pid has been reused with the same start time.
+    The token in the lock is not part of this check. Matching pid and start
+    time means the process that stamped the lock is still that process, so
+    the holder is live and must not be signalled.
     """
-    expected = os.environ.get("PRAXIS_PRIME_SUPERVISOR_TOKEN", "").strip()
-    if not expected or token != expected:
-        return False
     if pid <= 1 or not started or not _pid_alive(pid):
         return False
     current = _process_start(pid)

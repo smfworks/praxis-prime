@@ -264,16 +264,19 @@ def hardlink_cover_argv(
     The protected inodes are the account-data denylist: ``profiles/``,
     ``backups/``, ``accounts.db``, ``audit.db``, the root ``prime.db``,
     each database's ``-wal``, ``-shm``, and ``-journal`` sidecar, ``SOUL.md``,
-    and ``worker-master.key``. A regular file is hidden only when its inode
-    is one of those and ``nlink`` is greater than one. When none of them has
-    another name, the workspace is not walked. ``.git/objects`` and
-    ``node_modules`` are walked only if some extra name is still unaccounted
-    for. The read-only system binds (``/usr``, ``/bin``, ``/lib``,
-    ``/lib64``, ``/etc``) are not walked. A workspace under ``/opt`` or
-    ``/usr/local`` is. A path under a data-root tmpfs is already hidden,
+    ``worker-master.key``, and the runtime ``gateway.token``. A regular file
+    is hidden only when its inode is one of those and ``nlink`` is greater
+    than one. When none of them has another name, the workspace is not walked.
+    A name left behind after the other link was deleted or replaced has a
+    link count of one and is not covered; it behaves like a copy.
+    ``.git/objects`` and ``node_modules`` are walked only if some extra name
+    is still unaccounted for. The read-only system binds (``/usr``, ``/bin``,
+    ``/lib``, ``/lib64``, ``/etc``) are not walked. A workspace under ``/opt``
+    or ``/usr/local`` is. A path under a data-root tmpfs is already hidden,
     except a worktree that was bound again on top of that tmpfs
-    (``exposed``). The walk refuses to launch when it cannot finish or
-    passes the hard-link cap.
+    (``exposed``). The walk refuses to launch when it cannot finish: a
+    directory that cannot be listed, an entry that vanishes, a tree deeper
+    than the scan limit, or a walk that passes the hard-link cap.
     """
     from praxis_prime.policy.boundary import (
         _account_data_roots,
@@ -344,8 +347,8 @@ def _note_scan(scanned: int) -> int:
             f"{_HARDLINK_SCAN_CAP} hard-linked files to check because account "
             "data has another name on disk (accounts.db-wal, accounts.db-shm, "
             "accounts.db-journal, and the same sidecars for audit.db and "
-            "prime.db, plus SOUL.md and worker-master.key). Remove those extra "
-            "links, or run from a smaller directory."
+            "prime.db, plus SOUL.md, worker-master.key, and gateway.token). "
+            "Remove those extra links, or run from a smaller directory."
         )
     return scanned
 
@@ -416,43 +419,16 @@ def _cover_tree(
     argv: list[str],
     scanned: int,
 ) -> int:
-    bulky: list[tuple[Path, str]] = []
-    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
-        if _links_found(remaining):
-            return scanned
-        kept: list[str] = []
-        relative_dir = os.path.relpath(dirpath, root)
-        for name in dirnames:
-            if _bulky_dir(dirpath, name):
-                bulky.append((Path(dirpath) / name, _sandbox_join(dest, relative_dir, name)))
-            else:
-                kept.append(name)
-        dirnames[:] = kept
-        for name in filenames:
-            if _links_found(remaining):
-                return scanned
-            host = Path(dirpath) / name
-            try:
-                info = os.lstat(host)
-            except OSError as exc:
-                raise SandboxError("refusing to launch; a mount could not be scanned") from exc
-            scanned = _cover_stat(
-                host,
-                _sandbox_join(dest, relative_dir, name),
-                info,
-                remaining,
-                masked,
-                exposed,
-                argv,
-                scanned,
-            )
-    if _links_found(remaining):
-        return scanned
-    for host, sandbox in bulky:
-        if _links_found(remaining):
-            break
-        scanned = _cover_bulky(host, sandbox, remaining, masked, exposed, argv, scanned)
-    return scanned
+    return _cover_descent(
+        root,
+        dest,
+        remaining,
+        masked,
+        exposed,
+        argv,
+        scanned,
+        defer_bulky=True,
+    )
 
 
 def _cover_bulky(
@@ -467,26 +443,83 @@ def _cover_bulky(
     """Walk a deferred tree. Symlinks are not followed."""
     kind = _scan_kind(root)
     if kind == "missing":
-        return scanned
+        # Queued because an extra link was still unaccounted for. A directory
+        # that vanished before this pass means the scan did not finish.
+        raise SandboxError("refusing to launch; a mount could not be scanned")
     if kind == "file":
         return _cover_file(root, dest, remaining, masked, exposed, argv, scanned)
     if kind != "dir":
+        # Not a directory and not a regular file. There is nothing to list.
+        # An unreadable path already raised in ``_scan_kind``.
         return scanned
-    for dirpath, _dirnames, filenames in os.walk(root, followlinks=False):
+    return _cover_descent(
+        root,
+        dest,
+        remaining,
+        masked,
+        exposed,
+        argv,
+        scanned,
+        defer_bulky=False,
+    )
+
+
+def _cover_descent(
+    root: Path,
+    dest: str,
+    remaining: dict[tuple[int, int], int],
+    masked: list[str],
+    exposed: list[str],
+    argv: list[str],
+    scanned: int,
+    *,
+    defer_bulky: bool,
+) -> int:
+    """List ``root`` with ``os.scandir``. Any error refuses the launch.
+
+    ``os.walk`` without ``onerror`` skips a directory it cannot list, and
+    ``DirEntry.is_dir`` failures are treated as files. A mode ``0300``
+    directory (enter allowed, list denied) would hide a hard link. This
+    walk raises instead. A vanished entry, a stat error, and a tree past
+    the depth limit do too. Symlinks are not followed.
+    """
+    from praxis_prime.policy.boundary import _SCAN_DEPTH_LIMIT
+
+    bulky: list[tuple[Path, str]] = []
+    pending: list[tuple[Path, str, int]] = [(root, dest, 1)]
+    while pending:
         if _links_found(remaining):
             return scanned
-        relative_dir = os.path.relpath(dirpath, root)
-        for name in filenames:
+        directory, sandbox_dir, depth = pending.pop()
+        if depth > _SCAN_DEPTH_LIMIT:
+            raise SandboxError(
+                "refusing to launch; a directory tree is too deep to scan for hard links"
+            )
+        try:
+            entries = list(os.scandir(directory))
+        except OSError as exc:
+            raise SandboxError("refusing to launch; a mount could not be scanned") from exc
+        children: list[tuple[Path, str, int]] = []
+        for entry in entries:
             if _links_found(remaining):
                 return scanned
-            host = Path(dirpath) / name
             try:
-                info = os.lstat(host)
+                info = entry.stat(follow_symlinks=False)
             except OSError as exc:
                 raise SandboxError("refusing to launch; a mount could not be scanned") from exc
+            child_dest = str(Path(sandbox_dir) / entry.name)
+            if stat.S_ISLNK(info.st_mode):
+                continue
+            if stat.S_ISDIR(info.st_mode):
+                child = Path(directory) / entry.name
+                if defer_bulky and _bulky_dir(str(directory), entry.name):
+                    bulky.append((child, child_dest))
+                else:
+                    children.append((child, child_dest, depth + 1))
+                continue
             scanned = _cover_stat(
-                host,
-                _sandbox_join(dest, relative_dir, name),
+                Path(directory) / entry.name,
+                child_dest,
                 info,
                 remaining,
                 masked,
@@ -494,13 +527,14 @@ def _cover_bulky(
                 argv,
                 scanned,
             )
+        pending.extend(reversed(children))
+    if not defer_bulky or _links_found(remaining):
+        return scanned
+    for host, sandbox in bulky:
+        if _links_found(remaining):
+            break
+        scanned = _cover_bulky(host, sandbox, remaining, masked, exposed, argv, scanned)
     return scanned
-
-
-def _sandbox_join(dest: str, relative_dir: str, name: str) -> str:
-    if relative_dir in {"", "."}:
-        return str(Path(dest) / name)
-    return str(Path(dest) / relative_dir / name)
 
 
 def _skip_hardlink_scan(dest: str) -> bool:

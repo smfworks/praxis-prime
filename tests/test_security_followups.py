@@ -995,7 +995,7 @@ def test_database_sidecars_and_root_files_are_hardlink_covered(
 
 
 def test_project_mcp_json_cannot_grant_a_host_start(tmp_path: Path) -> None:
-    from praxis_prime.mcp.config import load_servers
+    from praxis_prime.mcp.config import load_servers, spec_from_mapping
 
     project = tmp_path / "proj"
     (project / ".prime").mkdir(parents=True)
@@ -1007,6 +1007,8 @@ def test_project_mcp_json_cannot_grant_a_host_start(tmp_path: Path) -> None:
                         "command": "python3",
                         "trust": "trusted",
                         "sandbox": "off",
+                        "network": "on",
+                        "envAllow": ["HOME", "SSH_AUTH_SOCK"],
                     }
                 }
             }
@@ -1017,6 +1019,236 @@ def test_project_mcp_json_cannot_grant_a_host_start(tmp_path: Path) -> None:
     assert loaded[0].source == "project"
     assert loaded[0].trust == "untrusted"
     assert loaded[0].sandbox == "bwrap"
+    assert loaded[0].network == "off"
+    assert loaded[0].env_allow is None
+    user = spec_from_mapping(
+        "notes",
+        {
+            "command": "python3",
+            "trust": "trusted",
+            "sandbox": "off",
+            "network": "on",
+            "env_allow": ["HOME"],
+        },
+        source="config",
+    )
+    assert user.trust == "trusted"
+    assert user.sandbox == "off"
+    assert user.network == "on"
+    assert user.env_allow == ("HOME",)
+
+
+def test_unreadable_directory_refuses_shell_and_mcp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = _isolate(tmp_path, monkeypatch)
+    root = home / ".local" / "share" / "praxis-prime"
+    root.mkdir(parents=True)
+    wal = root / "accounts.db-wal"
+    wal.write_text("SECRET-WAL\n", encoding="utf-8")
+    work = home / "proj"
+    hidden = work / "d"
+    hidden.mkdir(parents=True)
+    os.link(wal, hidden / "known")
+    os.chmod(hidden, 0o300)
+    clear_data_inode_cache()
+    try:
+        with pytest.raises(SandboxError, match="could not be scanned"):
+            build_bwrap_argv("true", work)
+        with pytest.raises(SandboxError, match="could not be scanned"):
+            build_mcp_bwrap_argv(
+                "/bin/sh",
+                ("-c", "strings d/known"),
+                cwd=work,
+                env={"PATH": "/usr/bin:/bin"},
+                network="off",
+            )
+        if bwrap_available():
+            from praxis_prime.tools.registry import ToolContext
+            from praxis_prime.tools.shell import execute_shell
+
+            ctx = ToolContext(cwd=str(work), cancelled=lambda: False, shell_approved=True)
+            with pytest.raises(RuntimeError, match="could not be scanned"):
+                execute_shell(
+                    {"command": "python3 -c \"open('d/'+'kno'+'wn').read()\""},
+                    ctx,
+                )
+    finally:
+        os.chmod(hidden, 0o700)
+
+
+def test_unreadable_directory_inside_node_modules_refuses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = _isolate(tmp_path, monkeypatch)
+    root = home / ".local" / "share" / "praxis-prime"
+    root.mkdir(parents=True)
+    wal = root / "accounts.db-wal"
+    wal.write_text("SECRET-WAL\n", encoding="utf-8")
+    work = home / "proj"
+    hidden = work / "node_modules" / "pkg"
+    hidden.mkdir(parents=True)
+    os.link(wal, hidden / "known")
+    os.chmod(hidden, 0o300)
+    clear_data_inode_cache()
+    try:
+        with pytest.raises(SandboxError, match="could not be scanned"):
+            build_bwrap_argv("true", work)
+        with pytest.raises(SandboxError, match="could not be scanned"):
+            build_mcp_bwrap_argv(
+                "/bin/sh",
+                ("-c", "echo ok"),
+                cwd=work,
+                env={"PATH": "/usr/bin:/bin"},
+                network="off",
+            )
+    finally:
+        os.chmod(hidden, 0o700)
+
+
+def test_vanished_directory_refuses_the_hardlink_scan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = _isolate(tmp_path, monkeypatch)
+    root = home / ".local" / "share" / "praxis-prime"
+    root.mkdir(parents=True)
+    wal = root / "accounts.db-wal"
+    wal.write_text("SECRET-WAL\n", encoding="utf-8")
+    work = home / "proj"
+    gone = work / "gone"
+    gone.mkdir(parents=True)
+    os.link(wal, gone / "known")
+    real_scandir = os.scandir
+
+    def scanning(path: object) -> object:
+        if Path(path).name == "gone":
+            raise FileNotFoundError(2, "No such file or directory", str(path))
+        return real_scandir(path)
+
+    monkeypatch.setattr(os, "scandir", scanning)
+    clear_data_inode_cache()
+    with pytest.raises(SandboxError, match="could not be scanned"):
+        build_bwrap_argv("true", work)
+
+
+def test_deep_workspace_refuses_the_hardlink_scan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from praxis_prime.policy.boundary import _SCAN_DEPTH_LIMIT
+
+    home = _isolate(tmp_path, monkeypatch)
+    root = home / ".local" / "share" / "praxis-prime"
+    root.mkdir(parents=True)
+    wal = root / "accounts.db-wal"
+    wal.write_text("SECRET-WAL\n", encoding="utf-8")
+    work = home / "proj"
+    work.mkdir()
+    current = work
+    for _ in range(_SCAN_DEPTH_LIMIT + 1):
+        current = current / "n"
+        current.mkdir()
+    os.link(wal, current / "known")
+    clear_data_inode_cache()
+    with pytest.raises(SandboxError, match="too deep"):
+        build_bwrap_argv("true", work)
+
+
+def test_runtime_gateway_token_is_hardlink_covered(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = _isolate(tmp_path, monkeypatch)
+    xdg = tmp_path / "xdg-run"
+    runtime = xdg / "praxis-prime"
+    runtime.mkdir(parents=True)
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(xdg))
+    token = runtime / "gateway.token"
+    token.write_text("SECRET-GWTOKEN\n", encoding="utf-8")
+    (home / ".local" / "share" / "praxis-prime").mkdir(parents=True)
+    work = home / "proj"
+    work.mkdir()
+    os.link(token, work / "tok.bin")
+    clear_data_inode_cache()
+    argv = build_bwrap_argv("true", work)
+    assert _cover(argv, "/workspace/tok.bin")[:2] == ["--ro-bind", "/dev/null"]
+    mcp = build_mcp_bwrap_argv(
+        "/bin/sh",
+        ("-c", "echo ok"),
+        cwd=work,
+        env={"PATH": "/usr/bin:/bin"},
+        network="off",
+    )
+    assert _cover(mcp, str(work / "tok.bin"))[:2] == ["--ro-bind", "/dev/null"]
+
+
+def test_orphaned_sidecar_link_is_not_covered(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = _isolate(tmp_path, monkeypatch)
+    root = home / ".local" / "share" / "praxis-prime"
+    root.mkdir(parents=True)
+    wal = root / "accounts.db-wal"
+    wal.write_text("SECRET-WAL\n", encoding="utf-8")
+    work = home / "proj"
+    work.mkdir()
+    orphan = work / "old-wal"
+    os.link(wal, orphan)
+    wal.unlink()
+    clear_data_inode_cache()
+    argv = build_bwrap_argv("true", work)
+    covered = [
+        argv[index + 2]
+        for index, item in enumerate(argv[:-2])
+        if item == "--ro-bind" and argv[index + 1] == "/dev/null"
+    ]
+    assert "/workspace/old-wal" not in covered
+
+
+def test_second_supervisor_refuses_instead_of_killing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tests.test_m1c import _child_env
+
+    from praxis_prime.supervisor.supervisor import Supervisor, WorkerUnavailable
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg-state"))
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "xdg-run"))
+    root = tmp_path / "data" / "praxis-prime"
+    create_profile(root, "ada")
+    env = _child_env()
+    first = Supervisor(
+        data_root=root,
+        runtime_dir=tmp_path / "rA",
+        state_dir=tmp_path / "sA",
+        env=env,
+        start_timeout=20,
+    )
+    second = Supervisor(
+        data_root=root,
+        runtime_dir=tmp_path / "rB",
+        state_dir=tmp_path / "sB",
+        env=env,
+        start_timeout=20,
+    )
+    try:
+        first.start()
+        assert first.call("ada", "memory.list")["entries"] == []
+        holder = first._slots["ada"].process
+        assert holder is not None and holder.poll() is None
+        pid = holder.pid
+        second.start()
+        with pytest.raises(WorkerUnavailable):
+            second.call("ada", "memory.list")
+        time.sleep(0.4)
+        assert holder.poll() is None
+        assert first.call("ada", "memory.list")["entries"] == []
+        again = first._slots["ada"].process
+        assert again is not None and again.pid == pid
+    finally:
+        second.close()
+        first.close()
 
 
 def _opt_workspace() -> Path:

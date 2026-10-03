@@ -441,6 +441,26 @@ def test_config_and_project_json_round_trip(tmp_path: Path, capsys):
     )
     assert refused == 2
     assert "cannot set trust=trusted" in capsys.readouterr().err
+    refused_net = main(
+        [
+            "mcp",
+            "add",
+            "online",
+            "--command",
+            sys.executable,
+            "--network",
+            "on",
+            "--env-allow",
+            "HOME",
+            "--project",
+            "--config-dir",
+            str(config),
+            "--project-dir",
+            str(project),
+        ]
+    )
+    assert refused_net == 2
+    assert "network=on" in capsys.readouterr().err
 
     listed = main(
         ["mcp", "list", "--config-dir", str(config), "--project-dir", str(project)]

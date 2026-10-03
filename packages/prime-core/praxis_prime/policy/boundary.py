@@ -1071,6 +1071,7 @@ def _extra_link(path: Path) -> bool:
 _ACCOUNT_DATABASES = ("accounts.db", "audit.db", "prime.db")
 _SQLITE_SIDECARS = ("-wal", "-shm", "-journal")
 _ACCOUNT_ROOT_FILES = ("SOUL.md", "worker-master.key")
+_RUNTIME_SECRET_FILES = ("worker-master.key", "gateway.token")
 
 
 def _account_database_name(name: str) -> bool:
@@ -1085,8 +1086,9 @@ def _protected_root_paths(root: Path) -> list[Path]:
     """Files at ``root`` whose inodes the hard-link cover must know.
 
     The names are ``_ACCOUNT_DATABASES`` and ``_ACCOUNT_ROOT_FILES``, plus
-    every SQLite sidecar. ``worker-master.key`` in the runtime directory is
-    included too, so a hard link of that key is the same inode.
+    every SQLite sidecar. ``worker-master.key`` and ``gateway.token`` in the
+    runtime directory are included too, so a hard link of either file is the
+    same inode.
     """
     paths: list[Path] = []
     for name in _ACCOUNT_DATABASES:
@@ -1095,23 +1097,28 @@ def _protected_root_paths(root: Path) -> list[Path]:
             paths.append(root / f"{name}{suffix}")
     for name in _ACCOUNT_ROOT_FILES:
         paths.append(root / name)
-    runtime_key = _owned_runtime_key()
-    if runtime_key is not None:
-        paths.append(runtime_key)
+    paths.extend(_owned_runtime_files())
     return paths
 
 
-def _owned_runtime_key() -> Path | None:
-    """``worker-master.key`` when this user owns the runtime directory."""
+def _owned_runtime_files() -> list[Path]:
+    """Runtime secrets when this user owns the runtime directory.
+
+    A missing runtime directory still names the files, so a hard link is
+    not treated as absent. A symlink, or a directory owned by someone else,
+    is omitted.
+    """
+    runtime = runtime_dir()
+    paths = [runtime / name for name in _RUNTIME_SECRET_FILES]
     try:
-        info = os.lstat(runtime_dir())
+        info = os.lstat(runtime)
     except OSError:
-        return runtime_dir() / "worker-master.key"
+        return paths
     if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
-        return None
+        return []
     if info.st_uid != os.getuid():
-        return None
-    return runtime_dir() / "worker-master.key"
+        return []
+    return paths
 
 
 def _private_path(resolved: Path, root: Path) -> bool:
@@ -1138,6 +1145,9 @@ def _private_path(resolved: Path, root: Path) -> bool:
 
 
 _PRIVATE_INODE_CAP = 20_000
+# A deeper tree is not walked to the end. The scan fails closed instead of
+# returning a partial inode set. 256 is far past a real profile or workspace.
+_SCAN_DEPTH_LIMIT = 256
 
 
 @dataclass
@@ -1269,7 +1279,7 @@ def _scan_private_inodes(
     root_stamp = _dir_stamp(root)
     if root_stamp is not None:
         dirs.append(root_stamp)
-    if _owned_runtime_key() is not None:
+    if _owned_runtime_files():
         runtime_stamp = _dir_stamp(runtime_dir())
         if runtime_stamp is not None:
             watched.append(runtime_stamp)
@@ -1334,16 +1344,16 @@ def _collect_tree_inodes(
         return _record_optional_file(folder, found, linked, files)
     if kind is not StatKind.DIR:
         return ""
-    stack = [folder]
+    stack: list[tuple[Path, int]] = [(folder, 1)]
     while stack:
-        directory = stack.pop()
+        directory, depth = stack.pop()
+        if depth > _SCAN_DEPTH_LIMIT:
+            return f"directory tree under {folder} is too deep to scan"
         stamp = _dir_stamp(directory)
         if stamp is not None:
             dirs.append(stamp)
         try:
             entries = list(os.scandir(directory))
-        except FileNotFoundError:
-            continue
         except OSError:
             return f"unreadable directory {directory}"
         for entry in entries:
@@ -1361,7 +1371,7 @@ def _collect_tree_inodes(
                 _note_inode(st, found, linked)
                 files.append((entry.path, st.st_ino, st.st_ctime_ns, st.st_mtime_ns))
             elif stat.S_ISDIR(st.st_mode):
-                stack.append(Path(entry.path))
+                stack.append((Path(entry.path), depth + 1))
     return ""
 
 
