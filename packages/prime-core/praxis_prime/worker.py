@@ -20,6 +20,7 @@ import socket
 import sys
 import threading
 import time
+import uuid
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -55,9 +56,10 @@ from praxis_prime.supervisor.redact import redact_value
 from praxis_prime.supervisor.socketdir import ensure_private_dir
 
 _NOFILE = 256
-# Events waiting for the supervisor to poll chat.events. The cap keeps one
-# turn from holding an unbounded list. A drain past the cap tells the client.
+# Events waiting for the supervisor to poll one chat's stream. The cap keeps
+# that turn from holding an unbounded list. A drain past the cap tells the client.
 _STREAM_LIMIT = 500
+_STREAM_ID_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_")
 
 
 def remember_stream_event(
@@ -94,6 +96,32 @@ def drain_stream(
             },
         )
     return events, 0
+
+
+class _ChatStream:
+    """One chat call's events. Other calls never read or clear this list."""
+
+    def __init__(self) -> None:
+        self.events: list[dict[str, object]] = []
+        self.dropped = 0
+
+
+def _stream_body(events: list[dict[str, object]]) -> dict[str, object]:
+    body: dict[str, object] = {"events": events}
+    if events and events[0].get("phase") == "truncated":
+        body["truncated"] = True
+        body["dropped"] = events[0].get("dropped", 0)
+    return body
+
+
+def stream_id_of(value: object) -> str:
+    """A caller-supplied stream id, or empty when the value cannot be one."""
+    if not isinstance(value, str):
+        return ""
+    text = value.strip()
+    if not text or len(text) > 64 or any(char not in _STREAM_ID_CHARS for char in text):
+        return ""
+    return text
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -174,8 +202,7 @@ class WorkerApp:
         self._stop = threading.Event()
         self._events: list[dict[str, object]] = []
         self._event_lock = threading.Lock()
-        self._stream: list[dict[str, object]] = []
-        self._stream_dropped = 0
+        self._streams: dict[str, _ChatStream] = {}
         self._stream_lock = threading.Lock()
         self._listen: socket.socket | None = None
         self._lock_fd = _lock_profile(data_root / "profiles" / profile)
@@ -393,13 +420,7 @@ class WorkerApp:
 
             return {"routines": routine_rows(self.scheduler.store)}
         if method == "chat.events":
-            with self._stream_lock:
-                events, self._stream_dropped = drain_stream(self._stream, self._stream_dropped)
-            body: dict[str, object] = {"events": events}
-            if events and events[0].get("phase") == "truncated":
-                body["truncated"] = True
-                body["dropped"] = events[0].get("dropped", 0)
-            return body
+            return self._read_stream(stream_id_of(params.get("streamId")))
         if method == "events.pull":
             with self._event_lock:
                 events = list(self._events)
@@ -413,34 +434,65 @@ class WorkerApp:
             raise LookupError("chat text is empty")
         session = params.get("sessionId")
         session_id = session if isinstance(session, str) and session else None
+        stream_id = stream_id_of(params.get("streamId")) or uuid.uuid4().hex
 
         def on_event(payload: dict[str, object]) -> None:
-            self._note_stream(payload)
+            self._note_stream(stream_id, payload)
 
-        result = self.host.chat(
-            text,
-            session_id=session_id,
-            untrusted=bool(params.get("untrusted")),
-            source=str(params.get("source", "") or "channel"),
-            channel=str(params.get("channel", "")),
-            owner_account=str(params.get("account", "")),
-            owner_profile=self.profile,
-            on_event=on_event,
-        )
-        return {
+        try:
+            result = self.host.chat(
+                text,
+                session_id=session_id,
+                untrusted=bool(params.get("untrusted")),
+                source=str(params.get("source", "") or "channel"),
+                channel=str(params.get("channel", "")),
+                owner_account=str(params.get("account", "")),
+                owner_profile=self.profile,
+                on_event=on_event,
+            )
+            tail = self._take_stream(stream_id)
+        finally:
+            self._drop_stream(stream_id)
+        body: dict[str, object] = {
             "sessionId": result.session_id,
             "text": result.text,
             "error": result.error,
             "cancelled": result.cancelled,
         }
+        if tail:
+            body["events"] = tail
+        return body
 
-    def _note_stream(self, payload: dict[str, object]) -> None:
+    def _note_stream(self, stream_id: str, payload: dict[str, object]) -> None:
         with self._stream_lock:
-            self._stream_dropped = remember_stream_event(
-                self._stream,
-                self._stream_dropped,
-                payload,
-            )
+            buf = self._streams.get(stream_id)
+            if buf is None:
+                buf = _ChatStream()
+                self._streams[stream_id] = buf
+            buf.dropped = remember_stream_event(buf.events, buf.dropped, payload)
+
+    def _read_stream(self, stream_id: str) -> dict[str, object]:
+        """Events for one chat call. An unknown id does not touch any other call."""
+        if not stream_id:
+            return {"events": []}
+        with self._stream_lock:
+            buf = self._streams.get(stream_id)
+            if buf is None:
+                return {"events": []}
+            events, buf.dropped = drain_stream(buf.events, buf.dropped)
+        return _stream_body(events)
+
+    def _take_stream(self, stream_id: str) -> list[dict[str, object]]:
+        with self._stream_lock:
+            buf = self._streams.pop(stream_id, None)
+        if buf is None:
+            return []
+        events, _dropped = drain_stream(buf.events, buf.dropped)
+        return events
+
+    def _drop_stream(self, stream_id: str) -> None:
+        with self._stream_lock:
+            self._streams.pop(stream_id, None)
 
     def _install_grants(self) -> None:
         legacy = self.runtime_home() / "grants-legacy.json"

@@ -463,7 +463,7 @@ class AgentLoop:
             return
 
         yield StatusEvent("act", f"{tool.name} · {prepared.summary}")
-        arguments = json.dumps(dict(call.arguments), separators=(",", ":"), default=str)
+        arguments = json.dumps(_redact(call.arguments), separators=(",", ":"), default=str)
         yield ToolSpan("start", call.id, tool.name)
         yield ToolSpan("args", call.id, tool.name, arguments)
         yield ToolSpan("end", call.id, tool.name)

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import threading
 import time
+import uuid
 from collections.abc import Callable, Collection
 
 from praxis_prime import __version__
@@ -62,6 +63,7 @@ class RoutingHost:
             raise RuntimeError("daemon is shut down")
         if not owner_profile:
             raise WorkerUnavailable("a profile is required")
+        stream_id = uuid.uuid4().hex
         box: dict[str, object] = {}
 
         def run() -> None:
@@ -76,6 +78,7 @@ class RoutingHost:
                         "source": source,
                         "channel": channel,
                         "account": owner_account,
+                        "streamId": stream_id,
                     },
                     timeout=3600,
                 )
@@ -86,9 +89,11 @@ class RoutingHost:
         thread.start()
         while thread.is_alive():
             if on_event is not None:
-                self._drain_chat(owner_profile, on_event)
+                self._drain_chat(owner_profile, stream_id, on_event)
             thread.join(0.05)
-        self._drain_chat(owner_profile, on_event)
+        if on_event is not None:
+            self._drain_chat(owner_profile, stream_id, on_event)
+            self._forward_saved(box.get("result"), on_event)
         failure = box.get("error")
         if isinstance(failure, Exception):
             raise failure
@@ -103,13 +108,28 @@ class RoutingHost:
             cancelled=bool(result.get("cancelled")),
         )
 
-    def _drain_chat(self, profile: str, on_event: object | None) -> None:
-        """Forward text and tool events buffered while ``chat`` is running."""
+    def _drain_chat(self, profile: str, stream_id: str, on_event: object | None) -> None:
+        """Forward this call's events. A turn with no callback does not poll."""
+        if not callable(on_event) or not stream_id:
+            return
         try:
-            pulled = self.supervisor.call(profile, "chat.events", {}, timeout=2)
+            pulled = self.supervisor.call(
+                profile,
+                "chat.events",
+                {"streamId": stream_id},
+                timeout=2,
+            )
         except (IpcError, WorkerUnavailable, OSError):
             return
-        events = pulled.get("events")
+        self._emit_events(pulled.get("events"), on_event)
+
+    def _forward_saved(self, result: object, on_event: object) -> None:
+        """Events still in the chat result after the worker deleted its buffer."""
+        if not isinstance(result, dict):
+            return
+        self._emit_events(result.get("events"), on_event)
+
+    def _emit_events(self, events: object, on_event: object) -> None:
         if not isinstance(events, list) or not callable(on_event):
             return
         callback: Callable[[dict[str, object]], None] = on_event

@@ -105,9 +105,21 @@ def _packaged_root() -> Path | None:
 
 
 def _repo_dist() -> Path | None:
+    """The checkout's ``ui/dist``, and no directory above that checkout.
+
+    ``web.py`` lives at ``packages/prime-core/praxis_prime/gateway/web.py``,
+    so the repo root is four parents up. A ``ui/dist`` in any other ancestor
+    is not this app.
+    """
     here = Path(__file__).resolve()
-    for parent in here.parents:
-        candidate = parent / "ui" / "dist"
-        if (candidate / "index.html").is_file():
-            return candidate
+    if len(here.parents) <= 4:
+        return None
+    root = here.parents[4]
+    if not (root / "pyproject.toml").is_file():
+        return None
+    if not (root / "packages" / "prime-core").is_dir():
+        return None
+    candidate = root / "ui" / "dist"
+    if (candidate / "index.html").is_file():
+        return candidate
     return None

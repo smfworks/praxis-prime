@@ -10,8 +10,20 @@ _BODY_LIMIT = 8000
 
 
 def memory_rows(memory: object) -> list[dict[str, object]]:
+    """Profile and semantic rows. Episodic text stays in the session that wrote it.
+
+    ``session_id`` is omitted so a catalog read cannot name another member's session.
+    """
     entries = memory.list_entries()  # type: ignore[attr-defined]
-    return [item.public() for item in entries]
+    rows: list[dict[str, object]] = []
+    for item in entries:
+        if getattr(item, "tier", "") == "episodic":
+            continue
+        public = item.public()
+        if isinstance(public, dict):
+            public.pop("session_id", None)
+            rows.append(public)
+    return rows
 
 
 def skill_rows(catalog: object) -> list[dict[str, object]]:

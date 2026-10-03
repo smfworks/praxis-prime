@@ -7,7 +7,7 @@ from tests.fakes import ScriptedProvider
 from praxis_prime.approvals.gate import ApprovalDecision, ApprovalGate
 from praxis_prime.loop.control import TurnControl
 from praxis_prime.loop.engine import AgentLoop
-from praxis_prime.loop.events import StatusEvent, TurnEnded
+from praxis_prime.loop.events import StatusEvent, ToolSpan, TurnEnded
 from praxis_prime.loop.prompt import SYSTEM_PROMPT
 from praxis_prime.policy.engine import PolicyEngine
 from praxis_prime.router.router import ModelRouter
@@ -49,6 +49,45 @@ def _tool_reply(name: str, arguments: dict[str, object], *, content: str = "") -
         content=content,
         tool_calls=(ToolCall(id="c1", name=name, arguments=arguments),),
     )
+
+
+def test_streamed_tool_args_use_the_audit_redaction(tmp_path: Path):
+    secret = "sk-live-secret-value"
+    provider = ScriptedProvider(
+        [
+            _tool_reply(
+                "echo",
+                {
+                    "api_key": secret,
+                    "url": "https://example.test/hook?token=abc123",
+                    "text": "hello",
+                },
+            ),
+            AssistantFinal(content="done"),
+        ]
+    )
+
+    def execute(arguments, context):
+        del arguments, context
+        return "echoed"
+
+    registry = ToolRegistry()
+    registry.register(
+        Tool(
+            name="echo",
+            description="Echo.",
+            parameters={"type": "object", "properties": {"text": {"type": "string"}}},
+            risk=Risk.READ,
+            execute=execute,
+        )
+    )
+    events = list(_loop(provider, tmp_path, registry=registry).run_turn("go"))
+    args = [event for event in events if isinstance(event, ToolSpan) and event.phase == "args"]
+    assert len(args) == 1
+    assert secret not in args[0].detail
+    assert "abc123" not in args[0].detail
+    assert "[redacted]" in args[0].detail
+    assert "hello" in args[0].detail
 
 
 def test_system_prompt_stays_byte_stable_across_the_turn(tmp_path: Path):

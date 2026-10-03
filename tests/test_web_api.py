@@ -392,6 +392,94 @@ def test_single_process_catalog_fails_closed_without_membership(tmp_path: Path):
         store.close()
 
 
+def test_memory_catalog_hides_another_members_episode(tmp_path: Path):
+    data = tmp_path / "data"
+    create_profile(data, "alpha")
+    store = AccountStore(data / "accounts.db")
+    ada = store.create_account(username_text="ada", password=_PASSWORD, display_name="Ada")
+    vic = store.create_account(
+        username_text="vic",
+        password=_PASSWORD,
+        display_name="Vic",
+        role="viewer",
+    )
+    store.set_membership(ada.id, "alpha", "owner")
+    store.set_membership(vic.id, "alpha", "viewer")
+    runtime = build_runtime(
+        env={},
+        config_path=tmp_path / "missing.toml",
+        data_path=data / "unused.db",
+        cwd=tmp_path,
+        profile="alpha",
+        providers={"ollama": ScriptedProvider([AssistantFinal(content="ok")])},
+    )
+    runtime.memory.remember("ALPHA-SECRET-FACT")
+    runtime.memory.record_episode("sess-ada-1", "my bank pin is 4321", "noted", channel="telegram")
+    pending = ApprovalQueue()
+    pending.profile_id = runtime.profile_id
+    host = Host(runtime, pending)
+    server = GatewayServer(
+        host="127.0.0.1",
+        port=0,
+        token="test-token",
+        agent=host,
+        approvals=pending,
+        logger=JsonLogger(tmp_path / "daemon.log"),
+        accounts=store,
+        audit=runtime.audit,
+        data_root=data,
+    )
+    server.start()
+    try:
+        ada_cookie, ada_csrf, _ada = _login(server.bound_port, "ada", _PASSWORD)
+        vic_cookie, vic_csrf, _vic = _login(server.bound_port, "vic", _PASSWORD)
+        for cookie, csrf in ((ada_cookie, ada_csrf), (vic_cookie, vic_csrf)):
+            status, _headers, body = _request(
+                server.bound_port,
+                "GET",
+                "/v1/memory",
+                cookie=cookie,
+                csrf=csrf,
+                profile="alpha",
+            )
+            assert status == 200
+            blob = json.dumps(body)
+            assert "ALPHA-SECRET-FACT" in blob
+            assert "bank pin" not in blob
+            assert "sess-ada-1" not in blob
+            assert "session_id" not in blob
+            assert all(item.get("tier") != "episodic" for item in body["entries"])
+    finally:
+        server.shutdown()
+        host.close()
+        store.close()
+
+
+def test_repo_dist_does_not_walk_ancestor_checkouts(tmp_path: Path, monkeypatch):
+    from praxis_prime.gateway import web
+
+    source = Path(web.__file__).resolve()
+    planted = source.parents[3] / "ui" / "dist"
+    planted.mkdir(parents=True, exist_ok=True)
+    marker = planted / "index.html"
+    marker.write_text("PLANTED-ANCESTOR-UI", encoding="utf-8")
+    monkeypatch.delenv("PRAXIS_PRIME_UI_DIR", raising=False)
+    try:
+        found = web._repo_dist()
+        assert found != planted
+        if found is not None:
+            assert "PLANTED-ANCESTOR-UI" not in (found / "index.html").read_text(encoding="utf-8")
+        loaded = web.load_asset("/")
+        assert loaded is None or b"PLANTED-ANCESTOR-UI" not in loaded[1]
+    finally:
+        marker.unlink(missing_ok=True)
+        if planted.exists():
+            planted.rmdir()
+        ui_dir = planted.parent
+        if ui_dir.exists() and not any(ui_dir.iterdir()):
+            ui_dir.rmdir()
+
+
 def test_named_profile_approval_list_does_not_include_another_profile(tmp_path: Path):
     data = tmp_path / "data"
     create_profile(data, "alpha")
@@ -473,12 +561,12 @@ def test_worker_stream_reports_events_past_the_cap():
 
     app = WorkerApp.__new__(WorkerApp)
     app.profile = "alpha"
-    app._stream = []
-    app._stream_dropped = 0
+    app._streams = {}
     app._stream_lock = threading.Lock()
     for index in range(501):
-        app._note_stream({"kind": "text", "text": str(index)})
-    drained = app.handle("chat.events", {})
+        app._note_stream("ada", {"kind": "text", "text": str(index)})
+    app._note_stream("bea", {"kind": "text", "text": "bea-only"})
+    drained = app.handle("chat.events", {"streamId": "ada"})
     assert drained["truncated"] is True
     assert drained["dropped"] == 1
     events = drained["events"]
@@ -487,10 +575,143 @@ def test_worker_stream_reports_events_past_the_cap():
     assert events[0]["dropped"] == 1
     assert events[1]["text"] == "1"
     assert events[-1]["text"] == "500"
-    again = app.handle("chat.events", {})
+    assert "bea-only" not in json.dumps(events)
+    bea = app.handle("chat.events", {"streamId": "bea"})
+    assert bea["events"] == [{"kind": "text", "text": "bea-only"}]
+    assert app.handle("chat.events", {}) == {"events": []}
+    again = app.handle("chat.events", {"streamId": "ada"})
     assert again == {"events": []}
     with pytest.raises(PermissionError, match="different profile"):
         app.handle("memory.catalog", {"profile": "beta"})
+
+
+def test_concurrent_chats_keep_their_own_events(tmp_path: Path):
+    """Two turns on one profile. Each websocket sees only its own ordered events."""
+    data = tmp_path / "data"
+    data.mkdir()
+    create_profile(data, "alpha")
+    started = threading.Event()
+    release = threading.Event()
+
+    def slow_echo(arguments, context):
+        del context
+        started.set()
+        assert release.wait(5)
+        return "TOOL-RESULT-READ-FROM-ADA-FILES: " + str(arguments.get("text"))
+
+    registry = ToolRegistry()
+    registry.register(
+        Tool(
+            name="echo",
+            description="Echo.",
+            parameters={
+                "type": "object",
+                "properties": {"text": {"type": "string"}},
+                "required": ["text"],
+            },
+            risk=Risk.READ,
+            execute=slow_echo,
+        )
+    )
+    replies = [
+        AssistantFinal(
+            content="ADA-PRIVATE-PREAMBLE",
+            tool_calls=(ToolCall(id="c1", name="echo", arguments={"text": "ADA-SECRET-ARG"}),),
+        ),
+        AssistantFinal(content="ADA-PRIVATE-REPLY"),
+        AssistantFinal(content="BEA-REPLY"),
+    ]
+    runtime = build_runtime(
+        env={},
+        config_path=tmp_path / "missing.toml",
+        data_path=data / "prime.db",
+        cwd=tmp_path,
+        providers={"ollama": ScriptedProvider(replies)},
+        registry=registry,
+    )
+    pending = ApprovalQueue()
+    pending.profile_id = "alpha"
+    app = WorkerApp_for_stream(runtime, pending)
+    calls: list[str] = []
+
+    class _Sup:
+        def call(self, profile: str, method: str, params: object = None, timeout: float = 30):
+            del timeout
+            assert profile == "alpha"
+            body = params if isinstance(params, dict) else {}
+            if method == "chat.events":
+                calls.append("chat.events")
+            return app.handle(method, body)
+
+    host = RoutingHost(_Sup(), object(), object())  # type: ignore[arg-type]
+    seen: dict[str, list[dict[str, object]]] = {"ada": [], "bea": []}
+    out: dict[str, TurnResult] = {}
+
+    def run(who: str, text: str) -> None:
+        out[who] = host.chat(
+            text,
+            owner_profile="alpha",
+            owner_account=who,
+            on_event=lambda event: seen[who].append(event),
+        )
+
+    ada = threading.Thread(target=run, args=("ada", "ada private question"))
+    ada.start()
+    assert started.wait(5)
+    bea = threading.Thread(target=run, args=("bea", "bea question"))
+    bea.start()
+    time.sleep(0.2)
+    release.set()
+    ada.join(10)
+    bea.join(10)
+    ada_blob = json.dumps(seen["ada"])
+    bea_blob = json.dumps(seen["bea"])
+    for marker in (
+        "ADA-PRIVATE-PREAMBLE",
+        "ADA-SECRET-ARG",
+        "TOOL-RESULT-READ-FROM-ADA-FILES",
+        "ADA-PRIVATE-REPLY",
+    ):
+        assert marker in ada_blob
+        assert marker not in bea_blob
+    assert "BEA-REPLY" in bea_blob
+    assert "BEA-REPLY" not in ada_blob
+    ada_text = [str(event.get("text")) for event in seen["ada"] if event.get("kind") == "text"]
+    assert ada_text.index("ADA-PRIVATE-PREAMBLE") < ada_text.index("ADA-PRIVATE-REPLY")
+    assert out["ada"].text == "ADA-PRIVATE-REPLY"
+    assert out["bea"].text == "BEA-REPLY"
+    assert "chat.events" in calls
+    runtime.close()
+
+
+def test_channel_turn_does_not_poll_chat_events():
+    calls: list[str] = []
+
+    class _Sup:
+        def call(self, profile: str, method: str, params: object = None, timeout: float = 30):
+            del profile, params, timeout
+            calls.append(method)
+            if method == "chat":
+                return {"sessionId": "s", "text": "ok", "error": None, "cancelled": False}
+            raise AssertionError(method)
+
+    host = RoutingHost(_Sup(), object(), object())  # type: ignore[arg-type]
+    result = host.chat("hi", owner_profile="alpha", on_event=None)
+    assert result.text == "ok"
+    assert calls == ["chat"]
+
+
+def WorkerApp_for_stream(runtime: object, pending: ApprovalQueue):
+    from praxis_prime.worker import WorkerApp
+
+    app = WorkerApp.__new__(WorkerApp)
+    app.profile = "alpha"
+    app.runtime = runtime
+    app.queue = pending
+    app.host = Host(runtime, pending)  # type: ignore[arg-type]
+    app._streams = {}
+    app._stream_lock = threading.Lock()
+    return app
 
 
 def test_web_approval_is_once_and_stays_on_that_account(tmp_path: Path):
