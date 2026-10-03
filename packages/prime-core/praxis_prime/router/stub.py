@@ -3,12 +3,15 @@
 ``PRAXIS_PRIME_STUB_REPLIES`` points at a JSON file of assistant turns.
 When the variable is unset, this module does nothing and the normal
 provider map is used. It is not a configured model and it does not
-open a network connection.
+open a network connection. A turn may set ``pace_ms`` to stream one
+character at a time, and ``{{message}}`` is replaced with the latest
+user text. Both are for tests.
 """
 
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Iterator, Mapping
 from pathlib import Path
 
@@ -19,9 +22,16 @@ from praxis_prime.router.types import AssistantFinal, ChatRequest, StreamEvent, 
 class ScriptedProvider:
     """Replay prepared assistant messages. Records each request."""
 
-    def __init__(self, replies: list[AssistantFinal], *, name: str = "ollama") -> None:
+    def __init__(
+        self,
+        replies: list[AssistantFinal],
+        *,
+        name: str = "ollama",
+        pace_ms: list[int] | None = None,
+    ) -> None:
         self.name = name
         self.replies = list(replies)
+        self.pace_ms = list(pace_ms or [0] * len(self.replies))
         self.requests: list[ChatRequest] = []
 
     def iter_stream(self, request: ChatRequest) -> Iterator[StreamEvent]:
@@ -29,9 +39,10 @@ class ScriptedProvider:
         if not self.replies:
             raise RuntimeError("scripted provider ran out of replies")
         reply = self.replies.pop(0)
-        if reply.content:
-            yield TextDelta(reply.content)
-        yield reply
+        pace = self.pace_ms.pop(0) if self.pace_ms else 0
+        content = _with_user_text(reply.content, request)
+        yield from _paced_deltas(content, pace)
+        yield AssistantFinal(content=content, tool_calls=reply.tool_calls)
 
 
 def providers_from_env(env: Mapping[str, str]) -> dict[str, ChatProvider] | None:
@@ -39,10 +50,16 @@ def providers_from_env(env: Mapping[str, str]) -> dict[str, ChatProvider] | None
     raw = env.get("PRAXIS_PRIME_STUB_REPLIES", "").strip()
     if not raw:
         return None
-    return {"ollama": ScriptedProvider(load_replies(Path(raw)))}
+    replies, pace_ms = load_scripted(Path(raw))
+    return {"ollama": ScriptedProvider(replies, pace_ms=pace_ms)}
 
 
 def load_replies(path: Path) -> list[AssistantFinal]:
+    replies, _pace = load_scripted(path)
+    return replies
+
+
+def load_scripted(path: Path) -> tuple[list[AssistantFinal], list[int]]:
     try:
         loaded = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
@@ -50,7 +67,42 @@ def load_replies(path: Path) -> list[AssistantFinal]:
     rows = loaded.get("replies") if isinstance(loaded, dict) else loaded
     if not isinstance(rows, list) or not rows:
         raise ValueError("stub replies file needs a list of turns")
-    return [_reply(item) for item in rows]
+    replies = [_reply(item) for item in rows]
+    return replies, [_pace_ms(item) for item in rows]
+
+
+def _with_user_text(content: str, request: ChatRequest) -> str:
+    """Replace ``{{message}}`` with the latest user turn. Other text is unchanged."""
+    if "{{message}}" not in content:
+        return content
+    user = ""
+    for message in reversed(request.messages):
+        if message.role == "user" and message.content:
+            user = message.content
+            break
+    return content.replace("{{message}}", user)
+
+
+def _paced_deltas(content: str, pace_ms: int) -> Iterator[TextDelta]:
+    """One delta, or one delta per character when a test asks for a slow stream."""
+    if not content:
+        return
+    if pace_ms <= 0:
+        yield TextDelta(content)
+        return
+    for index, char in enumerate(content):
+        if index:
+            time.sleep(pace_ms / 1000)
+        yield TextDelta(char)
+
+
+def _pace_ms(item: object) -> int:
+    if not isinstance(item, dict) or "pace_ms" not in item:
+        return 0
+    raw = item.get("pace_ms")
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
+        raise ValueError("stub pace_ms must be a non-negative integer")
+    return raw
 
 
 def _reply(item: object) -> AssistantFinal:

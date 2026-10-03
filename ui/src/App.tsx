@@ -145,17 +145,23 @@ function Shell({ account, route }: { account: Account; route: string }) {
         <p className="mb-4 text-sm text-muted">
           Signed in as {account.username} ({account.role})
         </p>
-        {route === "approvals" ? <Approvals /> : null}
-        {route === "chat" ? <ChatView profile={profile} /> : null}
-        {route === "memory" ? (
-          <ListView title="Memory" path="/v1/memory" field="entries" profile={profile} />
-        ) : null}
-        {route === "skills" ? (
-          <ListView title="Skills" path="/v1/skills" field="skills" profile={profile} />
-        ) : null}
-        {route === "routines" ? (
-          <ListView title="Routines" path="/v1/routines" field="routines" profile={profile} />
-        ) : null}
+        {profile ? (
+          <>
+            {route === "approvals" ? <Approvals profile={profile} /> : null}
+            {route === "chat" ? <ChatView profile={profile} /> : null}
+            {route === "memory" ? (
+              <ListView title="Memory" path="/v1/memory" field="entries" profile={profile} />
+            ) : null}
+            {route === "skills" ? (
+              <ListView title="Skills" path="/v1/skills" field="skills" profile={profile} />
+            ) : null}
+            {route === "routines" ? (
+              <ListView title="Routines" path="/v1/routines" field="routines" profile={profile} />
+            ) : null}
+          </>
+        ) : (
+          <p role="status">Choose a profile.</p>
+        )}
         {route === "security" ? <FactorsView /> : null}
         {route === "directory" && admin ? <DirectoryView /> : null}
       </main>

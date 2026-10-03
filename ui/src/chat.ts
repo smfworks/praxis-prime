@@ -24,6 +24,10 @@ export function streamChat(
   onText: (delta: string) => void,
   onDone: (result: ChatResult) => void,
 ): () => void {
+  if (!profile) {
+    onDone({ text: "", error: "a profile is required", sessionId: "" });
+    return () => {};
+  }
   const socket: { ws?: WebSocket } = {};
   let settled = false;
   const finish = (result: ChatResult) => {
@@ -67,8 +71,7 @@ export function streamChat(
       if (!hello) {
         if (frame.type === "hello" && frame.ok === true) {
           hello = true;
-          const payload: Record<string, unknown> = { text };
-          if (profile) payload.profile = profile;
+          const payload: Record<string, unknown> = { text, profile };
           if (sessionId) payload.sessionId = sessionId;
           ws.send(
             JSON.stringify({

@@ -26,6 +26,26 @@ export function selectProfile(profile: string): void {
   else sessionStorage.removeItem(PROFILE_KEY);
 }
 
+const CATALOG_ROUTES = ["/v1/memory", "/v1/skills", "/v1/routines", "/v1/approvals"];
+
+function catalogRoute(path: string): boolean {
+  const bare = path.split("?")[0].replace(/\/$/, "");
+  return CATALOG_ROUTES.some((route) => bare === route || bare.startsWith(`${route}/`));
+}
+
+function readJson(text: string): Record<string, unknown> {
+  if (!text.trim()) return {};
+  try {
+    const loaded: unknown = JSON.parse(text);
+    if (loaded && typeof loaded === "object" && !Array.isArray(loaded)) {
+      return loaded as Record<string, unknown>;
+    }
+  } catch {
+    return {};
+  }
+  return {};
+}
+
 export async function api(
   method: string,
   path: string,
@@ -33,6 +53,9 @@ export async function api(
 ): Promise<Record<string, unknown>> {
   const headers: Record<string, string> = { Accept: "application/json" };
   const profile = currentProfile();
+  if (catalogRoute(path) && !profile) {
+    throw new ApiError(403, "forbidden", "a profile is required");
+  }
   if (profile) headers["x-praxis-profile"] = profile;
   const init: RequestInit = { method, headers, credentials: "same-origin" };
   if (method !== "GET" && method !== "HEAD") {
@@ -41,12 +64,7 @@ export async function api(
     init.body = JSON.stringify(body ?? {});
   }
   const response = await fetch(path, init);
-  const text = await response.text();
-  let parsed: Record<string, unknown> = {};
-  if (text) {
-    const loaded: unknown = JSON.parse(text);
-    if (loaded && typeof loaded === "object") parsed = loaded as Record<string, unknown>;
-  }
+  const parsed = readJson(await response.text());
   if (!response.ok) {
     const error = parsed.error;
     const code =

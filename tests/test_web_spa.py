@@ -7,7 +7,7 @@ import re
 from pathlib import Path
 
 from praxis_prime.router.stub import providers_from_env
-from praxis_prime.router.types import ChatRequest
+from praxis_prime.router.types import ChatMessage, ChatRequest
 
 _INLINE = re.compile(r"<script(?![^>]*\bsrc=)[^>]*>", re.IGNORECASE)
 # React's production bundle names these. They are error text and XML namespaces,
@@ -77,3 +77,22 @@ def test_stub_replies_stay_off_unless_the_env_is_set(tmp_path: Path):
     events = list(provider.iter_stream(ChatRequest(model="ollama:qwen3:32b", messages=())))
     assert [type(event).__name__ for event in events] == ["TextDelta", "AssistantFinal"]
     assert getattr(events[0], "text", "") == "Looking."
+
+
+def test_stub_can_pace_a_reply_and_include_the_user_text(tmp_path: Path):
+    path = tmp_path / "replies.json"
+    path.write_text(
+        json.dumps({"replies": [{"content": "echo {{message}}", "pace_ms": 1}]}),
+        encoding="utf-8",
+    )
+    providers = providers_from_env({"PRAXIS_PRIME_STUB_REPLIES": str(path)})
+    assert providers is not None
+    request = ChatRequest(
+        model="ollama:qwen3:32b",
+        messages=(ChatMessage(role="user", content="secret-token"),),
+    )
+    events = list(providers["ollama"].iter_stream(request))
+    deltas = [event for event in events if type(event).__name__ == "TextDelta"]
+    assert len(deltas) > 1
+    assert "".join(getattr(event, "text", "") for event in deltas) == "echo secret-token"
+    assert getattr(events[-1], "content", "") == "echo secret-token"

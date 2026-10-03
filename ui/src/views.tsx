@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useRef, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 
 import { api, rowsOf, textOf } from "./api";
 import { streamChat } from "./chat";
@@ -12,27 +12,49 @@ export function ChatView({ profile }: { profile: string }) {
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
   const sessionId = useRef("");
+  const stopStream = useRef<(() => void) | null>(null);
+  const generation = useRef(0);
+
+  useEffect(() => {
+    generation.current += 1;
+    sessionId.current = "";
+    setLines([]);
+    setDraft("");
+    setBusy(false);
+    stopStream.current?.();
+    stopStream.current = null;
+    return () => {
+      stopStream.current?.();
+      stopStream.current = null;
+    };
+  }, [profile]);
 
   function send(event: FormEvent) {
     event.preventDefault();
     const text = draft.trim();
-    if (!text || busy) return;
+    if (!text || busy || !profile) return;
+    const ticket = generation.current;
     setDraft("");
     setBusy(true);
     setLines((current) => [...current, { role: "you", text }, { role: "agent", text: "" }]);
-    streamChat(
+    stopStream.current?.();
+    stopStream.current = streamChat(
       text,
       profile,
       sessionId.current,
       (delta) => {
+        if (generation.current !== ticket) return;
         setLines((current) => {
           const next = current.slice();
           const last = next[next.length - 1];
-          if (last && last.role === "agent") next[next.length - 1] = { role: "agent", text: last.text + delta };
+          if (last && last.role === "agent") {
+            next[next.length - 1] = { role: "agent", text: last.text + delta };
+          }
           return next;
         });
       },
       (result) => {
+        if (generation.current !== ticket) return;
         if (result.sessionId) sessionId.current = result.sessionId;
         if (result.error) {
           setLines((current) => [...current, { role: "error", text: result.error }]);
@@ -69,24 +91,25 @@ export function ChatView({ profile }: { profile: string }) {
           Send
         </button>
       </form>
-      <Approvals />
+      <Approvals profile={profile} />
     </section>
   );
 }
 
-export function Approvals() {
+export function Approvals({ profile }: { profile: string }) {
   const client = useQueryClient();
   const query = useQuery({
-    queryKey: ["approvals"],
+    queryKey: ["approvals", profile],
     queryFn: async () => rowsOf(await api("GET", "/v1/approvals"), "approvals"),
     refetchInterval: 1000,
+    enabled: profile.length > 0,
   });
   const [error, setError] = useState("");
 
   async function decide(id: string, decision: string) {
     setError("");
     try {
-      await api("POST", `/v1/approvals/${id}`, { decision, id });
+      await api("POST", `/v1/approvals/${encodeURIComponent(id)}`, { decision, id });
       await client.invalidateQueries({ queryKey: ["approvals"] });
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "could not decide");
@@ -148,6 +171,7 @@ export function ListView({
   const query = useQuery({
     queryKey: [field, profile],
     queryFn: async () => rowsOf(await api("GET", path), field),
+    enabled: profile.length > 0,
   });
   return (
     <section className="grid gap-3">
