@@ -589,6 +589,8 @@ M0 packs/packaging ─┐
 
 **M1 lettered split.** The numbered PRs in the M1 row are also named this way: **M1a** is (2), (4), (5), and (8) (accounts, roles, profiles, and audit actors; merged); **M1b** is (3), passkeys + TOTP (local enrollment and sign-in on the loopback daemon); **M1c** is (6), per-profile workers and the supervisor; **M1d** is (1) and (7), the SPA, profile picker, and admin console; **M1e** is (9), generic OIDC. The same labels are in the README roadmap and in [OPENDOTS-BORROWED-PATTERNS.md](OPENDOTS-BORROWED-PATTERNS.md).
 
+**M1c status.** The supervisor and per-profile workers are in the tree. The trust boundary is in [SECURITY.md](SECURITY.md) and [ARCHITECTURE.md](ARCHITECTURE.md) §3.1. The gateway half of pattern 10 (route allowlist, session-id agreement, path/body/query id agreement) landed with that work. The SPA client stays M1d. Landlock, a Linux user per profile, per-profile provider secrets, and OIDC are not part of M1c.
+
 **Placement in the existing phases (ARCHITECTURE §29):**
 - M0–M3 = **MVP completion** (v0.2–0.3).
 - M4–M6 = **v0.5**, alongside the existing v0.5 items. Teams moves to M8.
@@ -597,7 +599,7 @@ M0 packs/packaging ─┐
 
 **Patterns borrowed from OpenDots (2026-10-01):** see [OPENDOTS-BORROWED-PATTERNS.md](OPENDOTS-BORROWED-PATTERNS.md). These are ideas only, with no code copied. They are folded into the milestones above as follows:
 - **M1**, PR (6) per-profile workers (M1c): live revocation of in-flight runs and leased routine runs (pattern 3); per-worker derived credentials (pattern 6); grants re-checked on every tool call, with a one-time migration (pattern 11); upstream response hardening (pattern 12).
-- **M1**, PRs (1) and (7) SPA shell (M1d): AG-UI event types on the gateway stream (pattern 1); approval cards decided once per tool call (pattern 2); extra gateway request checks (pattern 7); optional revision-checked autosave for the canvas (pattern 9); a route allowlist whose ids agree across path, body, and query (pattern 10).
+- **M1**, PRs (1) and (7) SPA shell (M1d): AG-UI event types on the gateway stream (pattern 1); approval cards decided once per tool call (pattern 2); extra gateway request checks (pattern 7); optional revision-checked autosave for the canvas (pattern 9); the SPA client for the route allowlist (pattern 10). The gateway checks from pattern 10 landed with M1c.
 - **M2:** the "setup needed" screen lists exactly what is missing (pattern 8).
 - **M4:** human takeover and handback of the sandboxed browser or desktop, with a redacted activity log (pattern 5); derived sandbox credentials (pattern 6); snapshot-bound element actions (pattern 4), which start in the current browser tool; upstream response hardening (pattern 12).
 - **M6:** approval-card idempotency on mobile sheets (pattern 2); re-check the gateway request checks for remote exposure (pattern 7); re-check the route allowlist and session-id agreement (pattern 10).

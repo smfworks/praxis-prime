@@ -26,6 +26,7 @@ from praxis_prime.approvals.gate import ApprovalDecision
 from praxis_prime.approvals.queue import ApprovalQueue, parse_decision
 from praxis_prime.host import Host
 from praxis_prime.observe import JsonLogger
+from praxis_prime.upstream import MAX_UPSTREAM_BYTES, RedirectRefused, build_opener, read_bounded
 
 _CALLBACK = re.compile(r"^a:(ap_[0-9a-f]{8}):([01s])$")
 _APPROVAL_COMMANDS = ("/approve", "/deny", "/allow")
@@ -56,7 +57,7 @@ class HttpTelegramTransport:
 
     def __init__(self, token: str, opener: object | None = None) -> None:
         self._token = token
-        self._opener = opener or urllib.request.urlopen
+        self._opener = opener
 
     def call(self, method: str, payload: Mapping[str, object]) -> dict[str, object]:
         url = f"https://api.telegram.org/bot{self._token}/{method}"
@@ -67,9 +68,23 @@ class HttpTelegramTransport:
             headers={"Content-Type": "application/json"},
             method="POST",
         )
+        deadline = time.monotonic() + 15
         try:
-            with self._opener(request, timeout=15) as response:  # type: ignore[operator]
-                raw = response.read()
+            if self._opener is None:
+                response = build_opener().open(request, timeout=15)
+                try:
+                    raw = read_bounded(response, limit=MAX_UPSTREAM_BYTES, deadline=deadline)
+                finally:
+                    response.close()
+            else:
+                with self._opener(request, timeout=15) as response:  # type: ignore[operator]
+                    raw = response.read(MAX_UPSTREAM_BYTES + 1)
+                    if len(raw) > MAX_UPSTREAM_BYTES:
+                        raise TelegramError("upstream body exceeds 4MB")
+        except RedirectRefused as exc:
+            raise TelegramError("redirect refused") from exc
+        except TelegramError:
+            raise
         except Exception as exc:
             raise TelegramError("telegram request failed") from exc
         try:
@@ -130,6 +145,93 @@ class PairingStore:
     def is_owner(self, chat_id: object) -> bool:
         return isinstance(chat_id, int) and chat_id == self.owner_chat_id()
 
+    def bindings_path(self) -> Path:
+        return self.owner_path.with_name("telegram-bindings.json")
+
+    def bindings(self) -> list[dict[str, object]]:
+        record = _read_json(self.bindings_path())
+        rows = record.get("bindings", [])
+        if not isinstance(rows, list):
+            return []
+        found: list[dict[str, object]] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            chat_id = row.get("chat_id")
+            profile = row.get("profile")
+            account = row.get("account_id")
+            if not isinstance(chat_id, int) or not isinstance(profile, str) or not profile:
+                continue
+            found.append(
+                {
+                    "chat_id": chat_id,
+                    "profile": profile,
+                    "account_id": account if isinstance(account, str) else "",
+                }
+            )
+        return found
+
+    def bind_chat(self, chat_id: int, account_id: str, profile: str) -> None:
+        """Remember which person and profile this chat may approve."""
+        if not profile:
+            raise ValueError("a binding needs a profile")
+        kept = [row for row in self.bindings() if row.get("chat_id") != chat_id]
+        kept.append({"chat_id": chat_id, "account_id": account_id, "profile": profile})
+        _write_private(self.bindings_path(), json.dumps({"bindings": kept}))
+
+    def binding_for(self, chat_id: object) -> dict[str, object] | None:
+        if not isinstance(chat_id, int):
+            return None
+        for row in self.bindings():
+            if row.get("chat_id") == chat_id:
+                return row
+        return None
+
+    def destination(self, profile: str, requester: str) -> int | None:
+        """Chat that should see this profile's card.
+
+        With no bindings, the legacy owner chat still receives ``default``
+        and unscoped cards. A card that matches nobody is not sent.
+        """
+        rows = self.bindings()
+        if rows:
+            if not requester:
+                return None
+            matches = []
+            for row in rows:
+                if profile and row.get("profile") != profile:
+                    continue
+                account = str(row.get("account_id", ""))
+                if requester and account and account != requester:
+                    continue
+                if profile or requester:
+                    matches.append(row)
+            exact = [row for row in matches if requester and row.get("account_id") == requester]
+            chosen = exact if exact else matches
+            if len(chosen) == 1:
+                chat_id = chosen[0].get("chat_id")
+                if isinstance(chat_id, int):
+                    return chat_id
+            return None
+        if profile in {"", "default"}:
+            return self.owner_chat_id()
+        return None
+
+    def may_decide(self, chat_id: object, profile: str, requester: str) -> bool:
+        """True when this chat may decide that approval."""
+        rows = self.bindings()
+        if not rows:
+            return self.is_owner(chat_id)
+        if not profile or not requester:
+            return False
+        row = self.binding_for(chat_id)
+        if row is None:
+            return False
+        if row.get("profile") != profile:
+            return False
+        account = str(row.get("account_id", ""))
+        return bool(account) and account == requester
+
 
 class TelegramAdapter:
     """Long-poll the bot and turn owner messages into untrusted turns."""
@@ -144,6 +246,7 @@ class TelegramAdapter:
         *,
         offset_path: Path | None = None,
         policy: object | None = None,
+        default_profile: str = "",
     ) -> None:
         self.transport = transport
         self.pairing = pairing
@@ -152,6 +255,7 @@ class TelegramAdapter:
         self.logger = logger
         self.offset_path = offset_path
         self.policy = policy
+        self.default_profile = default_profile
         self._sessions: dict[int, str] = {}
         self._session_lock = threading.Lock()
         self._offset = self._load_offset()
@@ -172,25 +276,32 @@ class TelegramAdapter:
         self._stop.set()
 
     def notify_pending(self, item: dict[str, object]) -> None:
-        owner = self.pairing.owner_chat_id()
-        if owner is None:
+        chat_id = self.pairing.destination(
+            str(item.get("profileId", "") or ""),
+            str(item.get("requester", "") or ""),
+        )
+        if chat_id is None:
             return
         approval_id = str(item.get("id", ""))
         self._send(
-            owner,
+            chat_id,
             format_approval_card(item),
             reply_markup=inline_keyboard(approval_id),
         )
 
     def send_owner(self, text: str) -> None:
         """Deliver a routine result. No-op until a chat is paired."""
-        owner = self.pairing.owner_chat_id()
-        if owner is None or not text.strip():
+        self.send_for_profile("", text)
+
+    def send_for_profile(self, profile: str, text: str) -> None:
+        """Deliver text only to the chat bound to ``profile``."""
+        chat_id = self.pairing.destination(profile, "")
+        if chat_id is None or not text.strip():
             return
         outgoing = self._policy_outbound(text)
         if outgoing is None:
             return
-        self._send(owner, outgoing)
+        self._send(chat_id, outgoing)
 
     def _policy_outbound(self, text: str) -> str | None:
         """Scan an owner-bound message. Dials that are off leave it unchanged."""
@@ -219,12 +330,15 @@ class TelegramAdapter:
     def notify_resolved(self, item: dict[str, object]) -> None:
         if item.get("actor") not in {"timeout", "shutdown"}:
             return
-        owner = self.pairing.owner_chat_id()
-        if owner is None:
+        chat_id = self.pairing.destination(
+            str(item.get("profileId", "") or ""),
+            str(item.get("requester", "") or ""),
+        )
+        if chat_id is None:
             return
         state = str(item.get("state", ""))
         label = "Denied (timed out)" if state == "expired" else "Denied"
-        self._send(owner, f"{label}: {item.get('tool')} ({item.get('risk')}) {item.get('id')}")
+        self._send(chat_id, f"{label}: {item.get('tool')} ({item.get('risk')}) {item.get('id')}")
 
     def handle_update(self, update: Mapping[str, object]) -> None:
         """Process one update. Safe to call from tests with no network."""
@@ -271,7 +385,7 @@ class TelegramAdapter:
         if body.startswith("/pair"):
             self._on_pair(chat_id, body)
             return
-        if not self.pairing.is_owner(chat_id):
+        if self.pairing.binding_for(chat_id) is None and not self.pairing.is_owner(chat_id):
             self._send(chat_id, "This bot is paired to its owner. Your chat is not allowed.")
             if self.logger is not None:
                 self.logger.info("telegram_reject_unknown")
@@ -308,6 +422,9 @@ class TelegramAdapter:
     def _run_turn(self, chat_id: int, body: str) -> None:
         with self._session_lock:
             session_id = self._sessions.get(chat_id)
+        bound = self.pairing.binding_for(chat_id)
+        profile = str(bound.get("profile", "")) if bound else self.default_profile
+        account = str(bound.get("account_id", "")) if bound else ""
         try:
             result = self.host.chat(
                 body,
@@ -315,6 +432,8 @@ class TelegramAdapter:
                 untrusted=True,
                 source="telegram",
                 channel="telegram",
+                owner_account=account,
+                owner_profile=profile,
             )
         except Exception as exc:
             if self.logger is not None:
@@ -348,12 +467,20 @@ class TelegramAdapter:
                 chat_id = chat.get("id")
         data = callback.get("data")
         parsed = parse_callback(data if isinstance(data, str) else "")
-        if not self.pairing.is_owner(chat_id) or parsed is None:
+        if parsed is None:
             self._answer(query_id, "Not allowed")
             if self.logger is not None:
                 self.logger.info("telegram_reject_callback")
             return
         approval_id, decision = parsed
+        existing = self.queue.get(approval_id)
+        profile = str(existing.get("profileId", "") or "") if existing else ""
+        requester = str(existing.get("requester", "") or "") if existing else ""
+        if not self.pairing.may_decide(chat_id, profile, requester):
+            self._answer(query_id, "Not allowed")
+            if self.logger is not None:
+                self.logger.info("telegram_reject_callback")
+            return
         try:
             self.queue.decide(approval_id, decision, actor=f"telegram:{chat_id}")
         except LookupError:

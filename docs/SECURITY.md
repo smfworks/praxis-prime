@@ -22,7 +22,47 @@ The migrated `default` profile is written with `allow = ["*"]` for tools and for
 
 Stop `praxis-primed` before the first `account create`. That command moves `prime.db` into `profiles/default/`. Every process that opens `prime.db` takes a shared flock on `prime.db.lock` without waiting. If migration holds that file, the open fails with `migration in progress` and does not create a new `prime.db` at the pre-move path. Once the migration marker is in place, local commands open `profiles/default/prime.db`. Opening the old top-level file fails with `this database moved to <path> after migration` and does not create a new file there. `chat --local` and the other commands that open the database check `.migration.lock` the same way. Migration takes the flock exclusively, and only then removes or replaces `.migration.lock`. A busy database leaves that lock file in place. `--force` does not override an open `prime.db`. A published daemon is refused as well. The daemon refuses to start while `.migration.lock` exists. That file records the migrating pid and its start time. An empty file, garbage, a dead pid, or a reused pid (same number, different start time) is stale: `praxis-prime profile migrate` replaces it and finishes the move. A lock that still matches a live process needs `praxis-prime profile migrate --force`. The error names `.migration.lock`. The command does nothing if the marker is already there.
 
-This process runs one profile. Chat, approvals, `model.set`, and `session.drop` require that profile plus a membership (owner and admin are not limited to memberships). A chat whose profile is not the one the daemon opened is refused. The audit `profile` column is that runtime profile.
+## Supervisor and profile workers
+
+`praxis-primed` listens on loopback only. When `profiles/` exists it is the supervisor: it does not open a profile `prime.db`. Each profile runs in its own worker process. That process holds the profile's memory, skills, routines, and approval queue, under `profiles/<id>/`. A crash in one worker does not open another profile's database.
+
+An install with no profile directory still runs the agent inside the daemon. The first start after profiles exist writes `supervisor/m1c.json` once. That marker does not move databases again and does not copy session grants into a worker. A second start sees the marker and leaves it.
+
+### Trust boundary
+
+The supervisor holds:
+
+- the 32-byte master key at `$XDG_RUNTIME_DIR/praxis-prime/worker-master.key` (mode 0600)
+- per-profile generation counters in the state directory
+- `accounts.db` and `audit.db`
+- the Telegram bot token
+
+A worker is started with its profile id, its data root, the socket paths, and its generation. The derived credential is written to the worker's stdin and the pipe is closed. The master key is not an environment variable. The worker environment also drops `PRAXIS_PRIME_TELEGRAM_BOT_TOKEN` and `PRAXIS_PRIME_SECRETS_FILE`.
+
+The credential is `HMAC-SHA256(master, "praxis-prime-worker:" + profile + ":" + generation)`. The profile id is checked before the HMAC is computed, so a string that is not a profile id is not a credential. Bumping one profile's generation rejects that profile's old credential and leaves the others valid. The generation file is locked and replaced atomically. A corrupt or empty generation file is refused, which does not bring a revoked credential back. Rotating the master key invalidates every derived credential. Comparison is constant-time, and an empty token never matches.
+
+IPC is a Unix socket, mode 0600, with a 4-byte length and one JSON object, capped at 4 MiB. The socket directory is mode 0700. The directory is chosen so the supervisor socket and every current profile socket fit, including a 64-character profile id when a directory can hold one. When the runtime directory cannot hold those paths, the directory is a private `mkdtemp` directory, not a path under `/tmp`. A profile whose socket still cannot be created does not stop the daemon from starting the others. A private socket directory left by a crashed supervisor is removed on the next start when its supervisor socket is not accepting a connection. Both ends check `SO_PEERCRED` and refuse a different uid before a credential is written. A worker authenticates, and every later frame on that connection is checked against the current generation. A connection opened before a bump stops being accepted. The worker holds the read end of a pipe whose write end stays open in the supervisor process, so the worker exits when that process exits. The request thread that started the worker can return without closing the pipe. A worker started with `systemd-run` does not receive the pipe. It exits when `PRAXIS_PRIME_SUPERVISOR_PID` is no longer a live process. The profile lock records the supervisor pid, that process's start time, and a token. A new worker clears the lock when the recorded supervisor is gone, when the pid is alive but the start time does not match, and when the stamp has no start time.
+
+A worker may ask the supervisor for only two things:
+
+| Method | What it may do |
+|---|---|
+| `grant.check` | Ask whether one account may still act on **this** profile. The supervisor reads accounts and memberships. The worker does not. |
+| `event` | Record an `approval`, `audit`, or `routine` event. The supervisor stamps the authenticated profile and ignores a claimed profile that differs. Secrets in the payload are redacted. |
+
+Anything else (`spawn`, `stop`, reading another profile, reading accounts) is refused. The supervisor calls the worker for chat, approvals, memory, routines, revoke, health, and shutdown. Profile A's credential is rejected on profile B's socket.
+
+The gateway stays in the supervisor. `praxis-prime chat` and `ask` keep working. `--profile` selects the worker. With no `--profile`, `default` is used when it exists, otherwise the only profile. Looking up a session owner asks running workers first. When none of them has the session, idle profiles are started until one reports it. Telegram Approve and Deny go to the chat bound to that profile and requester (`telegram-bindings.json`, mode 0600). With no bindings, the paired owner chat still receives cards for `default` and for an unscoped queue. Once any chat is bound, a decision needs both the profile and the requester, and the bound account must be that requester. An empty profile or requester is refused, and a card with no requester is not sent to a bound chat.
+
+Grants are checked again on every tool call. A revoked grant is stored as revoked in that profile's database and is not loaded on the next start. The one-time `grants-v1` migration does not copy still-active legacy entries. A routine run holds a lease stored with wall-clock time and renews it while the run is still going, so a run longer than the lease interval is not started a second time. A live lease is not taken again, including by the same process. A crash leaves the lease; after it expires the run may retry once, and a second expiry does not start another run. A lease whose end is further ahead than a fresh lease is treated as expired, so a clock that moved backwards does not skip that retry. Losing a membership, or a change to `profile.toml`, cancels the in-flight turn. Worker audit events are recorded on the supervisor audit log as well as in the profile database.
+
+Upstream reads use a short read and an idle timeout. A peer that keeps sending is not cut off because the whole reply took longer than the socket timeout. A peer that closes with unread data can reset the connection; that is reported as an upstream failure.
+
+### What this boundary is not
+
+Workers run as the same Unix user as the daemon. A process that can `ptrace` that user, or `open()` a file outside the worker's `StateDB` check, can still read another profile's files. The path guard covers databases opened through `StateDB`, and the worker freezes its profile and data root at startup so a later environment change does not point that check at a different profile. Sandboxed tools keep the existing data-root tmpfs masks. `worker-master.key` is on that filename denylist. This is process isolation plus IPC authentication, not Landlock and not a hostile multi-tenant boundary. The worker path check does not by itself stop one worker from reading another's files through a same-user `open()` outside `StateDB`. Landlock remains M4. A Linux user per profile is unscheduled. Per-profile provider keys are M2. The SPA route client is M1d. OIDC is M1e.
+
+Chat, approvals, `model.set`, and `session.drop` still require a membership when accounts are enforced (owner and admin are not limited to memberships). The audit `profile` column is the profile the supervisor authenticated, not a profile the worker claimed.
 
 ## Auditors
 

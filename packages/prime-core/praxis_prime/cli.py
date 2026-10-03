@@ -207,6 +207,10 @@ def _add_runtime_args(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="Run in this process even when a daemon is already running.",
     )
+    parser.add_argument(
+        "--profile",
+        help="Profile id. A running daemon routes the turn to that profile's worker.",
+    )
 
 
 def _chat_command(args: argparse.Namespace) -> int:
@@ -235,6 +239,7 @@ def _chat_command(args: argparse.Namespace) -> int:
                 write=writer,
                 color=color,
                 interactive=sys.stdin.isatty(),
+                profile=getattr(args, "profile", "") or "",
             )
         finally:
             client.close()
@@ -296,6 +301,7 @@ def _ask_command(args: argparse.Namespace) -> int:
                 color=color,
                 decider=decider,
                 session_id=args.session,
+                profile=getattr(args, "profile", "") or "",
             )
         finally:
             client.close()
@@ -335,6 +341,7 @@ def _runtime_from_args(args: argparse.Namespace, approver: object, builder: obje
         config_path=config_path,
         data_path=data_path,
         cwd=Path.cwd(),
+        profile=getattr(args, "profile", None) or None,
     )
 
 

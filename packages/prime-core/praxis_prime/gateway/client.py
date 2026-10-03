@@ -125,8 +125,11 @@ class GatewayClient:
         payload = frame.get("payload")
         return payload if isinstance(payload, dict) else {}
 
-    def set_model(self, spec: str) -> str:
-        frame = self.request("model.set", {"spec": spec})
+    def set_model(self, spec: str, *, profile: str | None = None) -> str:
+        payload: dict[str, object] = {"spec": spec}
+        if profile:
+            payload["profile"] = profile
+        frame = self.request("model.set", payload)
         self._raise_if_error(frame)
         payload = frame.get("payload")
         if isinstance(payload, dict):
@@ -145,6 +148,7 @@ class GatewayClient:
         on_event: EventHandler | None = None,
         decider: Decider | None = None,
         timeout: float | None = None,
+        profile: str | None = None,
     ) -> dict[str, object]:
         """Send one turn and return the result frame.
 
@@ -155,11 +159,14 @@ class GatewayClient:
         frame_id = uuid.uuid4().hex
         box: queue.Queue[dict[str, object]] = queue.Queue(maxsize=1)
         self._waiters[frame_id] = box
+        payload: dict[str, object] = {"text": text}
+        if profile:
+            payload["profile"] = profile
         body: dict[str, object] = {
             "type": "chat.send",
             "id": frame_id,
             "idempotencyKey": uuid.uuid4().hex,
-            "payload": {"text": text},
+            "payload": payload,
         }
         if session_id:
             body["sessionId"] = session_id

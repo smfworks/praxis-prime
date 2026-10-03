@@ -124,6 +124,7 @@ A2UI, OpenGenerativeUI, and MCP Apps iframes are listed under [Not adopting](#no
   - Each per-profile worker watches for pause, role or membership revocation, profile changes, and dial changes, and cancels the running turn.
   - Each routine run holds a lease. A crashed worker's lease expires, and the run is retried once with an audit note.
 - **Milestone:** M1c, plus the scheduler in [ROUTINES.md](ROUTINES.md).
+- **Landed in M1c:** a worker watches membership and `profile.toml` and cancels the running turn; `supervisor.pause` sends `revoke`; a routine lease allows one retry after a crash and then skips. Dial-change watching is not a separate signal beyond the profile file.
 - **Effort [E]:** 2–4 days.
 - **Acceptance criteria:**
   - Revoking a user's access or pausing the agent cancels an in-flight turn within one second. No further tool call starts.
@@ -179,6 +180,7 @@ A2UI, OpenGenerativeUI, and MCP Apps iframes are listed under [Not adopting](#no
   - Responses from workers and sandboxes are scrubbed of any infrastructure secret before they reach the model or the UI.
   - `deployment/computers/LICENSE.openbot` covers the computers directory this pattern cites. It is MIT, © 2026 CopilotKit. See [Credit and licence](#credit-and-licence).
 - **Milestone:** M1c (worker tokens). M4 (sandbox and connector credentials).
+- **Landed in M1c:** worker HMAC credentials, a per-profile generation counter, master-key rotation, and redaction that does not shorten the rest of a worker payload. Sandbox credentials and per-person OAuth stores stay M4 and M2.
 - **Effort [E]:** 1–2 days.
 - **Acceptance criteria:**
   - The master key never appears in a worker's or sandbox's environment.
@@ -236,8 +238,9 @@ A2UI, OpenGenerativeUI, and MCP Apps iframes are listed under [Not adopting](#no
 - **What Praxis Prime will do:**
   - Allowlist the gateway routes the SPA and the channels may call.
   - When an id appears in more than one of the path, the body, and the query, the values must match. A mismatch is rejected.
-  - The gateway today takes `frame.sessionId` or `payload.sessionId` without rejecting a mismatch (`packages/prime-core/praxis_prime/gateway/server.py:592` and `:665`, on `session.drop` and `chat.send`). The owner check still applies, so this is not exploitable today. The allowlist work rejects that mismatch.
+  - The gateway rejects a frame whose `sessionId` disagrees with `payload.sessionId` on `session.drop` and `chat.send`. The SPA client for this allowlist stays M1d.
 - **Milestone:** M1d, with pattern 7. Re-checked in M6 for remote exposure.
+- **Landed with M1c (gateway only):** an unknown HTTP route returns 404, a frame whose `sessionId` disagrees with `payload.sessionId` is rejected, and an approval id that disagrees across the path, the body, and the query is rejected. The SPA client and pattern 7 stay M1d.
 - **Effort [E]:** about 1 day.
 - **Acceptance criteria:**
   - A frame whose `sessionId` disagrees with `payload.sessionId` is rejected.
@@ -251,6 +254,7 @@ A2UI, OpenGenerativeUI, and MCP Apps iframes are listed under [Not adopting](#no
   - Re-check a grant on every tool call, against the account and profile role that holds it.
   - Ship a one-time migration so a restart never restores a revoked grant.
 - **Milestone:** M1c, with pattern 3.
+- **Landed in M1c:** `ApprovalGate.recheck` runs on every later tool call. `grants-v1` runs once per profile database and does not copy still-active legacy rows. A revoked row stays revoked across a new worker process.
 - **Effort [E]:** 1–2 days.
 - **Acceptance criteria:**
   - Revoking a grant stops the next tool call that needed it.
@@ -266,6 +270,7 @@ A2UI, OpenGenerativeUI, and MCP Apps iframes are listed under [Not adopting](#no
   - Refuse redirects (`redirect: 'error'`).
   - This sits with the secret scrubbing in pattern 6.
 - **Milestone:** M1c (worker and connector calls). M4 (sandbox and computer-use calls).
+- **Landed in M1c:** model HTTP streams and the Telegram Bot API refuse redirects, stop at 4 MiB, and stop at a deadline. Sandbox and computer-use calls stay M4.
 - **Effort [E]:** about 1 day.
 - **Acceptance criteria:**
   - A body over 4 MB is refused.
@@ -274,18 +279,18 @@ A2UI, OpenGenerativeUI, and MCP Apps iframes are listed under [Not adopting](#no
 
 ## Per-person agents
 
-Michael wants one agent per individual. OpenDots is single-owner: `identifyUser` always returns the owner (`src/server/platform.ts:63-66`), and every allowlisted Slack user maps to the owner (`src/server/slack-channel.ts:31-43`). The gaps below are on main at `ab66507`.
+Michael wants one agent per individual. OpenDots is single-owner: `identifyUser` always returns the owner (`src/server/platform.ts:63-66`), and every allowlisted Slack user maps to the owner (`src/server/slack-channel.ts:31-43`). The numbered gaps below were the list on main at `ab66507`. M1c closed the worker, credential, lease, Telegram approval routing, and slice items. The rest of the list is still open.
 
-1. No supervisor or per-profile workers. One daemon runs one profile (`packages/prime-core/praxis_prime/gateway/authz.py:297-318`). This is M1 PR 6.
+1. Supervisor and per-profile workers are in the tree (M1c). With no profile directory the daemon still runs one in-process agent. Landlock is not part of this split.
 2. New accounts do not get a personal profile automatically (`packages/prime-core/praxis_prime/accounts/cli.py:126`).
 3. `sees_all_profiles` lets owner and admin chat in, read, and approve on every profile (`packages/prime-core/praxis_prime/gateway/authz.py:136-178`). This needs an audited break-glass mode instead (HIPAA minimum necessary).
 4. `_decide` checks the profile, not the session owner (`packages/prime-core/praxis_prime/gateway/server.py:613-639`), so any operator can approve another member's action. The default should be "requester decides", plus optional dual approval.
 5. Non-approval events reach every member of a shared profile in full (`packages/prime-core/praxis_prime/gateway/server.py:860-878`).
 6. Model config, MCP servers, and `secrets.env` are global (`packages/prime-core/praxis_prime/channels/secrets.py:30-35`, `packages/prime-core/praxis_prime/mcp/cli.py:284-289`). Per-profile `secrets.env.age` is not built.
-7. Telegram has one global owner chat id (`packages/prime-core/praxis_prime/channels/telegram.py:85-131`).
-8. Routines have no run-as account, so there is no membership recheck and nothing is cancelled when access is revoked.
-9. No rlimit, cgroup, quota, or per-profile concurrency cap.
-10. L1 Landlock and L2 per-profile Linux users are not built, and the approval queue is in memory per process.
+7. Telegram approval cards route to the chat bound to that profile and requester. With no bindings, the paired owner chat still receives `default`. Broader channel bindings stay M6.
+8. A routine can record a run-as account (`routine_actors`). The worker rechecks that membership and holds a lease. A revoked membership cancels the turn.
+9. Workers can join `praxis-prime-workers.slice` (`MemoryMax`, `CPUQuota`, `TasksMax`) and cap open files at 256. There is still no per-profile concurrency cap. `RLIMIT_NPROC` is not set.
+10. L1 Landlock and L2 per-profile Linux users are not built. Each worker's approval queue is in that process's memory.
 
 Suggested placement, folded into [Addendum A §8](blueprint-addendum-2026-09.md#8-re-ordered-roadmap-pr-sized-milestones):
 

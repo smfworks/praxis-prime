@@ -18,6 +18,7 @@ from datetime import UTC, datetime
 from praxis_prime.approvals.gate import (
     ApprovalDecision,
     ApprovalRequest,
+    approval_account_id,
     approval_actor,
     approval_session_id,
 )
@@ -39,6 +40,7 @@ class _Item:
     decision: ApprovalDecision | None
     event: threading.Event
     profile_id: str = ""
+    requester: str = ""
 
     def public(self) -> dict[str, object]:
         return {
@@ -52,6 +54,8 @@ class _Item:
             "mount": self.request.mount,
             "sessionId": self.session_id,
             "profileId": self.profile_id,
+            "requester": self.requester,
+            "createdAt": datetime.fromtimestamp(self.created_at, UTC).isoformat(),
             "state": self.state,
             "actor": self.actor,
             "expiresAt": datetime.fromtimestamp(self.expires_at, UTC).isoformat(),
@@ -105,6 +109,7 @@ class ApprovalQueue:
             decision=None,
             event=threading.Event(),
             profile_id=self.profile_id,
+            requester=approval_account_id.get(),
         )
         with self._lock:
             self._items[item.id] = item

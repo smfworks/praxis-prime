@@ -45,6 +45,12 @@ from praxis_prime.gateway.protocol import (
     PROTOCOL_VERSION,
     request_id_var,
 )
+from praxis_prime.gateway.routes import (
+    frame_allowed,
+    frame_session_ids_agree,
+    ids_agree,
+    route_allowed,
+)
 from praxis_prime.gateway.ws import (
     ByteBuffer,
     WebSocketConnection,
@@ -80,6 +86,7 @@ class GatewayServer:
         audit: AuditLog | None = None,
         data_root: Path | None = None,
         bearer_enabled: bool = True,
+        multi_profile: bool = False,
     ) -> None:
         self.host = host
         self._port = port
@@ -92,6 +99,7 @@ class GatewayServer:
         self.audit = audit
         self.data_root = data_root
         self.bearer_enabled = bearer_enabled
+        self.multi_profile = multi_profile
         self.logger = logger
         self.socket_path = socket_path
         self._stopped = threading.Event()
@@ -276,7 +284,9 @@ class GatewayServer:
         extras: list[tuple[str, str]],
         peer: str = "",
     ) -> tuple[int, dict[str, object]]:
-        route = path.split("?", 1)[0]
+        route, _, query = path.partition("?")
+        if not route_allowed(method, route):
+            return 404, _error("not_allowed", "route is not on the allowlist")
         if method == "GET" and route == "/health":
             return 200, {"ok": True, "service": "praxis-primed"}
         if method == "POST" and route == "/v1/auth/login":
@@ -305,6 +315,8 @@ class GatewayServer:
         named = _PROFILE_PATH.fullmatch(route)
         if named is not None:
             profile_name = named.group(1)
+        if self.multi_profile and not profile_name:
+            profile_name = self._implicit_profile()
         action = _http_action(method, route)
         denial = authorize_action(
             self.accounts,
@@ -313,14 +325,20 @@ class GatewayServer:
             profile=profile_name,
             profile_exists=self._profile_exists,
             runtime_profile=self._runtime_profile(),
+            multi_profile=self.multi_profile,
         )
         if not denial.ok:
             return denial.status, _error(denial.code, denial.message)
+        if query and not ids_agree(query=query, keys=("id", "approvalId", "profile", "sessionId")):
+            return 400, _error("bad_request", "id does not match")
         actor_token = actor_account_var.set(principal.account_id)
-        profile_token = profile_var.set(self._runtime_profile())
+        # A single-process daemon stamps its runtime profile. The header is a
+        # routing hint for the supervisor and must not rewrite the audit row.
+        stamped = profile_name if self.multi_profile else ""
+        profile_token = profile_var.set(stamped or self._runtime_profile())
         try:
             return self._authed_http(
-                method, route, headers, body, extras, principal, profile_name
+                method, route, headers, body, extras, principal, profile_name, query
             )
         finally:
             actor_account_var.reset(actor_token)
@@ -335,6 +353,7 @@ class GatewayServer:
         extras: list[tuple[str, str]],
         principal: Principal,
         profile_name: str,
+        query: str = "",
     ) -> tuple[int, dict[str, object]]:
         if self.accounts is not None:
             handled = authed_factor(
@@ -387,6 +406,13 @@ class GatewayServer:
                 return 400, _error("bad_request", "approval body must be JSON")
             if not isinstance(parsed, dict):
                 return 400, _error("bad_request", "approval body must be an object")
+            if not ids_agree(
+                path_id=match.group(1),
+                body=parsed,
+                query=query,
+                keys=("id", "approvalId"),
+            ):
+                return 400, _error("bad_request", "approval id does not match")
             existing = self.approvals.get(match.group(1))
             item_profile = _profile_of(existing)
             target = item_profile or profile_name
@@ -398,6 +424,7 @@ class GatewayServer:
                     profile=target,
                     profile_exists=self._profile_exists,
                     runtime_profile=self._runtime_profile(),
+                    multi_profile=self.multi_profile,
                 )
                 if not scoped.ok:
                     return scoped.status, _error(scoped.code, scoped.message)
@@ -591,7 +618,15 @@ class GatewayServer:
     ) -> None:
         kind = str(frame.get("type", ""))
         frame_id = str(frame.get("id", ""))
+        if not frame_allowed(kind):
+            outgoing.put(_frame_error(frame_id, "unknown_type", f"unknown frame {kind}"))
+            return
+        if not frame_session_ids_agree(frame):
+            outgoing.put(_frame_error(frame_id, "bad_request", "session id does not match"))
+            return
         profile_name = str(_payload(frame).get("profile", "") or "")
+        if self.multi_profile and not profile_name:
+            profile_name = self._implicit_profile()
         denial = authorize_action(
             self.accounts,
             principal,
@@ -599,6 +634,7 @@ class GatewayServer:
             profile=profile_name,
             profile_exists=self._profile_exists,
             runtime_profile=self._runtime_profile(),
+            multi_profile=self.multi_profile,
         )
         if not denial.ok:
             outgoing.put(_frame_error(frame_id, denial.code, denial.message))
@@ -638,9 +674,9 @@ class GatewayServer:
             elif kind == "approvals.decide":
                 self._decide(frame, principal, outgoing)
             elif kind == "chat.send":
-                self._chat(frame, principal, outgoing, key)
+                self._chat(frame, principal, outgoing, key, profile_name)
             elif kind == "model.set":
-                self._model(frame, outgoing)
+                self._model(frame, outgoing, profile_name)
             elif kind == "session.drop":
                 session_id = frame.get("sessionId") or _payload(frame).get("sessionId")
                 try:
@@ -682,6 +718,7 @@ class GatewayServer:
                 profile=target,
                 profile_exists=self._profile_exists,
                 runtime_profile=self._runtime_profile(),
+                multi_profile=self.multi_profile,
             )
             if not scoped.ok:
                 outgoing.put(_frame_error(frame_id, scoped.code, scoped.message))
@@ -707,6 +744,7 @@ class GatewayServer:
         principal: Principal,
         outgoing: queue.Queue[dict[str, object] | None],
         idem: str,
+        profile_name: str = "",
     ) -> None:
         frame_id = str(frame.get("id", ""))
         payload = _payload(frame)
@@ -718,7 +756,8 @@ class GatewayServer:
         session = frame.get("sessionId") or payload.get("sessionId")
         session_id = session if isinstance(session, str) and session else None
         account_id = principal.account_id
-        runtime_profile = self._runtime_profile()
+        routed = profile_name if self.multi_profile else ""
+        runtime_profile = routed or self._runtime_profile()
 
         def work() -> None:
             token = request_id_var.set(frame_id)
@@ -765,11 +804,12 @@ class GatewayServer:
         self,
         frame: dict[str, object],
         outgoing: queue.Queue[dict[str, object] | None],
+        profile_name: str = "",
     ) -> None:
         frame_id = str(frame.get("id", ""))
         spec = str(_payload(frame).get("spec", "")).strip()
         try:
-            chosen = self.agent.set_model(spec)
+            chosen = self.agent.set_model(spec, profile=profile_name)
         except ValueError as exc:
             outgoing.put(_frame_error(frame_id, "bad_request", str(exc)))
             return
@@ -840,9 +880,28 @@ class GatewayServer:
         return False
 
     def _runtime_profile(self) -> str:
+        if self.multi_profile:
+            return ""
         if self.audit is None:
             return ""
         return self.audit.profile
+
+    def _implicit_profile(self) -> str:
+        """The profile a client gets when it does not name one.
+
+        ``default`` wins when it exists, so a migrated single-user install
+        keeps working. Otherwise the only profile is used.
+        """
+        if self.data_root is None:
+            return ""
+        from praxis_prime.profiles.home import list_profiles
+
+        names = list_profiles(self.data_root)
+        if "default" in names:
+            return "default"
+        if len(names) == 1:
+            return names[0]
+        return ""
 
     def _list_profiles(self, principal: Principal) -> dict[str, object]:
         if self.data_root is None:

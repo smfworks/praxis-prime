@@ -125,6 +125,22 @@ def serve(
             file=sys.stderr,
         )
         return 2
+    from praxis_prime.profiles.home import list_profiles
+
+    if list_profiles(root):
+        return _serve_workers(
+            stop=stop,
+            host=host,
+            port=port,
+            token=token,
+            logger=logger,
+            runtime_root=runtime_root,
+            root=root,
+            environ=environ,
+            config_path=config_path,
+            ttl=ttl,
+            telegram_token=telegram_token,
+        )
     try:
         runtime = build_runtime(env=environ, config_path=config_path, approver=queue.authorize)
     except MigrationInProgress as exc:
@@ -234,6 +250,227 @@ def serve(
             accounts.close()
         clear_discovery(environ)
     return 0
+
+
+def _serve_workers(
+    *,
+    stop: threading.Event,
+    host: str,
+    port: int,
+    token: str,
+    logger: JsonLogger,
+    runtime_root: Path,
+    root: Path,
+    environ: Mapping[str, str],
+    config_path: Path | None,
+    ttl: float,
+    telegram_token: str,
+) -> int:
+    """Supervise one worker per profile. This process does not open their databases."""
+    from praxis_prime.audit.log import AuditLog
+    from praxis_prime.decide.engine import build_engine
+    from praxis_prime.policy.engine import PolicyEngine
+    from praxis_prime.router.settings import load_settings
+    from praxis_prime.state import StateDB
+    from praxis_prime.supervisor.routing import RoutingHost, RoutingQueue
+    from praxis_prime.supervisor.supervisor import Supervisor
+
+    settings = load_settings(environ, config_path=config_path)
+    audit_db = StateDB(root / "audit.db")
+    audit = AuditLog(audit_db)
+    accounts = AccountStore(root / "accounts.db")
+    supervisor = Supervisor(
+        data_root=root,
+        runtime_dir=runtime_root,
+        state_dir=state_dir(environ),
+        env=environ,
+        config_path=config_path,
+        accounts=accounts,
+        idle_after=_worker_idle(environ),
+        use_slice=_worker_slice(environ),
+    )
+    queue = RoutingQueue(supervisor)
+    policy = PolicyEngine(settings.dials)
+    agent = RoutingHost(supervisor, policy, settings)
+    adapter = _telegram(environ, agent, queue, logger, telegram_token)
+    if adapter is not None:
+        names = supervisor.profiles()
+        if "default" in names:
+            adapter.default_profile = "default"
+        elif len(names) == 1:
+            adapter.default_profile = names[0]
+    holder: dict[str, object] = {"adapter": adapter}
+
+    def on_event(profile: str, kind: str, body: dict[str, object]) -> None:
+        if kind == "approval":
+            item = body.get("approval")
+            if not isinstance(item, dict):
+                return
+            if item.get("state") == "pending" and queue.on_pending is not None:
+                queue.on_pending(item)
+                return
+            if queue.on_resolved is not None:
+                queue.on_resolved(item)
+            return
+        if kind == "audit":
+            audit.append(
+                session_id=None,
+                kind=str(body.get("kind") or "worker"),
+                summary=str(body.get("summary") or "worker audit"),
+                payload={"profile": profile},
+                profile=profile,
+            )
+            return
+        if kind != "routine":
+            return
+        current = holder.get("adapter")
+        text = body.get("text")
+        if current is not None and isinstance(text, str):
+            current.send_for_profile(profile, text)  # type: ignore[attr-defined]
+
+    supervisor.on_event = on_event
+    socket_path = str(runtime_root / "prime.sock")
+    engine = build_engine(
+        config_path=config_path,
+        data_root=root,
+        audit=audit,
+        dials=settings.dials,
+    )
+    server = GatewayServer(
+        host=host,
+        port=port,
+        token=token,
+        agent=agent,  # type: ignore[arg-type]
+        approvals=queue,  # type: ignore[arg-type]
+        logger=logger,
+        socket_path=socket_path,
+        decider=engine,
+        accounts=accounts,
+        audit=audit,
+        data_root=root,
+        bearer_enabled=bearer_auth_enabled(environ),
+        multi_profile=True,
+    )
+
+    def on_pending(item: dict[str, object]) -> None:
+        server.publish(
+            {
+                "type": "event",
+                "id": request_id_var.get(),
+                "payload": {"kind": "approval", "approval": item},
+            }
+        )
+        if adapter is not None:
+            adapter.notify_pending(item)
+
+    def on_resolved(item: dict[str, object]) -> None:
+        if adapter is not None:
+            adapter.notify_resolved(item)
+        logger.info(
+            "approval_resolved",
+            approval=str(item.get("id", "")),
+            state=str(item.get("state", "")),
+            actor=str(item.get("actor", "")),
+        )
+
+    queue.on_pending = on_pending
+    queue.on_resolved = on_resolved
+
+    def fire(routine_id: str) -> tuple[int, dict[str, object]]:
+        from praxis_prime.audit.log import profile_var
+
+        profile = profile_var.get() or server._implicit_profile()
+        if not profile:
+            return 404, {
+                "ok": False,
+                "error": {"code": "not_found", "message": "a profile is required"},
+            }
+        try:
+            result = supervisor.call(
+                profile,
+                "routine.fire",
+                {"routineId": routine_id},
+                timeout=3600,
+            )
+        except Exception:
+            logger.warning("routine_fire_failed")
+            return 500, {"ok": False, "error": {"code": "error", "message": "routine failed"}}
+        status = result.get("status")
+        payload = result.get("payload")
+        code = int(status) if isinstance(status, int) else 500
+        body = payload if isinstance(payload, dict) else {"ok": False}
+        return code, body
+
+    server.routine_fire = fire
+    from praxis_prime.supervisor.migrate import MigrationError
+
+    try:
+        supervisor.start()
+        server.start()
+    except MigrationError as exc:
+        logger.error("migration_failed", error=type(exc).__name__)
+        print(f"praxis-primed: {exc}", file=sys.stderr)
+        supervisor.close()
+        accounts.close()
+        audit.close()
+        audit_db.close()
+        return 1
+    except OSError as exc:
+        logger.error("bind_failed", error=type(exc).__name__)
+        print(f"praxis-primed: {exc}", file=sys.stderr)
+        supervisor.close()
+        accounts.close()
+        audit.close()
+        audit_db.close()
+        return 1
+    started = datetime.now(UTC).isoformat(timespec="seconds")
+    write_discovery(
+        env=environ,
+        pid=os.getpid(),
+        port=server.bound_port,
+        socket_path=server.socket_path,
+        version=__version__,
+        started_at=started,
+    )
+    logger.info("listen", host="127.0.0.1", port=server.bound_port)
+    logger.info("workers_ready", profiles=len(supervisor.profiles()))
+    if adapter is not None:
+        adapter.start()
+    else:
+        logger.info("telegram_disabled")
+    try:
+        while not stop.wait(0.5):
+            pass
+    finally:
+        logger.info("shutdown")
+        queue.deny_all(actor="shutdown")
+        if adapter is not None:
+            adapter.stop()
+        agent.close()
+        server.shutdown()
+        accounts.close()
+        audit.close()
+        audit_db.close()
+        clear_discovery(environ)
+    del ttl
+    return 0
+
+
+def _worker_slice(env: Mapping[str, str]) -> bool:
+    return env.get("PRAXIS_PRIME_WORKER_SLICE", "").strip().lower() in {"1", "on", "true"}
+
+
+def _worker_idle(env: Mapping[str, str]) -> float:
+    raw = env.get("PRAXIS_PRIME_WORKER_IDLE", "")
+    if not raw:
+        return 900.0
+    try:
+        value = float(raw)
+    except ValueError:
+        return 900.0
+    if value <= 0:
+        return 900.0
+    return value
 
 
 def start_detached() -> int:
