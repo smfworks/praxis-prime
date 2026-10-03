@@ -745,12 +745,12 @@ def private_data_command(command: str, workspace: Path) -> bool:
     ``account_data_present`` considers is checked, so
     ``--data-dir`` does not leave the default XDG tree off the denylist.
 
-    The walk only sees paths it can parse. It does not refuse every
-    hard-link read before bubblewrap runs. A command that never names the
-    data directory can still be launched, and a hard link planted outside
-    that directory is still readable inside the sandbox. ``pushd`` and
-    ``popd`` are not tracked. The tmpfs hides each data-directory path on a
-    bind. It does not hide those links. Without bubblewrap, host shell is
+    The walk only sees paths it can parse. A command that never names the
+    data directory can still be launched. Bubblewrap then covers a regular
+    file whose inode is account data and whose link count is greater than
+    one with ``/dev/null``, and refuses the launch when that scan cannot
+    finish. ``pushd`` and ``popd`` are not tracked. The tmpfs hides each
+    data-directory path on a bind. Without bubblewrap, host shell is
     refused outright once account data exists.
     """
     roots = _account_data_roots()

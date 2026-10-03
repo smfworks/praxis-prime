@@ -22,6 +22,7 @@ import contextvars
 import os
 import shutil
 import signal
+import stat
 import subprocess
 import threading
 from collections.abc import Callable, Mapping
@@ -227,9 +228,158 @@ def build_bwrap_argv(
         resolved = _bind_source(source)
         argv.extend(["--ro-bind", str(resolved), dest])
         mounts.append((resolved, dest))
-    argv.extend(_data_dir_mask(mounts))
+    mask = _data_dir_mask(mounts)
+    argv.extend(mask)
+    argv.extend(hardlink_cover_argv(mounts, _tmpfs_targets(mask)))
     argv.extend(["--", "bash", "--noprofile", "--norc", "-c", command])
     return argv
+
+
+_HARDLINK_SCAN_CAP = 20_000
+_SYSTEM_ROOTS = ("/usr", "/bin", "/lib", "/lib64", "/etc", "/proc", "/dev", "/opt", "/sys")
+
+
+def _tmpfs_targets(argv: list[str]) -> list[str]:
+    found: list[str] = []
+    index = 0
+    while index < len(argv) - 1:
+        if argv[index] == "--tmpfs":
+            found.append(argv[index + 1])
+            index += 2
+            continue
+        index += 1
+    return found
+
+
+def hardlink_cover_argv(
+    mounts: list[tuple[Path, str]],
+    masked: list[str],
+    exposed: list[str] | None = None,
+) -> list[str]:
+    """Cover private hard links inside ``mounts`` with ``/dev/null``.
+
+    A regular file whose inode is account data and whose ``nlink`` is
+    greater than one is hidden. System directories are not walked. A
+    path under a data-root tmpfs is already hidden, except a worktree
+    that was bound again on top of that tmpfs (``exposed``). The walk
+    refuses to launch when it cannot finish or passes the scan cap.
+    """
+    from praxis_prime.policy.boundary import _account_data_roots, _cached_private_inodes
+
+    roots = _account_data_roots()
+    if not roots:
+        raise SandboxError("refusing to launch; account data could not be classified")
+    secret: set[tuple[int, int]] = set()
+    for root in roots:
+        inodes, problem = _cached_private_inodes(root)
+        if problem:
+            raise SandboxError("refusing to launch; the account-data scan did not finish")
+        secret.update(inodes)
+    if not secret:
+        return []
+    visible = list(exposed or [])
+    argv: list[str] = []
+    scanned = 0
+    for src, dest in mounts:
+        if _skip_hardlink_scan(src):
+            continue
+        try:
+            root = Path(os.path.realpath(src, strict=False))
+        except OSError as exc:
+            raise SandboxError("refusing to launch; a mount could not be scanned") from exc
+        kind = _scan_kind(root)
+        if kind == "missing":
+            continue
+        if kind == "file":
+            scanned = _note_scan(scanned)
+            covered = _cover_one(root, dest, secret, masked, visible)
+            if covered:
+                argv.extend(covered)
+            continue
+        if kind != "dir":
+            raise SandboxError("refusing to launch; a mount could not be scanned")
+        for dirpath, _dirnames, filenames in os.walk(root, followlinks=False):
+            for name in filenames:
+                scanned = _note_scan(scanned)
+                host = Path(dirpath) / name
+                try:
+                    info = os.lstat(host)
+                except OSError as exc:
+                    raise SandboxError(
+                        "refusing to launch; a mount could not be scanned"
+                    ) from exc
+                if not stat.S_ISREG(info.st_mode) or info.st_nlink <= 1:
+                    continue
+                if (info.st_dev, info.st_ino) not in secret:
+                    continue
+                relative = os.path.relpath(host, root)
+                sandbox = str(Path(dest) / relative)
+                if _under_mask(sandbox, masked, visible):
+                    continue
+                argv.extend(["--ro-bind", "/dev/null", sandbox])
+    return argv
+
+
+def _scan_kind(path: Path) -> str:
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return "missing"
+    except OSError as exc:
+        raise SandboxError("refusing to launch; a mount could not be scanned") from exc
+    if stat.S_ISREG(info.st_mode):
+        return "file"
+    if stat.S_ISDIR(info.st_mode):
+        return "dir"
+    return "other"
+
+
+def _note_scan(scanned: int) -> int:
+    scanned += 1
+    if scanned > _HARDLINK_SCAN_CAP:
+        raise SandboxError("refusing to launch; too many files to check for hard links")
+    return scanned
+
+
+def _cover_one(
+    host: Path,
+    dest: str,
+    secret: set[tuple[int, int]],
+    masked: list[str],
+    exposed: list[str],
+) -> list[str]:
+    try:
+        info = os.lstat(host)
+    except OSError as exc:
+        raise SandboxError("refusing to launch; a mount could not be scanned") from exc
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink <= 1:
+        return []
+    if (info.st_dev, info.st_ino) not in secret:
+        return []
+    if _under_mask(dest, masked, exposed):
+        return []
+    return ["--ro-bind", "/dev/null", dest]
+
+
+def _skip_hardlink_scan(src: Path) -> bool:
+    try:
+        text = os.path.realpath(src, strict=False)
+    except OSError:
+        return True
+    return text in _SYSTEM_ROOTS or any(text.startswith(root + "/") for root in _SYSTEM_ROOTS)
+
+
+def _under_mask(sandbox: str, masked: list[str], exposed: list[str]) -> bool:
+    if any(_path_under(sandbox, root) for root in exposed):
+        return False
+    return any(_path_under(sandbox, root) for root in masked)
+
+
+def _path_under(path: str, root: str) -> bool:
+    if not root:
+        return False
+    prefix = root.rstrip("/")
+    return path == prefix or path.startswith(prefix + "/")
 
 
 def _data_dir_mask(mounts: list[tuple[Path, str]]) -> list[str]:
@@ -237,9 +387,10 @@ def _data_dir_mask(mounts: list[tuple[Path, str]]) -> list[str]:
 
     A later ``--tmpfs`` covers that directory path inside the sandbox.
     Containment of the directory is by real path and by ``(st_dev, st_ino)``,
-    so a bind-mount alias of a parent is masked too. A hard link of a file
-    from that directory, planted outside the mount, is not covered, and the
-    command walk does not refuse every such read before bubblewrap runs.
+    so a bind-mount alias of a parent is masked too. A hard link of a
+    private file planted outside that directory is covered with a
+    ``/dev/null`` bind when its inode is known and ``nlink`` is greater
+    than one. A scan that stops early refuses the launch.
     A bind that sits inside a data directory is refused. ``pushd`` and
     ``popd`` are not tracked. Every root ``account_data_present`` considers
     is masked,

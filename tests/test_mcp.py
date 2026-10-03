@@ -721,26 +721,27 @@ def test_mcp_write_scope_cannot_expose_account_data(
     (tmp_path / "scratch").mkdir()
     client = McpClient(spec, cwd=project, gate=_Gate(), main_checkout=project)
     assert _stdio_write(client) == (None, False)
-    proc = popen_stdio(
-        sys.executable,
-        ("-c", "pass"),
-        cwd=project,
-        allow=(),
-        explicit={},
-        parent={"PATH": "/usr/bin:/bin"},
-        sandbox="off",
-        network="off",
-        write_scope=tmp_path / "scratch",
-        write_approved=True,
-        main_checkout=project,
-        audit=_Audit(),
-        server="notes",
-    )
-    proc.wait(timeout=30)
+    with pytest.raises(RuntimeError, match="account data"):
+        popen_stdio(
+            sys.executable,
+            ("-c", "pass"),
+            cwd=project,
+            allow=(),
+            explicit={},
+            parent={"PATH": "/usr/bin:/bin"},
+            sandbox="off",
+            network="off",
+            write_scope=tmp_path / "scratch",
+            write_approved=True,
+            main_checkout=project,
+            audit=_Audit(),
+            server="notes",
+        )
     assert events[0]["kind"] == "mcp_mount"
     payload = events[0]["payload"]
     assert isinstance(payload, dict)
     assert payload["mount"] == "host"
+    assert payload["decision"] == "deny"
     assert payload["write_scope"] == ""
     if bwrap_available():
         wrapped = ServerSpec(
@@ -757,25 +758,27 @@ def test_mcp_write_scope_cannot_expose_account_data(
         assert scope == data.resolve()
     monkeypatch.setattr("praxis_prime.mcp.sandbox.bwrap_available", lambda: False)
     monkeypatch.setattr("praxis_prime.mcp.client.bwrap_available", lambda: False)
-    missing = popen_stdio(
-        sys.executable,
-        ("-c", "pass"),
-        cwd=project,
-        allow=(),
-        explicit={},
-        parent={"PATH": "/usr/bin:/bin"},
-        sandbox="bwrap",
-        network="off",
-        write_scope=data,
-        write_approved=True,
-        main_checkout=project,
-        audit=_Audit(),
-        server="notes",
-    )
-    missing.wait(timeout=30)
+    with pytest.raises(RuntimeError, match="account data"):
+        popen_stdio(
+            sys.executable,
+            ("-c", "pass"),
+            cwd=project,
+            allow=(),
+            explicit={},
+            parent={"PATH": "/usr/bin:/bin"},
+            sandbox="bwrap",
+            network="off",
+            write_scope=data,
+            write_approved=True,
+            main_checkout=project,
+            audit=_Audit(),
+            server="notes",
+            host_approved=True,
+        )
     missing_payload = events[1]["payload"]
     assert isinstance(missing_payload, dict)
     assert missing_payload["mount"] == "host"
+    assert missing_payload["decision"] == "deny"
     if not bwrap_available():
         return
     script = tmp_path / "s.py"

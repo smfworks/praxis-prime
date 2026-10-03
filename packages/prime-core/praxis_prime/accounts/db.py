@@ -126,6 +126,7 @@ class AccountStore:
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA foreign_keys=ON")
+        self.conn.execute("PRAGMA busy_timeout=5000")
         self._lock = threading.Lock()
         self._login_slots = threading.BoundedSemaphore(LOGIN_CONCURRENCY)
         self._name_locks: dict[str, _NameLock] = {}

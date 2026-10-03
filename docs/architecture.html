@@ -1010,7 +1010,7 @@ footer{color:var(--muted);font-size:.8rem;margin-top:4rem}
 </tbody>
 </table></div>
 <ul>
-<li><strong>No vendor sandbox.</strong> NVIDIA OpenShell and other NVIDIA security containers are not used; isolation is Praxis Prime's own local sandbox: the tiers in this table. T1 bubblewrap is what the code runs today, including the account-data tmpfs mask and the shell denylist. The mask does not hide a hard link planted outside the data folder, and the denylist does not catch every such read (<a href="SECURITY.md#shell-and-the-data-directory">Shell and the data directory</a>, <a href="https://github.com/smfworks/praxis-prime/issues/42">#42</a>, <a href="https://github.com/smfworks/praxis-prime/issues/44">#44</a>). See Addendum A §3.</li>
+<li><strong>No vendor sandbox.</strong> NVIDIA OpenShell and other NVIDIA security containers are not used; isolation is Praxis Prime's own local sandbox: the tiers in this table. T1 bubblewrap is what the code runs today, including the account-data tmpfs mask and the shell denylist. A hard link of a private file planted outside the data folder is covered with a <code>/dev/null</code> bind, and a scan that cannot finish refuses the launch (<a href="SECURITY.md#shell-and-the-data-directory">Shell and the data directory</a>). See Addendum A §3.</li>
 <li><strong>Network</strong> is off by default inside T1 and T2 (as in Codex). Per-task host allowlists go through a local egress proxy that logs every host. Policy hook H3 decides.</li>
 <li><strong>Secrets:</strong>
 <ul>

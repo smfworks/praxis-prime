@@ -10,6 +10,8 @@ through exponential backoff before the next start.
 
 from __future__ import annotations
 
+import fcntl
+import hashlib
 import os
 import secrets
 import shutil
@@ -39,10 +41,14 @@ from praxis_prime.supervisor.ipc import (
     send_message,
 )
 from praxis_prime.supervisor.redact import redact_value
+from praxis_prime.supervisor.socketdir import ensure_private_dir
 
 Clock = Callable[[], float]
 # Linux sun_path is 108 bytes including the NUL. Stay under that.
 _SOCKET_PATH_MAX = 100
+# A directory younger than this is still starting. The sweep leaves it.
+_SOCKET_DIR_MIN_AGE = 5.0
+_SWEEP_LOCK_NAME = "praxis-prime-socks.lock"
 _DROPPED_ENV = frozenset(
     {
         "PRAXIS_PRIME_WORKER_MASTER",
@@ -105,6 +111,7 @@ class Supervisor:
     _pipe_write: int = field(default=-1, repr=False)
     _supervisor_token: str = field(default="", repr=False)
     _supervisor_start: str = field(default="", repr=False)
+    _sweep_lock: int = field(default=-1, repr=False)
 
     def __post_init__(self) -> None:
         self.data_root = Path(self.data_root)
@@ -140,19 +147,22 @@ class Supervisor:
         with self._lock:
             self._migrated = migrate.migrate_install(self.data_root) or self._migrated
             self._socket_directory()
-            for name in self.profiles():
-                try:
-                    self._reserve_socket(name)
-                except OSError:
-                    continue
-            if self._control is None:
-                self._control = _bind_unix(self.control_path)
-                self._control_thread = threading.Thread(
-                    target=self._accept_control,
-                    name="praxis-supervisor",
-                    daemon=True,
-                )
-                self._control_thread.start()
+            try:
+                for name in self.profiles():
+                    try:
+                        self._reserve_socket(name)
+                    except OSError:
+                        continue
+                if self._control is None:
+                    self._control = _bind_unix(self.control_path)
+                    self._control_thread = threading.Thread(
+                        target=self._accept_control,
+                        name="praxis-supervisor",
+                        daemon=True,
+                    )
+                    self._control_thread.start()
+            finally:
+                self._unlock_sweep()
             if self._thread is None:
                 self._stop.clear()
                 self._thread = threading.Thread(
@@ -182,12 +192,14 @@ class Supervisor:
         if directory is not None and directory != self.runtime_dir:
             shutil.rmtree(directory, ignore_errors=True)
         elif directory is not None:
-            for name in self.profiles():
-                (directory / f"{self._sock_tag}-{name}.sock").unlink(missing_ok=True)
+            for name in ("supervisor", *self.profiles()):
+                basename = _socket_basename(directory, self._sock_tag, name)
+                (directory / basename).unlink(missing_ok=True)
         try:
             (self.runtime_dir / "socket-dir").unlink(missing_ok=True)
         except OSError:
             pass
+        self._unlock_sweep()
 
     def profiles(self) -> list[str]:
         return list_profiles(self.data_root)
@@ -250,7 +262,7 @@ class Supervisor:
         for name in names:
             self.stop(name, reason="rotated")
 
-    def ensure(self, profile: str) -> WorkerSlot:
+    def ensure(self, profile: str, *, activity: bool = True) -> WorkerSlot:
         checked = _require_profile(profile)
         if checked not in self.profiles():
             raise WorkerUnavailable(f"no profile {checked}")
@@ -272,7 +284,7 @@ class Supervisor:
             elif slot is not None and slot.state == "backoff" and slot.next_start > now:
                 raise WorkerUnavailable("worker restart is backing off")
             else:
-                slot = self._spawn_unlocked(checked)
+                slot = self._spawn_unlocked(checked, activity=activity)
                 owner = True
         assert slot is not None
         if owner:
@@ -306,8 +318,9 @@ class Supervisor:
             "events.pull",
         }:
             raise IpcError("method is not allowed")
-        slot = self.ensure(profile)
-        if method != "health":
+        counts = method not in {"health", "session.owner"}
+        slot = self.ensure(profile, activity=counts)
+        if counts:
             slot.last_used = self.clock()
         result = self._rpc(slot, method, dict(params or {}), timeout=timeout)
         return _as_dict(redact_value(result, self._secret_strings()))
@@ -433,7 +446,7 @@ class Supervisor:
             values.extend(slot.credential for slot in self._slots.values())
         return values
 
-    def _spawn_unlocked(self, profile: str) -> WorkerSlot:
+    def _spawn_unlocked(self, profile: str, *, activity: bool = True) -> WorkerSlot:
         """Start the process. The caller holds ``_lock`` and waits outside it."""
         try:
             generation = credentials.generation_for(self.generation_path, profile)
@@ -453,7 +466,8 @@ class Supervisor:
         slot.credential = token
         slot.socket_path = self._socket_file(profile)
         slot.wanted = True
-        slot.last_used = self.clock()
+        # A session-owner lookup must not keep an otherwise idle worker up.
+        slot.last_used = self.clock() if activity else self.clock() - self.idle_after
         if slot.socket_path.exists():
             slot.socket_path.unlink(missing_ok=True)
         log_path = self.state_dir / f"worker-{profile}.log"
@@ -770,12 +784,26 @@ class Supervisor:
     def _socket_directory(self) -> Path:
         if self._socket_dir is not None:
             return self._socket_dir
+        # Hold the sweep lock until the supervisor socket is bound. Another
+        # start blocks in the sweep instead of deleting this directory.
+        if self._sweep_lock < 0:
+            self._sweep_lock = _lock_socket_sweep()
         previous = _pointer_target(self.runtime_dir)
         chosen = self._choose_socket_directory()
         self._socket_dir = chosen
-        _sweep_stale_socket_dirs(chosen, previous)
+        _sweep_stale_socket_dirs(chosen, previous, holding_lock=True)
         _remember_socket_dir(self.runtime_dir, chosen)
         return chosen
+
+    def _unlock_sweep(self) -> None:
+        fd = self._sweep_lock
+        self._sweep_lock = -1
+        if fd < 0:
+            return
+        try:
+            os.close(fd)
+        except OSError:
+            pass
 
     def _choose_socket_directory(self) -> Path:
         """Pick a directory where the sockets we will bind actually fit.
@@ -794,6 +822,7 @@ class Supervisor:
             return self.runtime_dir
         fallback = Path(tempfile.mkdtemp(prefix="praxis-prime-socks-"))
         os.chmod(fallback, 0o700)
+        ensure_private_dir(fallback)
         if _names_fit(fallback, tag, considered):
             return fallback
         if _names_fit(self.runtime_dir, tag, required):
@@ -817,7 +846,8 @@ class Supervisor:
             setattr(self, name, -1)
 
     def _socket_file(self, name: str) -> Path:
-        return self._socket_directory() / f"{self._sock_tag}-{name}.sock"
+        directory = self._socket_directory()
+        return directory / _socket_basename(directory, self._sock_tag, name)
 
 
 def _require_profile(profile: str) -> str:
@@ -854,9 +884,9 @@ def _open_log(path: Path):
 
 
 def _bind_unix(path: Path) -> socket.socket:
+    ensure_private_dir(path.parent)
     if path.exists():
         path.unlink()
-    path.parent.mkdir(parents=True, exist_ok=True)
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
         sock.bind(str(path))
@@ -881,14 +911,29 @@ def _process_start(pid: int) -> str | None:
         return None
 
 
+def _socket_basename(directory: Path, tag: str, name: str) -> str:
+    """Socket file name. A long profile id is hashed so it fits in ``sun_path``.
+
+    The supervisor socket keeps the ``-supervisor.sock`` suffix. The stale
+    sweep recognizes a live directory by that name.
+    """
+    plain = f"{tag}-{name}.sock"
+    if name == "supervisor" or _encoded_len(directory / plain) <= _SOCKET_PATH_MAX:
+        return plain
+    digest = hashlib.sha256(name.encode("utf-8")).hexdigest()[:16]
+    return f"{tag}-{digest}.sock"
+
+
+def _encoded_len(path: Path) -> int:
+    try:
+        return len(os.fsencode(path))
+    except OSError:
+        return _SOCKET_PATH_MAX + 1
+
+
 def _names_fit(directory: Path, tag: str, names: list[str]) -> bool:
     for name in names:
-        path = directory / f"{tag}-{name}.sock"
-        try:
-            encoded = os.fsencode(path)
-        except OSError:
-            return False
-        if len(encoded) > _SOCKET_PATH_MAX:
+        if _encoded_len(directory / _socket_basename(directory, tag, name)) > _SOCKET_PATH_MAX:
             return False
     return True
 
@@ -920,8 +965,48 @@ def _remember_socket_dir(runtime_dir: Path, chosen: Path) -> None:
     os.chmod(pointer, 0o600)
 
 
-def _sweep_stale_socket_dirs(current: Path, previous: Path | None) -> None:
-    """Remove private socket directories whose supervisor socket is not listening."""
+def _lock_socket_sweep() -> int:
+    """Exclusive lock held from directory creation until the supervisor socket binds."""
+    path = Path(tempfile.gettempdir()) / _SWEEP_LOCK_NAME
+    flags = os.O_CREAT | os.O_RDWR
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(path, flags, 0o600)
+    try:
+        os.chmod(path, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+    except Exception:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _sweep_stale_socket_dirs(
+    current: Path,
+    previous: Path | None,
+    *,
+    holding_lock: bool = False,
+) -> None:
+    """Remove private socket directories whose supervisor socket is not listening.
+
+    The caller that is still creating its directory holds ``holding_lock``.
+    A sweep that cannot take the lock returns without deleting anything.
+    A directory younger than ``_SOCKET_DIR_MIN_AGE`` is left alone.
+    """
+    fd = -1
+    if not holding_lock:
+        try:
+            fd = _lock_socket_sweep()
+        except OSError:
+            return
+    try:
+        _sweep_locked(current, previous)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+
+
+def _sweep_locked(current: Path, previous: Path | None) -> None:
     temp = Path(tempfile.gettempdir())
     candidates: list[Path] = []
     try:
@@ -945,9 +1030,19 @@ def _sweep_stale_socket_dirs(current: Path, previous: Path | None) -> None:
             continue
         if not _owned_private_dir(entry, temp):
             continue
+        if _directory_is_young(entry):
+            continue
         if _supervisor_socket_accepts(entry):
             continue
         shutil.rmtree(entry, ignore_errors=True)
+
+
+def _directory_is_young(entry: Path) -> bool:
+    try:
+        info = entry.lstat()
+    except OSError:
+        return True
+    return time.time() - info.st_mtime < _SOCKET_DIR_MIN_AGE
 
 
 def _same_dir(left: Path, right: Path) -> bool:

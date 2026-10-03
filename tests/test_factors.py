@@ -161,6 +161,7 @@ def test_daemon_enrolls_and_signs_in_with_passkey_and_totp(tmp_path: Path):
         assert isinstance(options, dict)
         device = SoftPasskey()
         registered = device.register(options, origin=origin)
+        verify_step = _step_up(server.bound_port, cookie, csrf, _PASSWORD)
         status, _headers, created = _request(
             server.bound_port,
             "POST",
@@ -168,7 +169,7 @@ def test_daemon_enrolls_and_signs_in_with_passkey_and_totp(tmp_path: Path):
             cookie=cookie,
             csrf=csrf,
             origin=origin,
-            body_json={"credential": registered, "name": "laptop", "stepUpToken": step},
+            body_json={"credential": registered, "name": "laptop", "stepUpToken": verify_step},
         )
         assert status == 200
         assert created["passkey"]["name"] == "laptop"
@@ -443,6 +444,7 @@ def test_step_up_origin_mfa_token_and_challenge_cap(tmp_path: Path):
         assert "required" in json.dumps(options)
         bare = SoftPasskey()
         refused = bare.register(options, origin=origin, verified=False)
+        refused_step = _step_up(port, cookie, csrf, _PASSWORD)
         status, _headers, _body = _request(
             port,
             "POST",
@@ -450,9 +452,10 @@ def test_step_up_origin_mfa_token_and_challenge_cap(tmp_path: Path):
             cookie=cookie,
             csrf=csrf,
             origin=origin,
-            body_json={"credential": refused, "stepUpToken": step},
+            body_json={"credential": refused, "stepUpToken": refused_step},
         )
         assert status == 401
+        again = _step_up(port, cookie, csrf, _PASSWORD)
         status, _headers, options_body = _request(
             port,
             "POST",
@@ -460,7 +463,7 @@ def test_step_up_origin_mfa_token_and_challenge_cap(tmp_path: Path):
             cookie=cookie,
             csrf=csrf,
             origin=origin,
-            body_json={"stepUpToken": step},
+            body_json={"stepUpToken": again},
         )
         assert status == 200
         options = options_body["options"]
@@ -468,6 +471,7 @@ def test_step_up_origin_mfa_token_and_challenge_cap(tmp_path: Path):
 
         device = SoftPasskey()
         created = device.register(options, origin=origin)
+        verify_step = _step_up(port, cookie, csrf, _PASSWORD)
         status, _headers, _body = _request(
             port,
             "POST",
@@ -475,7 +479,7 @@ def test_step_up_origin_mfa_token_and_challenge_cap(tmp_path: Path):
             cookie=cookie,
             csrf=csrf,
             origin=origin,
-            body_json={"credential": created, "name": "laptop", "stepUpToken": step},
+            body_json={"credential": created, "name": "laptop", "stepUpToken": verify_step},
         )
         assert status == 200
 
@@ -588,7 +592,7 @@ def test_step_up_origin_mfa_token_and_challenge_cap(tmp_path: Path):
         assert status == 200
         assert signed["account"]["username"] == "ada"
 
-        fresh = _step_up(port, cookie, csrf, _PASSWORD)
+        options_token = _step_up(port, cookie, csrf, _PASSWORD)
         status, _headers, step_options = _request(
             port,
             "POST",
@@ -611,7 +615,7 @@ def test_step_up_origin_mfa_token_and_challenge_cap(tmp_path: Path):
             body_json={"credential": proof},
         )
         assert status == 200
-        assert minted["stepUpToken"] != fresh
+        assert minted["stepUpToken"] != options_token
         status, _headers, second_options = _request(
             port,
             "POST",
@@ -619,11 +623,12 @@ def test_step_up_origin_mfa_token_and_challenge_cap(tmp_path: Path):
             cookie=cookie,
             csrf=csrf,
             origin=origin,
-            body_json={"stepUpToken": fresh},
+            body_json={"stepUpToken": options_token},
         )
         assert status == 200
         other_device = SoftPasskey()
         other_created = other_device.register(second_options["options"], origin=origin)
+        verify_token = _step_up(port, cookie, csrf, _PASSWORD)
         status, _headers, _body = _request(
             port,
             "POST",
@@ -634,7 +639,7 @@ def test_step_up_origin_mfa_token_and_challenge_cap(tmp_path: Path):
             body_json={
                 "credential": other_created,
                 "name": "backup",
-                "stepUpToken": fresh,
+                "stepUpToken": verify_token,
             },
         )
         assert status == 200
@@ -826,6 +831,7 @@ def test_http_disable_requires_step_up_and_sign_in_challenges_are_sealed(tmp_pat
         assert status == 200
         device = SoftPasskey()
         created = device.register(options_body["options"], origin=origin)
+        verify_step = _step_up(port, cookie, csrf, _PASSWORD)
         status, _headers, _body = _request(
             port,
             "POST",
@@ -833,7 +839,7 @@ def test_http_disable_requires_step_up_and_sign_in_challenges_are_sealed(tmp_pat
             cookie=cookie,
             csrf=csrf,
             origin=origin,
-            body_json={"credential": created, "name": "laptop", "stepUpToken": step},
+            body_json={"credential": created, "name": "laptop", "stepUpToken": verify_step},
         )
         assert status == 200
 

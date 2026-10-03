@@ -10,6 +10,7 @@ import time
 from collections.abc import Collection
 
 from praxis_prime import __version__
+from praxis_prime.accounts.roles import sees_all_profiles
 from praxis_prime.approvals.gate import ApprovalDecision
 from praxis_prime.host import TurnResult
 from praxis_prime.policy.engine import PolicyEngine
@@ -91,7 +92,7 @@ class RoutingHost:
     def drop_session(self, session_id: str | None, *, account_id: str = "") -> None:
         if not session_id:
             return
-        owner = self.session_owner(session_id)
+        owner = self.session_owner(session_id, account_id=account_id)
         if owner is None:
             raise LookupError(f"no session {session_id}")
         found_account, found_profile = owner
@@ -103,14 +104,19 @@ class RoutingHost:
             {"sessionId": session_id, "account": account_id},
         )
 
-    def session_owner(self, session_id: str) -> tuple[str, str] | None:
+    def session_owner(self, session_id: str, *, account_id: str = "") -> tuple[str, str] | None:
         """Account and profile for ``session_id``.
 
         Running workers are asked first. Idle profiles are started only
-        when none of those workers has the session.
+        when none of those workers has the session, and only among the
+        profiles ``account_id`` may use. Owner lookups do not refresh the
+        idle timer.
         """
+        allowed = self._lookup_profiles(account_id)
         asked: set[str] = set()
         for profile in self.supervisor.running():
+            if allowed is not None and profile not in allowed:
+                continue
             asked.add(profile)
             found = self._owner_on(profile, session_id)
             if found is not None:
@@ -118,10 +124,30 @@ class RoutingHost:
         for profile in self.supervisor.profiles():
             if profile in asked:
                 continue
+            if allowed is not None and profile not in allowed:
+                continue
             found = self._owner_on(profile, session_id)
             if found is not None:
                 return found
         return None
+
+    def _lookup_profiles(self, account_id: str) -> set[str] | None:
+        """Profiles this caller may wake. ``None`` means every profile.
+
+        With no account store, or before any account exists, the local
+        operator can still see every profile. An owner or admin can too.
+        Any other account is limited to its memberships.
+        """
+        store = self.supervisor.accounts
+        if not account_id or store is None or not store.has_accounts():
+            return None
+        assert store is not None
+        account = store.get_id(account_id)
+        if account is None:
+            return set()
+        if sees_all_profiles(account.role):
+            return None
+        return set(store.profile_ids_for(account_id))
 
     def _owner_on(self, profile: str, session_id: str) -> tuple[str, str] | None:
         try:

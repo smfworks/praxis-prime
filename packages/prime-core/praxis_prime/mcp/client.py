@@ -265,6 +265,7 @@ def _open_transport(client: McpClient) -> StdioTransport | HttpTransport:
             main_checkout=client.main_checkout,
             audit=client.audit,
             server=spec.name,
+            host_approved=_host_launch_approved(client),
         )
         return StdioTransport(proc, timeout=client.timeout)
     headers = resolve_headers(spec.headers, spec.token_env, client.parent_env)
@@ -280,7 +281,7 @@ def _stdio_write(client: McpClient) -> tuple[Path | None, bool]:
     account-data root are not asked: they cannot be a write scope. Any other
     directory is mounted read-write only after the approval gate allows it.
     When the sandbox is off or bubblewrap is missing, nothing is mounted, so
-    the gate is not asked.
+    a write scope is not asked. The host start is a separate approval.
     """
     if client.spec.sandbox == "off" or not bwrap_available():
         return None, False
@@ -321,6 +322,38 @@ def _stdio_write(client: McpClient) -> tuple[Path | None, bool]:
     )
     approved = decision in {ApprovalDecision.ALLOW_ONCE, ApprovalDecision.ALLOW_SESSION}
     return resolved, approved
+
+
+def _host_launch_approved(client: McpClient) -> bool:
+    """True when this stdio server may start on the host.
+
+    Account data fails closed inside ``popen_stdio`` and is not asked.
+    A fresh install asks once per launch. No gate means no host start.
+    """
+    if client.spec.transport != "stdio":
+        return False
+    if client.spec.sandbox != "off" and bwrap_available():
+        return False
+    from praxis_prime.policy.boundary import account_data_present
+
+    if account_data_present():
+        return False
+    gate = client.gate
+    if gate is None or not hasattr(gate, "authorize"):
+        return False
+    decision = gate.authorize(
+        ApprovalRequest(
+            tool=f"mcp:{client.spec.name}",
+            risk=Risk.DESTRUCTIVE,
+            reason="MCP server would run on the host",
+            summary=f"host start {client.spec.name}",
+            arguments={"server": client.spec.name},
+            grant_key=f"mcp-host:{client.spec.name}",
+            sandboxed=False,
+            mount="host",
+        )
+    )
+    return decision in {ApprovalDecision.ALLOW_ONCE, ApprovalDecision.ALLOW_SESSION}
 
 
 def _initialize_params(version: str) -> dict[str, object]:

@@ -21,11 +21,15 @@ from __future__ import annotations
 
 import secrets
 
+from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 _KEY_LEN = 32
 _NONCE_LEN = 12
 LEGACY_AAD = b"praxis-prime-totp-v1"
+_CHALLENGE_SALT = b"praxis-prime-hkdf-salt-v1"
+_CHALLENGE_INFO = b"praxis-prime-webauthn-challenge-v1"
 
 
 def account_aad(account_id: str) -> bytes:
@@ -39,6 +43,18 @@ def account_aad(account_id: str) -> bytes:
 
 def new_key() -> bytes:
     return secrets.token_bytes(_KEY_LEN)
+
+
+def challenge_key(master: bytes) -> bytes:
+    """HKDF subkey for WebAuthn challenges. It is not the TOTP seed key."""
+    if len(master) != _KEY_LEN:
+        raise ValueError("account data key must be 32 bytes")
+    return HKDF(
+        algorithm=hashes.SHA256(),
+        length=_KEY_LEN,
+        salt=_CHALLENGE_SALT,
+        info=_CHALLENGE_INFO,
+    ).derive(master)
 
 
 def seal(key: bytes, plaintext: bytes, *, aad: bytes) -> bytes:
