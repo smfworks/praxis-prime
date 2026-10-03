@@ -148,7 +148,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     approvals = commands.add_parser("approvals", help="List or decide pending approvals.")
     approval_commands = approvals.add_subparsers(dest="approvals_command")
-    approval_commands.add_parser("list", help="List approvals waiting on the daemon.")
+    approval_list = approval_commands.add_parser(
+        "list",
+        help="List approvals waiting on the daemon.",
+    )
+    _add_approval_profile(approval_list)
     approve = approval_commands.add_parser("approve", help="Allow a pending approval.")
     approve.add_argument("approval_id")
     approve.add_argument(
@@ -156,8 +160,10 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Allow this action for the rest of its session.",
     )
+    _add_approval_profile(approve)
     deny = approval_commands.add_parser("deny", help="Deny a pending approval.")
     deny.add_argument("approval_id")
+    _add_approval_profile(deny)
 
     code = commands.add_parser(
         "code",
@@ -395,6 +401,14 @@ def _service_command(args: argparse.Namespace) -> int:
     return 2
 
 
+def _add_approval_profile(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--profile",
+        default="",
+        help="Profile id. Omit to list every card this account can see.",
+    )
+
+
 def _approvals_command(args: argparse.Namespace) -> int:
     from praxis_prime.approvals.card import format_approval_card
     from praxis_prime.gateway.client import GatewayClient, GatewayError
@@ -414,7 +428,7 @@ def _approvals_command(args: argparse.Namespace) -> int:
         return 1
     try:
         if args.approvals_command == "list":
-            items = client.list_approvals()
+            items = client.list_approvals(profile=args.profile)
             if not items:
                 print("no pending approvals")
                 return 0
@@ -427,7 +441,7 @@ def _approvals_command(args: argparse.Namespace) -> int:
             decision = "allow_once"
         if args.approvals_command == "deny":
             decision = "deny"
-        client.decide(args.approval_id, decision)
+        client.decide(args.approval_id, decision, profile=args.profile)
     except GatewayError as exc:
         print(f"praxis-prime approvals: {exc}", file=sys.stderr)
         return 1

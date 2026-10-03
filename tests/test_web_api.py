@@ -510,8 +510,8 @@ def test_named_profile_approval_list_does_not_include_another_profile(tmp_path: 
             cookie=cookie,
             csrf=csrf,
         )
-        assert status == 403
-        assert body["error"]["message"] == "a profile is required"
+        assert status == 200
+        assert [item["id"] for item in body["approvals"]] == ["ap_aaaaaaaa", "ap_bbbbbbbb"]
         status, _headers, body = _request(
             server.bound_port,
             "GET",
@@ -524,9 +524,207 @@ def test_named_profile_approval_list_does_not_include_another_profile(tmp_path: 
         assert [item["id"] for item in body["approvals"]] == ["ap_bbbbbbbb"]
         assert "ALPHA-CARD" not in json.dumps(body)
         assert "BETA-CARD" in json.dumps(body)
+        store.create_account(username_text="otto", password=_PASSWORD, display_name="Otto")
+        otto_cookie, otto_csrf, _body = _login(server.bound_port, "otto", _PASSWORD)
+        status, _headers, body = _request(
+            server.bound_port,
+            "GET",
+            "/v1/approvals",
+            cookie=otto_cookie,
+            csrf=otto_csrf,
+            profile="beta",
+        )
+        assert status == 403
+        assert body["error"]["message"] == "not a member of this profile"
+        assert "BETA-CARD" not in json.dumps(body)
+        assert "ALPHA-CARD" not in json.dumps(body)
     finally:
         server.shutdown()
         store.close()
+
+
+def test_unscoped_approval_list_shows_owner_cards_and_filters_members(tmp_path: Path):
+    """No named profile: owner and admin list, members only see their cards.
+
+    (a) is a supervised daemon with two profiles and no default.
+    (b) is a single-process daemon with accounts and no profile, which is
+    where an unscoped Telegram card lives. Memory stays refused.
+    """
+    data = tmp_path / "data"
+    create_profile(data, "alpha")
+    create_profile(data, "beta")
+    store = AccountStore(data / "accounts.db")
+    ada = store.create_account(username_text="ada", password=_PASSWORD, display_name="Ada")
+    store.create_account(
+        username_text="amy",
+        password=_PASSWORD,
+        display_name="Amy",
+        role="admin",
+    )
+    mina = store.create_account(username_text="mina", password=_PASSWORD, display_name="Mina")
+    store.create_account(username_text="otto", password=_PASSWORD, display_name="Otto")
+    store.set_membership(ada.id, "alpha", "owner")
+    store.set_membership(mina.id, "alpha", "operator")
+    cards = _Cards()
+    server = GatewayServer(
+        host="127.0.0.1",
+        port=0,
+        token="test-token",
+        agent=_Spy(),  # type: ignore[arg-type]
+        approvals=cards,  # type: ignore[arg-type]
+        logger=JsonLogger(tmp_path / "daemon.log"),
+        accounts=store,
+        data_root=data,
+        multi_profile=True,
+    )
+    server.start()
+    try:
+        sessions = {
+            name: _login(server.bound_port, name, _PASSWORD)
+            for name in ("ada", "amy", "mina", "otto")
+        }
+        assert _approval_ids(server.bound_port, sessions["ada"]) == [
+            "ap_aaaaaaaa",
+            "ap_bbbbbbbb",
+        ]
+        assert _approval_ids(server.bound_port, sessions["amy"]) == [
+            "ap_aaaaaaaa",
+            "ap_bbbbbbbb",
+        ]
+        assert _approval_ids(server.bound_port, sessions["mina"]) == ["ap_aaaaaaaa"]
+        assert _approval_ids(server.bound_port, sessions["otto"]) == []
+        status, _headers, body = _request(
+            server.bound_port,
+            "GET",
+            "/v1/approvals",
+            cookie=sessions["mina"][0],
+            csrf=sessions["mina"][1],
+            profile="beta",
+        )
+        assert status == 403
+        assert body["error"]["message"] == "not a member of this profile"
+        status, _headers, body = _request(
+            server.bound_port,
+            "GET",
+            "/v1/memory",
+            cookie=sessions["ada"][0],
+            csrf=sessions["ada"][1],
+        )
+        assert status == 403
+        assert body["error"]["message"] == "a profile is required"
+        client = GatewayClient.connect(Endpoint("127.0.0.1", server.bound_port, "test-token"))
+        try:
+            assert [item["id"] for item in client.list_approvals()] == [
+                "ap_aaaaaaaa",
+                "ap_bbbbbbbb",
+            ]
+            assert [item["id"] for item in client.list_approvals(profile="beta")] == ["ap_bbbbbbbb"]
+        finally:
+            client.close()
+    finally:
+        server.shutdown()
+        store.close()
+
+    bare = tmp_path / "bare"
+    bare.mkdir()
+    bare_store = AccountStore(bare / "accounts.db")
+    bare_store.create_account(username_text="ada", password=_PASSWORD, display_name="Ada")
+    bare_store.create_account(
+        username_text="amy",
+        password=_PASSWORD,
+        display_name="Amy",
+        role="admin",
+    )
+    bare_mina = bare_store.create_account(
+        username_text="mina",
+        password=_PASSWORD,
+        display_name="Mina",
+    )
+    bare_store.create_account(username_text="otto", password=_PASSWORD, display_name="Otto")
+    bare_store.set_membership(bare_mina.id, "alpha", "operator")
+    unscoped = _UnscopedCard()
+    single = GatewayServer(
+        host="127.0.0.1",
+        port=0,
+        token="test-token",
+        agent=_Spy(),  # type: ignore[arg-type]
+        approvals=unscoped,  # type: ignore[arg-type]
+        logger=JsonLogger(tmp_path / "bare.log"),
+        accounts=bare_store,
+        data_root=bare,
+        multi_profile=False,
+    )
+    single.start()
+    try:
+        sessions = {
+            name: _login(single.bound_port, name, _PASSWORD)
+            for name in ("ada", "amy", "mina", "otto")
+        }
+        assert _approval_ids(single.bound_port, sessions["ada"]) == ["ap_00000000"]
+        assert _approval_ids(single.bound_port, sessions["amy"]) == ["ap_00000000"]
+        assert _approval_ids(single.bound_port, sessions["mina"]) == []
+        assert _approval_ids(single.bound_port, sessions["otto"]) == []
+        status, _headers, body = _request(
+            single.bound_port,
+            "GET",
+            "/v1/approvals",
+            cookie=sessions["ada"][0],
+            csrf=sessions["ada"][1],
+            profile="beta",
+        )
+        assert status == 403
+        assert body["error"]["message"] == "this daemon runs a different profile"
+        assert "UNSCOPED-CARD" not in json.dumps(body)
+        status, _headers, body = _request(
+            single.bound_port,
+            "GET",
+            "/v1/memory",
+            cookie=sessions["ada"][0],
+            csrf=sessions["ada"][1],
+        )
+        assert status == 403
+        assert body["error"]["message"] == "a profile is required"
+        client = GatewayClient.connect(Endpoint("127.0.0.1", single.bound_port, "test-token"))
+        try:
+            assert [item["profileId"] for item in client.list_approvals()] == [""]
+        finally:
+            client.close()
+    finally:
+        single.shutdown()
+        bare_store.close()
+
+
+def _approval_ids(
+    port: int,
+    session: tuple[str, str, dict[str, object]],
+    profile: str = "",
+) -> list[object]:
+    cookie, csrf, _body = session
+    status, _headers, body = _request(
+        port,
+        "GET",
+        "/v1/approvals",
+        cookie=cookie,
+        csrf=csrf,
+        profile=profile,
+    )
+    assert status == 200, body
+    return [item["id"] for item in body["approvals"]]
+
+
+def test_approvals_cli_accepts_a_profile() -> None:
+    from praxis_prime.cli import build_parser
+
+    parser = build_parser()
+    listed = parser.parse_args(["approvals", "list", "--profile", "beta"])
+    assert listed.profile == "beta"
+    assert listed.approvals_command == "list"
+    allowed = parser.parse_args(["approvals", "approve", "ap_bbbbbbbb", "--profile", "beta"])
+    assert allowed.profile == "beta"
+    denied = parser.parse_args(["approvals", "deny", "ap_bbbbbbbb", "--profile", "alpha"])
+    assert denied.profile == "alpha"
+    omitted = parser.parse_args(["approvals", "list"])
+    assert omitted.profile == ""
 
 
 def test_routing_catalog_asks_only_the_named_worker():
@@ -903,6 +1101,27 @@ def test_routing_host_forwards_events_while_chat_runs():
     )
     assert result == TurnResult(session_id="s", text="Hi there", error=None, cancelled=False)
     assert seen == ["Hi", " there"]
+
+
+class _UnscopedCard:
+    """One card with no profile, as a channel turn can still create."""
+
+    profile_id = ""
+
+    def list_pending(self) -> list[dict[str, object]]:
+        return [
+            {
+                "id": "ap_00000000",
+                "profileId": "",
+                "tool": "channel",
+                "sessionId": "",
+                "summary": "UNSCOPED-CARD",
+            }
+        ]
+
+    def get(self, approval_id: str) -> dict[str, object] | None:
+        del approval_id
+        return None
 
 
 class _Cards:

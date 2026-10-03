@@ -337,18 +337,22 @@ class GatewayServer:
             if principal.status == 401 and self.logger is not None:
                 self.logger.warning("http_unauthorized", path=route)
             return principal.status, _error(principal.code, principal.message)
-        profile_name = headers.get("x-praxis-profile", "").strip()
+        explicit_profile = headers.get("x-praxis-profile", "").strip()
+        profile_name = explicit_profile
         named = _PROFILE_PATH.fullmatch(route)
         if named is not None:
             profile_name = named.group(1)
         if self.multi_profile and not profile_name:
             profile_name = self._implicit_profile()
         action = _http_action(method, route)
+        # An omitted approvals list is not the implicit profile. Owner and
+        # admin see every card; a member is filtered after this check.
+        auth_profile = explicit_profile if action == "approval_list" else profile_name
         denial = authorize_action(
             self.accounts,
             principal,
             action=action,
-            profile=profile_name,
+            profile=auth_profile,
             profile_exists=self._profile_exists,
             runtime_profile=self._runtime_profile(),
             multi_profile=self.multi_profile,
@@ -746,11 +750,13 @@ class GatewayServer:
         profile_name = explicit_profile
         if self.multi_profile and not profile_name:
             profile_name = self._implicit_profile()
+        frame_action = _frame_action(kind)
+        auth_profile = explicit_profile if frame_action == "approval_list" else profile_name
         denial = authorize_action(
             self.accounts,
             principal,
-            action=_frame_action(kind),
-            profile=profile_name,
+            action=frame_action,
+            profile=auth_profile,
             profile_exists=self._profile_exists,
             runtime_profile=self._runtime_profile(),
             multi_profile=self.multi_profile,
@@ -1501,7 +1507,7 @@ def _http_action(method: str, route: str) -> str:
     if method == "POST" and (_APPROVAL_PATH.fullmatch(route) or route == "/v1/approvals"):
         return "approve"
     if method == "GET" and route == "/v1/approvals":
-        return "content"
+        return "approval_list"
     if method == "POST" and route in {"/v1/decide", "/v1/systemone"}:
         return "chat"
     if method == "POST" and _ROUTINE_FIRE.fullmatch(route):
@@ -1517,7 +1523,7 @@ def _frame_action(kind: str) -> str:
     if kind in {"chat.send", "model.set", "session.drop"}:
         return "chat"
     if kind == "approvals.list":
-        return "content"
+        return "approval_list"
     return "read"
 
 
