@@ -703,6 +703,8 @@ def _request(
         lines.append(f"x-csrf-token: {csrf}")
     if profile:
         lines.append(f"x-praxis-profile: {profile}")
+    if method not in {"GET", "HEAD", "OPTIONS"}:
+        lines.append("Content-Type: application/json")
     if payload:
         lines.append(f"Content-Length: {len(payload)}")
     raw = ("\r\n".join(lines) + "\r\n\r\n").encode("ascii") + payload

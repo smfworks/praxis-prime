@@ -10,6 +10,7 @@ ARCHITECTURE §5.
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 from collections.abc import AsyncIterator, Callable, Iterator, Mapping
 from pathlib import Path
@@ -31,7 +32,7 @@ from praxis_prime.approvals.gate import (
 from praxis_prime.audit.log import AuditLog
 from praxis_prime.decide.screen import ActionScreener
 from praxis_prime.loop.control import TurnControl
-from praxis_prime.loop.events import LoopEvent, StatusEvent, TurnEnded
+from praxis_prime.loop.events import LoopEvent, StatusEvent, ToolSpan, TurnEnded
 from praxis_prime.loop.hooks import HookDecision, HookResult, LoopHooks
 from praxis_prime.loop.prompt import FENCE_END, SYSTEM_PROMPT, fence_untrusted
 from praxis_prime.memory.store import SessionStore
@@ -462,6 +463,10 @@ class AgentLoop:
             return
 
         yield StatusEvent("act", f"{tool.name} · {prepared.summary}")
+        arguments = json.dumps(_redact(call.arguments), separators=(",", ":"), default=str)
+        yield ToolSpan("start", call.id, tool.name)
+        yield ToolSpan("args", call.id, tool.name, arguments)
+        yield ToolSpan("end", call.id, tool.name)
         from praxis_prime.policy.shellguard import compliance_mode
 
         tool_ctx = ToolContext(
@@ -529,6 +534,7 @@ class AgentLoop:
                 "arguments": _redact(call.arguments),
             },
         )
+        yield ToolSpan("result", call.id, tool.name, body[:4000])
         yield StatusEvent("result", f"{tool.name} · {'ok' if ok else 'error'}")
 
     def _add_user(self, text: str) -> None:

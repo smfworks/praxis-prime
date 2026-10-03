@@ -589,6 +589,25 @@ class AccountStore:
             return None
         return str(row["profile_role"])
 
+    def list_memberships(self) -> list[dict[str, str]]:
+        """Profile grants. No secrets. Used by the admin directory."""
+        with self._lock:
+            rows = self.conn.execute(
+                """
+                SELECT account_id, profile_id, profile_role
+                FROM memberships
+                ORDER BY profile_id, account_id
+                """
+            ).fetchall()
+        return [
+            {
+                "accountId": str(row["account_id"]),
+                "profileId": str(row["profile_id"]),
+                "role": str(row["profile_role"]),
+            }
+            for row in rows
+        ]
+
     def profile_ids_for(self, account_id: str) -> tuple[str, ...]:
         with self._lock:
             rows = self.conn.execute(

@@ -105,8 +105,11 @@ class GatewayClient:
         payload = frame.get("payload")
         return payload if isinstance(payload, dict) else {}
 
-    def list_approvals(self) -> list[dict[str, object]]:
-        frame = self.request("approvals.list", {})
+    def list_approvals(self, profile: str = "") -> list[dict[str, object]]:
+        payload: dict[str, object] = {}
+        if profile:
+            payload["profile"] = profile
+        frame = self.request("approvals.list", payload)
         self._raise_if_error(frame)
         payload = frame.get("payload")
         if not isinstance(payload, dict):
@@ -116,11 +119,11 @@ class GatewayClient:
             return [item for item in items if isinstance(item, dict)]
         return []
 
-    def decide(self, approval_id: str, decision: str) -> dict[str, object]:
-        frame = self.request(
-            "approvals.decide",
-            {"approvalId": approval_id, "decision": decision},
-        )
+    def decide(self, approval_id: str, decision: str, profile: str = "") -> dict[str, object]:
+        payload: dict[str, object] = {"approvalId": approval_id, "decision": decision}
+        if profile:
+            payload["profile"] = profile
+        frame = self.request("approvals.decide", payload)
         self._raise_if_error(frame)
         payload = frame.get("payload")
         return payload if isinstance(payload, dict) else {}
@@ -188,6 +191,7 @@ class GatewayClient:
                             pending = approval
                 result = _get(box, 0)
                 if result is not None:
+                    _drain_frame(self._events, frame_id, on_event)
                     if result.get("type") == "error":
                         raise GatewayError(_message(result) or "turn failed")
                     return result
@@ -277,6 +281,27 @@ def _connect_socket(endpoint: Endpoint, *, timeout: float) -> socket.socket:
     sock = socket.create_connection((endpoint.host, endpoint.port), timeout=timeout)
     sock.settimeout(None)
     return sock
+
+
+def _drain_frame(
+    events: queue.Queue[dict[str, object]],
+    frame_id: str,
+    on_event: EventHandler | None,
+) -> None:
+    """Apply events already read before the result frame is returned."""
+    pending: list[dict[str, object]] = []
+    while True:
+        event = _get(events, 0)
+        if event is None:
+            break
+        pending.append(event)
+    for event in pending:
+        if event.get("id") != frame_id:
+            events.put(event)
+            continue
+        payload = event.get("payload")
+        if on_event is not None and isinstance(payload, dict):
+            on_event(payload)
 
 
 def _get(box: queue.Queue[dict[str, object]], timeout: float) -> dict[str, object] | None:

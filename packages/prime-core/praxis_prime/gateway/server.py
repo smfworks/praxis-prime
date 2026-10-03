@@ -24,6 +24,7 @@ from praxis_prime.approvals.queue import ApprovalQueue, parse_decision
 from praxis_prime.audit.log import AuditLog, actor_account_var, profile_var
 from praxis_prime.decide.engine import DecisionEngine
 from praxis_prime.decide.schema import DecideError
+from praxis_prime.gateway.agui import TurnStream
 from praxis_prime.gateway.auth import bearer_token, token_ok
 from praxis_prime.gateway.authz import (
     Denial,
@@ -38,7 +39,12 @@ from praxis_prime.gateway.authz import (
     principal_from_ticket,
 )
 from praxis_prime.gateway.factors import authed_factor, passkey_options, passkey_verify, totp_login
-from praxis_prime.gateway.guard import host_origin_denial
+from praxis_prime.gateway.guard import (
+    body_size_denial,
+    fetch_site_denial,
+    host_origin_denial,
+    mutation_type_denial,
+)
 from praxis_prime.gateway.protocol import (
     CHAT_ROLES,
     OPERATOR_ONLY,
@@ -51,6 +57,7 @@ from praxis_prime.gateway.routes import (
     ids_agree,
     route_allowed,
 )
+from praxis_prime.gateway.web import CSP, load_asset, static_route
 from praxis_prime.gateway.ws import (
     ByteBuffer,
     WebSocketConnection,
@@ -256,8 +263,27 @@ class GatewayServer:
                 if self.logger is not None:
                     self.logger.warning("host_rejected", code=code)
                 return
+            site = fetch_site_denial(headers)
+            if site is not None:
+                status, code, message = site
+                _write_http(conn, status, _error(code, message))
+                return
+            route_only = path.split("?", 1)[0]
+            if static_route(method, route_only):
+                self._static(conn, route_only)
+                return
             if headers.get("upgrade", "").lower() == "websocket":
                 self._handle_ws(conn, buffer, headers, path)
+                return
+            sized = body_size_denial(headers)
+            if sized is not None:
+                status, code, message = sized
+                _write_http(conn, status, _error(code, message))
+                return
+            typed = mutation_type_denial(method, headers)
+            if typed is not None:
+                status, code, message = typed
+                _write_http(conn, status, _error(code, message))
                 return
             length = _content_length(headers)
             body = buffer.read_exact(length) if length else b""
@@ -311,18 +337,22 @@ class GatewayServer:
             if principal.status == 401 and self.logger is not None:
                 self.logger.warning("http_unauthorized", path=route)
             return principal.status, _error(principal.code, principal.message)
-        profile_name = headers.get("x-praxis-profile", "").strip()
+        explicit_profile = headers.get("x-praxis-profile", "").strip()
+        profile_name = explicit_profile
         named = _PROFILE_PATH.fullmatch(route)
         if named is not None:
             profile_name = named.group(1)
         if self.multi_profile and not profile_name:
             profile_name = self._implicit_profile()
         action = _http_action(method, route)
+        # An omitted approvals list is not the implicit profile. Owner and
+        # admin see every card; a member is filtered after this check.
+        auth_profile = explicit_profile if action == "approval_list" else profile_name
         denial = authorize_action(
             self.accounts,
             principal,
             action=action,
-            profile=profile_name,
+            profile=auth_profile,
             profile_exists=self._profile_exists,
             runtime_profile=self._runtime_profile(),
             multi_profile=self.multi_profile,
@@ -377,7 +407,20 @@ class GatewayServer:
             extras.extend(cookies)
             return status, payload
         if method == "GET" and route == "/v1/auth/session":
-            return 200, {"ok": True, "account": _principal_public(principal)}
+            body_out: dict[str, object] = {"ok": True, "account": _principal_public(principal)}
+            if principal.kind == "session" and self.accounts is not None:
+                session = self.accounts.session_from_token(principal.session_token)
+                if session is not None:
+                    body_out["csrfToken"] = session.csrf_token
+            return 200, body_out
+        if method == "GET" and route == "/v1/memory":
+            return self._profile_catalog("list_memory", "entries", profile_name)
+        if method == "GET" and route == "/v1/skills":
+            return self._profile_catalog("list_skills", "skills", profile_name)
+        if method == "GET" and route == "/v1/routines":
+            return self._profile_catalog("list_routines", "routines", profile_name)
+        if method == "GET" and route == "/v1/admin/directory":
+            return self._admin_directory()
         if method == "POST" and route == "/v1/auth/ws-ticket":
             if self.accounts is None:
                 return 404, _error("not_found", "no such route")
@@ -394,10 +437,23 @@ class GatewayServer:
         if method == "GET" and route == "/status":
             return 200, {"ok": True, "status": self._status()}
         if method == "GET" and route == "/v1/approvals/meta":
-            rows = self._visible_meta(principal)
+            # The header the client sent. An omitted header is not the
+            # implicit profile, or an owner would lose every other card.
+            explicit = headers.get("x-praxis-profile", "").strip()
+            foreign = self._foreign_runtime(explicit)
+            if foreign is not None:
+                return foreign.status, _error(foreign.code, foreign.message)
+            rows = self._visible_meta(principal, profile=explicit)
             return 200, {"ok": True, "count": len(rows), "approvals": rows}
         if method == "GET" and route == "/v1/approvals":
-            return 200, {"ok": True, "approvals": self._visible_approvals(principal)}
+            explicit = headers.get("x-praxis-profile", "").strip()
+            foreign = self._foreign_runtime(explicit)
+            if foreign is not None:
+                return foreign.status, _error(foreign.code, foreign.message)
+            return 200, {
+                "ok": True,
+                "approvals": self._visible_approvals(principal, profile=explicit),
+            }
         match = _APPROVAL_PATH.fullmatch(route)
         if method == "POST" and match is not None:
             try:
@@ -480,6 +536,72 @@ class GatewayServer:
         if status == 401 and self.logger is not None:
             self.logger.warning("auth_fail")
         return status, payload
+
+    def _static(self, conn: socket.socket, route: str) -> None:
+        loaded = load_asset(route)
+        if loaded is None:
+            _write_http(conn, 404, _error("not_found", "web app is not installed"))
+            return
+        status, body, content_type = loaded
+        if status != 200:
+            _write_http(conn, 404, _error("not_found", "web app is not installed"))
+            return
+        cache = "no-store" if route in {"/", "/index.html"} else "public, max-age=3600"
+        _write_bytes(
+            conn,
+            200,
+            body,
+            content_type,
+            [
+                ("Content-Security-Policy", CSP),
+                ("X-Content-Type-Options", "nosniff"),
+                ("Referrer-Policy", "no-referrer"),
+                ("Cache-Control", cache),
+            ],
+        )
+
+    def _profile_catalog(
+        self,
+        method: str,
+        key: str,
+        profile: str,
+    ) -> tuple[int, dict[str, object]]:
+        if self.multi_profile and not profile:
+            return 403, _error("forbidden", "a profile is required")
+        fn = getattr(self.agent, method, None)
+        if not callable(fn):
+            return 404, _error("not_found", "no such route")
+        from praxis_prime.supervisor.ipc import IpcError
+        from praxis_prime.supervisor.supervisor import WorkerUnavailable
+
+        try:
+            rows = fn(profile)
+        except PermissionError as exc:
+            return 403, _error("forbidden", str(exc) or "this daemon runs a different profile")
+        except (WorkerUnavailable, IpcError, OSError):
+            return 503, _error("unavailable", "profile worker is unavailable")
+        if not isinstance(rows, list):
+            rows = []
+        return 200, {"ok": True, "profile": profile, key: rows}
+
+    def _admin_directory(self) -> tuple[int, dict[str, object]]:
+        if self.accounts is None:
+            return 404, _error("not_found", "accounts are not configured")
+        accounts = [
+            {
+                "id": account.id,
+                "username": account.username,
+                "displayName": account.display_name,
+                "role": account.role,
+                "status": account.status,
+            }
+            for account in self.accounts.list_accounts()
+        ]
+        return 200, {
+            "ok": True,
+            "accounts": accounts,
+            "memberships": self.accounts.list_memberships(),
+        }
 
     def _http_routine(self, routine_id: str) -> tuple[int, dict[str, object]]:
         if self.routine_fire is None:
@@ -624,14 +746,17 @@ class GatewayServer:
         if not frame_session_ids_agree(frame):
             outgoing.put(_frame_error(frame_id, "bad_request", "session id does not match"))
             return
-        profile_name = str(_payload(frame).get("profile", "") or "")
+        explicit_profile = str(_payload(frame).get("profile", "") or "")
+        profile_name = explicit_profile
         if self.multi_profile and not profile_name:
             profile_name = self._implicit_profile()
+        frame_action = _frame_action(kind)
+        auth_profile = explicit_profile if frame_action == "approval_list" else profile_name
         denial = authorize_action(
             self.accounts,
             principal,
-            action=_frame_action(kind),
-            profile=profile_name,
+            action=frame_action,
+            profile=auth_profile,
             profile_exists=self._profile_exists,
             runtime_profile=self._runtime_profile(),
             multi_profile=self.multi_profile,
@@ -664,11 +789,19 @@ class GatewayServer:
                 self._remember(principal.account_id, key, result)
                 outgoing.put(result)
             elif kind == "approvals.list":
+                foreign = self._foreign_runtime(explicit_profile)
+                if foreign is not None:
+                    outgoing.put(_frame_error(frame_id, foreign.code, foreign.message))
+                    return
                 result = {
                     "type": "result",
                     "id": frame_id,
                     "ok": True,
-                    "payload": {"approvals": self._visible_approvals(principal)},
+                    "payload": {
+                        "approvals": self._visible_approvals(
+                            principal, profile=explicit_profile
+                        )
+                    },
                 }
                 outgoing.put(result)
             elif kind == "approvals.decide":
@@ -758,6 +891,9 @@ class GatewayServer:
         account_id = principal.account_id
         routed = profile_name if self.multi_profile else ""
         runtime_profile = routed or self._runtime_profile()
+        stream = TurnStream(thread_id=session_id or frame_id, run_id=frame_id)
+        for agui in stream.start():
+            outgoing.put(_agui_frame(frame_id, agui))
 
         def work() -> None:
             token = request_id_var.set(frame_id)
@@ -766,6 +902,8 @@ class GatewayServer:
 
             def on_event(event: dict[str, object]) -> None:
                 outgoing.put({"type": "event", "id": frame_id, "payload": event})
+                for agui in stream.feed(event):
+                    outgoing.put(_agui_frame(frame_id, agui))
 
             try:
                 result = self.agent.chat(
@@ -775,6 +913,8 @@ class GatewayServer:
                     owner_account=account_id,
                     owner_profile=runtime_profile,
                 )
+                for agui in stream.finish(error=result.error):
+                    outgoing.put(_agui_frame(frame_id, agui))
                 body = _turn_payload(result)
                 done: dict[str, object] = {
                     "type": "result",
@@ -785,12 +925,18 @@ class GatewayServer:
                 self._remember(account_id, idem, done)
                 outgoing.put(done)
             except PermissionError:
+                for agui in stream.finish(error="session belongs to another account"):
+                    outgoing.put(_agui_frame(frame_id, agui))
                 outgoing.put(
                     _frame_error(frame_id, "forbidden", "session belongs to another account")
                 )
             except LookupError:
+                for agui in stream.finish(error="no such session"):
+                    outgoing.put(_agui_frame(frame_id, agui))
                 outgoing.put(_frame_error(frame_id, "not_found", "no such session"))
             except Exception as exc:
+                for agui in stream.finish(error=type(exc).__name__):
+                    outgoing.put(_agui_frame(frame_id, agui))
                 outgoing.put(_frame_error(frame_id, "turn_failed", type(exc).__name__))
             finally:
                 profile_var.reset(profile_token)
@@ -810,6 +956,9 @@ class GatewayServer:
         spec = str(_payload(frame).get("spec", "")).strip()
         try:
             chosen = self.agent.set_model(spec, profile=profile_name)
+        except PermissionError as exc:
+            outgoing.put(_frame_error(frame_id, "forbidden", str(exc)))
+            return
         except ValueError as exc:
             outgoing.put(_frame_error(frame_id, "bad_request", str(exc)))
             return
@@ -989,8 +1138,37 @@ class GatewayServer:
             return None
         return frame
 
-    def _visible_approvals(self, principal: Principal) -> list[dict[str, object]]:
-        items = self.approvals.list_pending()
+    def _process_profile(self) -> str:
+        stamped = getattr(self.approvals, "profile_id", "")
+        return self._runtime_profile() or (stamped if isinstance(stamped, str) else "")
+
+    def _foreign_runtime(self, profile: str) -> Denial | None:
+        """A named profile that this process did not open.
+
+        The supervisor has no single runtime, so a named profile is a worker.
+        An empty name is the profile authorize_action already bound.
+        """
+        if self.multi_profile:
+            return None
+        requested = profile.strip()
+        if not requested:
+            return None
+        from praxis_prime.profiles.ids import profile_id
+
+        named = profile_id(requested)
+        runtime = self._process_profile()
+        bound = profile_id(runtime) if runtime else None
+        if named is None or bound is None or named != bound:
+            return Denial(403, "forbidden", "this daemon runs a different profile")
+        return None
+
+    def _visible_approvals(
+        self,
+        principal: Principal,
+        *,
+        profile: str = "",
+    ) -> list[dict[str, object]]:
+        items = self._approvals_for_profile(self.approvals.list_pending(), profile)
         if (
             accounts_enforced(self.accounts)
             and not sees_all_profiles(principal.role)
@@ -1000,23 +1178,63 @@ class GatewayServer:
             allowed = set(self.accounts.profile_ids_for(principal.account_id))
             kept: list[dict[str, object]] = []
             for item in items:
-                profile = item.get("profileId")
-                if isinstance(profile, str) and profile in allowed:
+                card_profile = item.get("profileId")
+                if isinstance(card_profile, str) and card_profile in allowed:
                     kept.append(item)
             items = kept
         return [self._hide_foreign_session(principal, item) for item in items]
 
-    def _visible_meta(self, principal: Principal) -> list[dict[str, object]]:
+    def _visible_meta(
+        self,
+        principal: Principal,
+        *,
+        profile: str = "",
+    ) -> list[dict[str, object]]:
         """Metadata for the caller's profiles. Auditors, owners, and admins see all."""
+        named = profile.strip()
         if (
             not accounts_enforced(self.accounts)
             or principal.role in {"owner", "admin", "auditor"}
             or self.accounts is None
             or not principal.account_id
         ):
+            if named:
+                return self.approvals.list_meta(profiles=frozenset({named}))
+            runtime = "" if self.multi_profile else self._process_profile()
+            if runtime:
+                return self.approvals.list_meta(profiles=frozenset({runtime, ""}))
             return self.approvals.list_meta()
-        allowed = frozenset(self.accounts.profile_ids_for(principal.account_id))
-        return self.approvals.list_meta(profiles=allowed)
+        allowed = set(self.accounts.profile_ids_for(principal.account_id))
+        if named:
+            allowed &= {named}
+        elif not self.multi_profile:
+            runtime = self._process_profile()
+            if runtime:
+                allowed &= {runtime}
+        return self.approvals.list_meta(profiles=frozenset(allowed))
+
+    def _approvals_for_profile(
+        self,
+        items: list[dict[str, object]],
+        profile: str,
+    ) -> list[dict[str, object]]:
+        """Keep cards for the profile this read was authorized to see.
+
+        A named supervisor request is one worker. With no name, owners and
+        members keep the cards their role already allows. A single-process
+        daemon drops a card stamped for some other profile.
+        """
+        named = profile.strip()
+        if named:
+            return [item for item in items if item.get("profileId") == named]
+        if self.multi_profile:
+            return items
+        runtime = self._process_profile()
+        if not runtime:
+            return items
+        return [
+            item for item in items if not item.get("profileId") or item.get("profileId") == runtime
+        ]
 
     def _hide_foreign_session(
         self,
@@ -1198,6 +1416,8 @@ def _write_http(
         403: "Forbidden",
         404: "Not Found",
         409: "Conflict",
+        413: "Payload Too Large",
+        415: "Unsupported Media Type",
         429: "Too Many Requests",
         500: "Error",
         503: "Unavailable",
@@ -1251,11 +1471,43 @@ def _turn_payload(result: TurnResult) -> dict[str, object]:
     }
 
 
+def _agui_frame(frame_id: str, event: dict[str, object]) -> dict[str, object]:
+    return {"type": "event", "id": frame_id, "payload": {"kind": "agui", "agui": event}}
+
+
+def _write_bytes(
+    conn: socket.socket,
+    status: int,
+    body: bytes,
+    content_type: str,
+    extras: list[tuple[str, str]],
+) -> None:
+    lines = [
+        f"HTTP/1.1 {status} OK",
+        f"Content-Type: {content_type}",
+        f"Content-Length: {len(body)}",
+        "Connection: close",
+    ]
+    for name, value in extras:
+        if "\r" in value or "\n" in value:
+            continue
+        lines.append(f"{name}: {value}")
+    head = "\r\n".join(lines) + "\r\n\r\n"
+    try:
+        conn.sendall(head.encode("ascii") + body)
+    except OSError:
+        return
+
+
 def _http_action(method: str, route: str) -> str:
+    if method == "GET" and route in {"/v1/memory", "/v1/skills", "/v1/routines"}:
+        return "content"
+    if method == "GET" and route == "/v1/admin/directory":
+        return "admin"
     if method == "POST" and (_APPROVAL_PATH.fullmatch(route) or route == "/v1/approvals"):
         return "approve"
     if method == "GET" and route == "/v1/approvals":
-        return "content"
+        return "approval_list"
     if method == "POST" and route in {"/v1/decide", "/v1/systemone"}:
         return "chat"
     if method == "POST" and _ROUTINE_FIRE.fullmatch(route):
@@ -1271,7 +1523,7 @@ def _frame_action(kind: str) -> str:
     if kind in {"chat.send", "model.set", "session.drop"}:
         return "chat"
     if kind == "approvals.list":
-        return "content"
+        return "approval_list"
     return "read"
 
 

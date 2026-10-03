@@ -62,7 +62,7 @@ Upstream reads use a short read and an idle timeout. A peer that keeps sending i
 
 Workers run as the same Unix user as the daemon. A process that can `ptrace` that user, or `open()` a file outside the worker's `StateDB` check, can still read another profile's files. The path guard covers databases opened through `StateDB`, and the worker freezes its profile and data root at startup so a later environment change does not point that check at a different profile. Sandboxed tools keep the existing data-root tmpfs masks. `worker-master.key` is on that filename denylist. This is process isolation plus IPC authentication, not Landlock and not a hostile multi-tenant boundary. The worker path check does not by itself stop one worker from reading another's files through a same-user `open()` outside `StateDB`. Landlock remains M4. A Linux user per profile is unscheduled. Per-profile provider keys are M2. The SPA route client is M1d. OIDC is M1e.
 
-Chat, approvals, `model.set`, and `session.drop` still require a membership when accounts are enforced (owner and admin are not limited to memberships). The audit `profile` column is the profile the supervisor authenticated, not a profile the worker claimed.
+Chat, approvals, `model.set`, `session.drop`, and catalog reads (`memory`, `skills`, `routines`, and `GET /v1/approvals`) require a membership when accounts are enforced (owner and admin are not limited to memberships). On a single-process daemon an omitted profile is the one that process opened, and a different profile is refused before that process's catalog is read. A worker answers only for its own profile. The audit `profile` column is the profile the supervisor authenticated, not a profile the worker claimed. Each chat call buffers events under its own stream id. `chat.events` returns only that id, and the buffer is removed when the call ends. A turn that does not want events does not poll. Each buffer stays capped; when that cap is hit, the next read of that stream starts with a truncation status. Streamed tool arguments use the same redaction as the audit row.
 
 ## Auditors
 
@@ -111,6 +111,20 @@ The TOTP seed is encrypted in `accounts.db`. The AES-GCM key is in that same fil
 The loopback bearer token is not checked with a passkey or TOTP. It remains the owner-equivalent credential described above, on loopback only. HTTP factor changes made with that token still need a step-up. `praxis-prime account totp` and `account passkey` write `accounts.db` as the OS user who can read that file, the same trust as `account passwd`, and they append an audit event that does not contain the secret. Passkey enrollment itself is the HTTP ceremony; the CLI can list and remove credentials. Telegram Approve and Deny do not call these routes. A paired chat is its own credential.
 
 OIDC is not in this build. Neither is a rule that turns MFA on for every role above viewer when the gateway leaves loopback, or a second passkey prompt on SEND and SPEND. Those wait for M1e and M6.
+
+## Local web app
+
+The daemon serves the SPA when `ui/dist` or `PRAXIS_PRIME_UI_DIR` contains `index.html`. `GET /` and `GET /assets/…` are public so the sign-in page can load. Every other route stays on the allowlist and the same session, bearer, and CSRF checks. The HTML and asset responses set:
+
+```
+Content-Security-Policy: default-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data:; script-src 'self'; connect-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'
+```
+
+There is no `unsafe-inline` and no `unsafe-eval`.
+
+A browser `Sec-Fetch-Site: cross-site` is 403. A mutating request whose content type is not `application/json` is 415. A body over 1 MB (1,000,000 bytes) is 413 and is not read. The CLI and Telegram do not send `Sec-Fetch-Site`. They use the WebSocket, so those two HTTP checks do not apply to them.
+
+`GET /v1/auth/session` returns that session's `csrfToken` so a reload can keep sending `x-csrf-token`. The cookie stays `HttpOnly`. `GET /v1/memory`, `GET /v1/skills`, and `GET /v1/routines` require a membership on the profile they read. A single-process daemon has one profile, the one that process opened. An omitted `x-praxis-profile` on those routes means that profile. Naming a different profile is 403, and this process's catalog is not read. There is no second worker on that path. When the daemon supervises profile workers, the request goes to the named profile's worker. A missing membership is 403 and that call is not made. `GET /v1/approvals` with no profile is the caller's visible cards: owner and admin see every card this process can show, and a member sees only profiles they belong to. Naming a profile still refuses a different runtime and a missing membership. Memory, skills, and routines stay scoped. `GET /v1/memory` leaves out episodic rows and does not include `session_id`. `GET /v1/admin/directory` is owner and admin only and leaves out email and secrets. A web approval is `POST /v1/approvals/<id>` with `allow_once`, `allow_session`, or `deny`. A second decide for that id fails. The turn writes the same approval audit row it writes for a Telegram decision.
 
 ## Shell and the data directory
 

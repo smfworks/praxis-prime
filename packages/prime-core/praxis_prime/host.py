@@ -17,8 +17,9 @@ from praxis_prime.approvals.gate import approval_account_id
 from praxis_prime.approvals.queue import ApprovalQueue
 from praxis_prime.channels.trust import untrusted_channel_message
 from praxis_prime.loop.control import TurnControl
-from praxis_prime.loop.events import StatusEvent, TurnEnded
+from praxis_prime.loop.events import StatusEvent, ToolSpan, TurnEnded
 from praxis_prime.memory.tiers import memory_channel
+from praxis_prime.profiles.ids import profile_id
 from praxis_prime.router.types import TextDelta
 from praxis_prime.runtime import Runtime
 
@@ -100,7 +101,7 @@ class Host:
             )
 
     def set_model(self, spec: str, *, profile: str = "") -> str:
-        del profile
+        self._require_this_profile(profile)
         with self._lock:
             if self._closed:
                 raise RuntimeError("daemon is shut down")
@@ -136,6 +137,39 @@ class Host:
         self.queue.deny_all(actor=actor)
         return True
 
+    def list_memory(self, profile: str = "") -> list[dict[str, object]]:
+        self._require_this_profile(profile)
+        from praxis_prime.catalog import memory_rows
+
+        return memory_rows(self.runtime.memory)
+
+    def list_skills(self, profile: str = "") -> list[dict[str, object]]:
+        self._require_this_profile(profile)
+        from praxis_prime.catalog import skill_rows
+
+        return skill_rows(self.runtime.skills)
+
+    def list_routines(self, profile: str = "") -> list[dict[str, object]]:
+        self._require_this_profile(profile)
+        from praxis_prime.catalog import routine_rows
+        from praxis_prime.scheduler.store import RoutineStore
+
+        return routine_rows(RoutineStore(self.runtime.db))
+
+    def _require_this_profile(self, profile: str) -> None:
+        """Refuse a catalog read for a profile this process did not open.
+
+        An empty name means this process. Chat and approve use the same
+        rule in the gateway before they get here.
+        """
+        requested = profile.strip()
+        if not requested:
+            return
+        named = profile_id(requested)
+        bound = profile_id(self.runtime.profile_id) if self.runtime.profile_id else None
+        if named is None or bound is None or named != bound:
+            raise PermissionError("this daemon runs a different profile")
+
     def status(self) -> dict[str, object]:
         with self._lock:
             model = "" if self._closed else self.runtime.router.primary.spec()
@@ -160,6 +194,14 @@ class Host:
 def event_payload(event: object) -> dict[str, object]:
     if isinstance(event, TextDelta):
         return {"kind": "text", "text": event.text}
+    if isinstance(event, ToolSpan):
+        return {
+            "kind": "tool",
+            "phase": event.phase,
+            "toolCallId": event.tool_call_id,
+            "name": event.name,
+            "detail": event.detail,
+        }
     if isinstance(event, StatusEvent):
         return {"kind": "status", "phase": event.phase, "detail": event.detail}
     if isinstance(event, TurnEnded):

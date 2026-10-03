@@ -113,10 +113,11 @@ def authenticate_http(
     return Denial(401, "unauthorized", "authentication required")
 
 
-# Chat, approval, routine fire, model.set, and session.drop. With one
-# in-process runtime, these run only on the profile that process opened.
-# The supervisor sets multi_profile so each call names its own worker.
-_SCOPED_ACTIONS = frozenset({"chat", "approve"})
+# Chat, approval, catalog reads, routine fire, model.set, and session.drop.
+# With one in-process runtime, these run only on the profile that process
+# opened. An omitted profile is that runtime, and it still needs a
+# membership. The supervisor sets multi_profile so each call names its worker.
+_SCOPED_ACTIONS = frozenset({"chat", "approve", "content"})
 
 
 def authorize_action(
@@ -146,15 +147,21 @@ def authorize_action(
         return Denial(403, "forbidden", "admin role required")
     if action == "audit" and principal.role not in {"owner", "admin", "auditor"}:
         return Denial(403, "forbidden", "audit role required")
-    if action == "content" and principal.role == "auditor":
+    if action in {"content", "approval_list"} and principal.role == "auditor":
         return Denial(403, "forbidden", "auditor cannot read chat content")
     effective = profile
-    if action in _SCOPED_ACTIONS:
+    # approval_list is scoped when a profile is named. With no name, the
+    # caller is allowed through and the list is filtered to cards they
+    # may see. Memory, skills, and routines stay on ``content`` and still
+    # require a profile.
+    if action in _SCOPED_ACTIONS or action == "approval_list":
         scoped = _scoped_profile(profile, runtime_profile, multi=multi_profile)
         if scoped.code == "unscoped" and action == "approve":
             if can_approve(principal.role, None):
                 return _ALLOW
             return Denial(403, "forbidden", "unscoped approvals are owner or admin only")
+        if scoped.code == "unscoped" and action == "approval_list":
+            return _ALLOW
         if scoped.code == "unscoped":
             return Denial(403, "forbidden", "a profile is required")
         if not scoped.ok:
@@ -177,7 +184,7 @@ def authorize_action(
         return Denial(403, "forbidden", "this role cannot approve")
     if action == "chat" and not can_chat(principal.role, membership):
         return Denial(403, "forbidden", "this role cannot chat")
-    if action == "content" and principal.role == "auditor":
+    if action in {"content", "approval_list"} and principal.role == "auditor":
         return Denial(403, "forbidden", "auditor cannot read chat content")
     return _ALLOW
 
