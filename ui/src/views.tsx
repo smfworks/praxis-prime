@@ -247,11 +247,26 @@ export function FactorsView() {
     queryKey: ["factors"],
     queryFn: () => api("GET", "/v1/auth/factors"),
   });
+  const identities = useQuery({
+    queryKey: ["oidc-identities"],
+    queryFn: () => api("GET", "/v1/auth/oidc/identities"),
+  });
+  const providers = useQuery({
+    queryKey: ["oidc-providers"],
+    queryFn: () => api("GET", "/v1/auth/oidc/providers"),
+  });
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [enrollment, setEnrollment] = useState<Record<string, unknown> | null>(null);
+  const [linkProvider, setLinkProvider] = useState("");
   const totp = factors.data?.totp === true;
   const passkeys = factors.data ? rowsOf(factors.data, "passkeys") : [];
+  const linked = identities.data ? rowsOf(identities.data, "identities") : [];
+  const providerRows = providers.data
+    ? rowsOf(providers.data, "providers")
+        .map((item) => ({ id: textOf(item.id), displayName: textOf(item.displayName) }))
+        .filter((item) => item.id && item.displayName)
+    : [];
 
   async function stepUp(password: string, code: string): Promise<string> {
     const body = await api("POST", "/v1/auth/step-up", { password, code });
@@ -309,10 +324,35 @@ export function FactorsView() {
     await client.invalidateQueries({ queryKey: ["factors"] });
   }
 
+  async function linkIdentity(password: string, code: string) {
+    setError("");
+    if (!linkProvider) throw new Error("choose a provider");
+    const token = await stepUp(password, code);
+    const body = await api("POST", "/v1/auth/oidc/link", {
+      provider: linkProvider,
+      stepUpToken: token,
+    });
+    const url = textOf(body.authorizationUrl);
+    if (!url) throw new Error("linking could not be started");
+    window.location.assign(url);
+  }
+
+  async function unlinkIdentity(issuer: string, subject: string, password: string, code: string) {
+    setError("");
+    const token = await stepUp(password, code);
+    await api("POST", "/v1/auth/oidc/unlink", {
+      issuer,
+      subject,
+      stepUpToken: token,
+    });
+    setNotice("Identity unlinked.");
+    await client.invalidateQueries({ queryKey: ["oidc-identities"] });
+  }
+
   return (
     <section className="grid gap-4">
       <h1 className="text-xl font-semibold">Security</h1>
-      <p className="text-muted">Changing a passkey or authenticator asks for a fresh step-up.</p>
+      <p className="text-muted">Changing a passkey, authenticator, or linked identity asks for a fresh step-up.</p>
       {factors.isError ? (
         <p className="text-danger" role="alert">
           {factors.error instanceof Error ? factors.error.message : "could not load factors"}
@@ -377,6 +417,57 @@ export function FactorsView() {
         })}
       </ul>
       <PasskeyForm totp={totp} onSubmit={(name, password, code) => addPasskey(name, password, code).catch(show(setError))} />
+      <h2 className="font-semibold">Linked identities</h2>
+      <ul className="grid gap-2">
+        {linked.length === 0 ? <li className="text-muted">No linked identities.</li> : null}
+        {linked.map((item) => {
+          const issuer = textOf(item.issuer);
+          const subject = textOf(item.subject);
+          const label = textOf(item.displayName) || issuer;
+          return (
+            <li key={`${issuer}|${subject}`} className="rounded-md border border-line bg-card p-3">
+              <p>{label}</p>
+              <p className="text-sm text-muted">{issuer}</p>
+              <StepUpForm
+                legend={`Unlink ${label}`}
+                totp={totp}
+                submitLabel={`Unlink ${label}`}
+                onSubmit={(password, code) =>
+                  unlinkIdentity(issuer, subject, password, code).catch(show(setError))
+                }
+              />
+            </li>
+          );
+        })}
+      </ul>
+      {providerRows.length ? (
+        <div className="grid gap-2 rounded-md border border-line bg-card p-3">
+          <h3 className="font-semibold">Link identity</h3>
+          <label className="grid gap-1">
+            Provider
+            <select
+              className="field"
+              value={linkProvider}
+              onChange={(event) => setLinkProvider(event.target.value)}
+            >
+              <option value="">Choose…</option>
+              {providerRows.map((item) => (
+                <option key={item.id} value={item.id}>
+                  {item.displayName}
+                </option>
+              ))}
+            </select>
+          </label>
+          <StepUpForm
+            legend="Confirm link"
+            totp={totp}
+            submitLabel="Link identity"
+            onSubmit={(password, code) => linkIdentity(password, code).catch(show(setError))}
+          />
+        </div>
+      ) : (
+        <p className="text-muted">No OIDC providers are configured.</p>
+      )}
     </section>
   );
 }

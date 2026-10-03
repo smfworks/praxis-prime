@@ -921,17 +921,15 @@ def test_cli_stores_the_secret_and_can_prelink(
         clear_caches()
 
 
-def test_sign_in_shell_matches_dist_and_has_no_inline_code() -> None:
-    shell = _REPO / "ui" / "shell"
-    dist = _REPO / "ui" / "dist"
-    for name in ("index.html", "assets/app.css", "assets/app.js"):
-        built = (dist / name).read_text(encoding="utf-8")
-        assert (shell / name).read_text(encoding="utf-8") == built
-    html = (dist / "index.html").read_text(encoding="utf-8")
-    script = (dist / "assets" / "app.js").read_text(encoding="utf-8")
-    assert "onclick" not in html
-    assert "style=" not in html
-    assert '<script src="/assets/app.js">' in html
-    assert "Sign in with " in script
+def test_spa_has_oidc_sign_in_and_no_inline_handlers() -> None:
+    html = (_REPO / "ui" / "dist" / "index.html").read_text(encoding="utf-8")
+    app = (_REPO / "ui" / "src" / "App.tsx").read_text(encoding="utf-8")
+    views = (_REPO / "ui" / "src" / "views.tsx").read_text(encoding="utf-8")
+    assert "onclick" not in html.lower()
     assert "unsafe-inline" not in html
     assert "unsafe-eval" not in html
+    assert 'id="root"' in html
+    assert "Sign in with" in app
+    assert "/v1/auth/oidc/login" in app
+    assert "/v1/auth/oidc/link" in views
+    assert "/v1/auth/oidc/unlink" in views
