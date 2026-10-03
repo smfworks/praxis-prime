@@ -183,7 +183,13 @@ def build_runtime(
             {} if env is None else env,
             config_path=config_path,
         )
-    router = build_router(settings, providers)
+    chosen = providers
+    if chosen is None:
+        from praxis_prime.router.stub import providers_from_env
+
+        source = os.environ if env is None else env
+        chosen = providers_from_env(source)
+    router = build_router(settings, chosen)
     if model:
         ref = parse_model_spec(model)
         router.use_primary(ref)

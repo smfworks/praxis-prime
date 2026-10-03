@@ -114,7 +114,7 @@ OIDC is not in this build. Neither is a rule that turns MFA on for every role ab
 
 ## Local web app
 
-The daemon serves the SPA when `ui/dist` or `PRAXIS_PRIME_UI_DIR` contains `index.html`. `GET /` and `GET /assets/…` are public so the sign-in page can load. Every other route stays on the allowlist and the same session, bearer, and CSRF checks. The HTML and asset responses set:
+The daemon serves the SPA from the packaged `ui/dist` tree (or `PRAXIS_PRIME_UI_DIR` when that directory contains `index.html`). `GET /` and `GET /assets/…` are public so the sign-in page can load. Every other route stays on the allowlist and the same session, bearer, and CSRF checks. The HTML and asset responses set:
 
 ```
 Content-Security-Policy: default-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data:; script-src 'self'; connect-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'

@@ -2,9 +2,24 @@
   "name": "@praxis-prime/ui",
   "private": true,
   "version": "0.0.1",
-  "description": "React SPA stub for the Praxis Prime web and desktop UI. Not bundled.",
+  "description": "Local web app for Praxis Prime. Built assets are served by praxis-primed.",
   "type": "module",
   "scripts": {
-    "dev": "echo \"UI bundling is not set up yet. See ui/README.md\" && exit 1"
+    "build": "tsc --noEmit && vite build",
+    "dev": "vite"
+  },
+  "dependencies": {
+    "@tanstack/react-query": "^5.90.2",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.1.13",
+    "@types/react": "^19.1.13",
+    "@types/react-dom": "^19.1.9",
+    "@vitejs/plugin-react": "^5.0.2",
+    "tailwindcss": "^4.1.13",
+    "typescript": "^5.9.2",
+    "vite": "^7.1.5"
   }
 }
