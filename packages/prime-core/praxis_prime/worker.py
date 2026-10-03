@@ -52,6 +52,7 @@ from praxis_prime.supervisor.ipc import (
 )
 from praxis_prime.supervisor.leases import LeaseStore
 from praxis_prime.supervisor.redact import redact_value
+from praxis_prime.supervisor.socketdir import ensure_private_dir
 
 _NOFILE = 256
 
@@ -447,7 +448,7 @@ class WorkerApp:
     def _run_routine(self, routine: object, trigger: str, inner: object) -> RoutineRun:
         routine_id = str(getattr(routine, "id", ""))
         owner = str(os.getpid())
-        decision = self.leases.acquire(routine_id, owner)
+        decision, token = self.leases.acquire(routine_id, owner)
         if decision == "skip":
             self._audit("routine.lease", "routine lease held or retry already used")
             return _skipped(routine_id, trigger, "lease held")
@@ -457,7 +458,7 @@ class WorkerApp:
         if actor and not self._supervisor_allows(actor):
             self.host.cancel_turn(actor="revoked")
             self._audit("access.revoked", "routine actor lost access")
-            self.leases.release(routine_id)
+            self.leases.release(routine_id, owner, token)
             return _skipped(routine_id, trigger, "membership revoked")
         stop_beat = threading.Event()
         beat_lock = threading.Lock()
@@ -468,7 +469,7 @@ class WorkerApp:
                 with beat_lock:
                     if stop_beat.is_set():
                         return
-                    self.leases.renew(routine_id, owner)
+                    self.leases.renew(routine_id, owner, token)
 
         thread = threading.Thread(target=beat, name="praxis-lease", daemon=True)
         thread.start()
@@ -477,7 +478,7 @@ class WorkerApp:
         finally:
             stop_beat.set()
             with beat_lock:
-                self.leases.release(routine_id)
+                self.leases.release(routine_id, owner, token)
             thread.join(timeout=2)
         return run
 
@@ -587,11 +588,14 @@ def _stamp_lock(fd: int) -> None:
 
 
 def _reap_stale_holder(path: Path) -> bool:
-    """Stop a holder whose supervisor cannot be shown to still be that process.
+    """Stop a holder whose supervisor is dead or whose start time does not match.
 
     A live pid is not enough: the pid may have been reused. The stamp has to
     carry the same start time. A stamp with no start time is reaped, and the
     signal goes to the holder recorded in the lock, not to the supervisor pid.
+    A different ``PRAXIS_PRIME_SUPERVISOR_TOKEN`` does not make a live
+    supervisor stale. Two supervisors on one data root have different tokens;
+    the second worker refuses while the first supervisor is still that process.
     """
     try:
         text = path.read_text(encoding="utf-8").split()
@@ -605,7 +609,7 @@ def _reap_stale_holder(path: Path) -> bool:
     except ValueError:
         return False
     started = text[2] if len(text) >= 3 and text[2] not in {"", "-"} else None
-    if worker_pid <= 1 or _same_supervisor(supervisor_pid, started):
+    if worker_pid <= 1 or _supervisor_still_running(supervisor_pid, started):
         return False
     for sig in (signal.SIGTERM, signal.SIGKILL):
         try:
@@ -618,8 +622,13 @@ def _reap_stale_holder(path: Path) -> bool:
     return not _pid_alive(worker_pid)
 
 
-def _same_supervisor(pid: int, started: str | None) -> bool:
-    """True only when ``pid`` is alive and its start time matches ``started``."""
+def _supervisor_still_running(pid: int, started: str | None) -> bool:
+    """True when the stamped supervisor is alive with that ``/proc`` start time.
+
+    The token in the lock is not part of this check. Matching pid and start
+    time means the process that stamped the lock is still that process, so
+    the holder is live and must not be signalled.
+    """
     if pid <= 1 or not started or not _pid_alive(pid):
         return False
     current = _process_start(pid)
@@ -629,9 +638,9 @@ def _same_supervisor(pid: int, started: str | None) -> bool:
 
 
 def _bind(path: Path) -> socket.socket:
+    ensure_private_dir(path.parent)
     if path.exists():
         path.unlink()
-    path.parent.mkdir(parents=True, exist_ok=True)
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     sock.bind(str(path))
     os.chmod(path, 0o600)

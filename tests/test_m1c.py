@@ -197,15 +197,21 @@ def test_routine_lease_retries_once_after_a_crash(tmp_path: Path):
     try:
         clock = {"now": 0.0}
         store = LeaseStore(db, clock=lambda: clock["now"], ttl=30)
-        assert store.acquire("routine", "owner-a") == "run"
-        assert store.acquire("routine", "owner-a") == "skip"
-        assert store.acquire("routine", "owner-b") == "skip"
+        ran, _token_a = store.acquire("routine", "owner-a")
+        assert ran == "run"
+        skipped, _empty = store.acquire("routine", "owner-a")
+        assert skipped == "skip"
+        skipped, _empty = store.acquire("routine", "owner-b")
+        assert skipped == "skip"
         clock["now"] = 31
-        assert store.acquire("routine", "owner-b") == "retry"
+        retry, token_b = store.acquire("routine", "owner-b")
+        assert retry == "retry"
         clock["now"] = 62
-        assert store.acquire("routine", "owner-c") == "skip"
-        store.release("routine")
-        assert store.acquire("routine", "owner-c") == "run"
+        skipped, _empty = store.acquire("routine", "owner-c")
+        assert skipped == "skip"
+        assert store.release("routine", "owner-b", token_b)
+        ran, _token_c = store.acquire("routine", "owner-c")
+        assert ran == "run"
     finally:
         db.close()
 
@@ -884,13 +890,13 @@ def test_a_long_profile_id_does_not_stop_startup(tmp_path: Path):
     chosen = None
     try:
         chosen = supervisor._socket_directory()
-        assert chosen != runtime
-        pointer = runtime / "socket-dir"
-        assert pointer.is_file()
-        assert pointer.stat().st_mode & 0o777 == 0o600
-        assert Path(pointer.read_text(encoding="utf-8").strip()) == chosen
+        from praxis_prime.supervisor.supervisor import _SOCKET_PATH_MAX, _socket_basename
+
+        sock = chosen / _socket_basename(chosen, supervisor._sock_tag, long_id)
+        assert len(os.fsencode(sock)) <= _SOCKET_PATH_MAX
         supervisor.start()
         assert supervisor.call("ada", "memory.list")["entries"] == []
+        assert supervisor.call(long_id, "memory.list")["entries"] == []
     finally:
         supervisor.close()
         if runtime.exists():
@@ -908,6 +914,8 @@ def test_stale_socket_directory_is_removed_on_start(tmp_path: Path):
     stale = Path(tempfile.mkdtemp(prefix="praxis-prime-socks-"))
     os.chmod(stale, 0o700)
     (stale / "deadbeef-supervisor.sock").write_bytes(b"")
+    aged = time.time() - 60
+    os.utime(stale, (aged, aged))
     supervisor = _supervisor(tmp_path, names=("ada",))
     try:
         supervisor.start()
@@ -990,9 +998,12 @@ def test_worker_spawned_from_a_short_lived_thread_stays_up(
         supervisor.close()
 
 
-def test_stale_lock_reap_checks_supervisor_start_time(tmp_path: Path):
+def test_stale_lock_reap_checks_supervisor_start_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     from praxis_prime.worker import _process_start, _reap_stale_holder
 
+    monkeypatch.setenv("PRAXIS_PRIME_SUPERVISOR_TOKEN", "token")
     lock = tmp_path / "worker.lock"
     holder_code = textwrap.dedent(
         """
@@ -1026,6 +1037,15 @@ def test_stale_lock_reap_checks_supervisor_start_time(tmp_path: Path):
     finally:
         kept.kill()
         kept.wait(timeout=5)
+
+    forged = hold(f"{os.getpid()} {started} other-token")
+    try:
+        # A different token belongs to another live supervisor. Do not kill it.
+        assert _reap_stale_holder(lock) is False
+        assert forged.poll() is None
+    finally:
+        forged.kill()
+        forged.wait(timeout=5)
 
     mismatched = hold(f"{os.getpid()} 1 token")
     assert _reap_stale_holder(lock) is True
@@ -1253,18 +1273,22 @@ def test_lease_renewal_keeps_a_long_run_from_being_retried(tmp_path: Path):
     try:
         clock = {"now": 0.0}
         store = LeaseStore(db, clock=lambda: clock["now"], ttl=30)
-        assert store.acquire("routine", "owner-a") == "run"
+        ran, token = store.acquire("routine", "owner-a")
+        assert ran == "run"
         clock["now"] = 20
-        assert store.renew("routine", "owner-a") is True
-        assert store.renew("routine", "owner-b") is False
-        assert store.renew("missing", "owner-a") is False
+        assert store.renew("routine", "owner-a", token) is True
+        assert store.renew("routine", "owner-b", token) is False
+        assert store.renew("missing", "owner-a", token) is False
         clock["now"] = 49
-        assert store.acquire("routine", "owner-b") == "skip"
+        skipped, _empty = store.acquire("routine", "owner-b")
+        assert skipped == "skip"
         clock["now"] = 50
-        assert store.renew("routine", "owner-a") is False
-        assert store.acquire("routine", "owner-b") == "retry"
+        assert store.renew("routine", "owner-a", token) is False
+        retry, _token_b = store.acquire("routine", "owner-b")
+        assert retry == "retry"
         clock["now"] = 81
-        assert store.acquire("routine", "owner-c") == "skip"
+        skipped, _empty = store.acquire("routine", "owner-c")
+        assert skipped == "skip"
     finally:
         db.close()
 
@@ -1274,13 +1298,18 @@ def test_reboot_clock_still_allows_one_lease_retry(tmp_path: Path):
     try:
         clock = {"now": 864000.0}
         first = LeaseStore(db, clock=lambda: clock["now"])
-        assert first.acquire("rt_00000001", "pid100") == "run"
+        ran, _token = first.acquire("rt_00000001", "pid100")
+        assert ran == "run"
         second = LeaseStore(db, clock=lambda: 60.0)
-        assert second.acquire("rt_00000001", "pid200") == "retry"
+        retry, _token = second.acquire("rt_00000001", "pid200")
+        assert retry == "retry"
         later = LeaseStore(db, clock=lambda: 864040.0)
-        assert later.acquire("rt_00000001", "pid200") == "skip"
-        assert later.acquire("rt_00000002", "pid200") == "run"
-        assert later.acquire("rt_00000002", "pid200") == "skip"
+        skipped, _empty = later.acquire("rt_00000001", "pid200")
+        assert skipped == "skip"
+        ran, _token = later.acquire("rt_00000002", "pid200")
+        assert ran == "run"
+        skipped, _empty = later.acquire("rt_00000002", "pid200")
+        assert skipped == "skip"
     finally:
         db.close()
 

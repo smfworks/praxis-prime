@@ -185,6 +185,15 @@ def spec_from_mapping(name: str, raw: object, *, source: str) -> ServerSpec:
         raise McpConfigError(f"MCP server {checked} write_scope cannot contain newlines")
     allow_raw = raw.get("env_allow") if "env_allow" in raw else raw.get("envAllow")
     env_allow = _optional_str_list(allow_raw)
+    # A repository can ship ``.prime/mcp.json``. That file cannot grant a
+    # host start, a network namespace, or extra parent environment names.
+    # Only the user config can set those.
+    if source == "project":
+        trust = "untrusted"
+        if sandbox == "off":
+            sandbox = "bwrap"
+        network = "off"
+        env_allow = None
     return ServerSpec(
         name=checked,
         transport=transport,

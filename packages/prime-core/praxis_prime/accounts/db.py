@@ -126,6 +126,7 @@ class AccountStore:
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA foreign_keys=ON")
+        self.conn.execute("PRAGMA busy_timeout=5000")
         self._lock = threading.Lock()
         self._login_slots = threading.BoundedSemaphore(LOGIN_CONCURRENCY)
         self._name_locks: dict[str, _NameLock] = {}
@@ -879,7 +880,8 @@ class AccountStore:
                 rp_id TEXT NOT NULL,
                 origin TEXT NOT NULL,
                 expires_at TEXT NOT NULL,
-                used INTEGER NOT NULL DEFAULT 0
+                used INTEGER NOT NULL DEFAULT 0,
+                session_id TEXT NOT NULL DEFAULT ''
             );
 
             CREATE TABLE IF NOT EXISTS webauthn_spent (
@@ -905,6 +907,11 @@ class AccountStore:
             """
         )
         self._ensure_column("ws_tickets", "session_id", "session_id TEXT NOT NULL DEFAULT ''")
+        self._ensure_column(
+            "webauthn_challenges",
+            "session_id",
+            "session_id TEXT NOT NULL DEFAULT ''",
+        )
         self._ensure_column(
             "accounts",
             "second_factor_failures",

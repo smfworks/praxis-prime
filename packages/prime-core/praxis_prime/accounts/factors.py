@@ -38,7 +38,14 @@ from praxis_prime.accounts.passkeys import (
     verify_authentication,
     verify_registration,
 )
-from praxis_prime.accounts.seal import LEGACY_AAD, account_aad, new_key, seal, unseal
+from praxis_prime.accounts.seal import (
+    LEGACY_AAD,
+    account_aad,
+    challenge_key,
+    new_key,
+    seal,
+    unseal,
+)
 from praxis_prime.accounts.totp import (
     matching_step,
     new_recovery_codes,
@@ -157,6 +164,10 @@ class Factors:
                     self.store.conn.rollback()
                     self.store._note_second_factor_failure(account.id)
                     raise FactorError("invalid code", status=401, code="unauthorized")
+                self.store.conn.execute(
+                    "DELETE FROM step_up WHERE account_id = ?",
+                    (account.id,),
+                )
                 self.store._clear_failure_counters(account.id)
                 self.store.conn.commit()
 
@@ -293,10 +304,19 @@ class Factors:
         *,
         origin_header: str,
         port: int,
+        session_id: str,
     ) -> dict[str, object]:
+        """Start a registration ceremony for the session that spent a step-up.
+
+        The caller spends the step-up token before this. Verify finishes
+        this ceremony and does not ask for a second token. Another session
+        cannot finish it.
+        """
         selected = loopback_ceremony(origin_header, port)
         if selected is None:
             raise FactorError("origin is not allowed")
+        if not isinstance(session_id, str) or not session_id or len(session_id) > 128:
+            raise FactorError("authentication required", status=401, code="unauthorized")
         rp_id, origin = selected
         with self.store._lock:
             try:
@@ -313,7 +333,14 @@ class Factors:
                     user_display_name=account.display_name,
                     exclude=[item for item in exclude if item],
                 )
-                self._store_challenge(account.id, "register", ceremony.challenge, rp_id, origin)
+                self._store_challenge(
+                    account.id,
+                    "register",
+                    ceremony.challenge,
+                    rp_id,
+                    origin,
+                    session_id=session_id,
+                )
                 self.store.conn.commit()
             except Exception:
                 self.store.conn.rollback()
@@ -326,13 +353,23 @@ class Factors:
         credential: object,
         *,
         name: str = "",
+        session_id: str,
     ) -> dict[str, object]:
+        """Finish the ceremony ``begin_registration`` stored for ``session_id``.
+
+        A different session leaves the ceremony unused. A matching session
+        spends it, including when the authenticator proof is rejected.
+        """
         challenge = client_challenge(credential)
         if challenge is None or not isinstance(credential, dict):
             raise FactorError("passkey was rejected", status=401, code="unauthorized")
+        if not isinstance(session_id, str) or not session_id or len(session_id) > 128:
+            raise FactorError("passkey was rejected", status=401, code="unauthorized")
         with self.store._account_gate(account.username):
             with self.store._lock:
-                row = self._take_challenge(challenge, "register", account.id)
+                row = self._take_challenge(
+                    challenge, "register", account.id, session_id=session_id
+                )
                 if row is None:
                     self.store._note_second_factor_failure(account.id)
                     raise FactorError("passkey was rejected", status=401, code="unauthorized")
@@ -407,8 +444,8 @@ class Factors:
 
         A recovery code counts as that second factor and is consumed. The
         token is bound to ``session_id`` (empty for the loopback bearer) and
-        lasts five minutes. It can be presented more than once in that window
-        so a registration ceremony can use options and then verify.
+        lasts five minutes. The first factor change spends it. A second
+        change needs a new token.
         """
         account = self._active(account_id)
         if not isinstance(session_id, str) or len(session_id) > 128:
@@ -472,22 +509,34 @@ class Factors:
         return self._mint_step_up(account.id, session_id)
 
     def step_up_valid(self, account_id: str, token: str, session_id: str) -> bool:
-        """True when ``token`` was minted for this account and session and is fresh."""
+        """Spend a fresh step-up token for this account and session.
+
+        The delete runs inside ``BEGIN IMMEDIATE``. A second presentation
+        of the same token finds no row.
+        """
         if not isinstance(token, str) or not token or len(token) > 256:
             return False
         if not isinstance(session_id, str) or len(session_id) > 128:
             return False
         with self.store._lock:
-            row = self.store.conn.execute(
-                """
-                SELECT account_id, session_id, expires_at
-                FROM step_up WHERE token_hash = ?
-                """,
-                (_hash(token),),
-            ).fetchone()
-        if row is None or str(row["expires_at"]) <= _now():
-            return False
-        return str(row["account_id"]) == account_id and str(row["session_id"]) == session_id
+            self.store.conn.execute("BEGIN IMMEDIATE")
+            try:
+                spent = self.store.conn.execute(
+                    """
+                    DELETE FROM step_up
+                    WHERE token_hash = ? AND account_id = ? AND session_id = ?
+                      AND expires_at > ?
+                    """,
+                    (_hash(token), account_id, session_id, _now()),
+                )
+                if spent.rowcount != 1:
+                    self.store.conn.rollback()
+                    return False
+                self.store.conn.commit()
+            except Exception:
+                self.store.conn.rollback()
+                raise
+        return True
 
     def _mint_step_up(self, account_id: str, session_id: str) -> str:
         raw = secrets.token_urlsafe(32)
@@ -525,28 +574,33 @@ class Factors:
         # The response never lists credential ids. The username is sealed
         # inside the challenge, so another account's passkey cannot finish
         # it, and the blob is not stored. Anonymous callers cannot fill the
-        # per-account cap that registration and step-up use.
+        # per-account cap that registration and step-up use. The key is
+        # read before a write transaction. A missing key is the only reason
+        # to take ``BEGIN IMMEDIATE``.
         with self.store._lock:
-            self.store.conn.execute("BEGIN IMMEDIATE")
-            try:
-                expires = int(datetime.now(UTC).timestamp()) + CHALLENGE_TTL_SECONDS
-                challenge = _seal_sign_in(
-                    self._key(),
-                    account_id=bound,
-                    rp_id=rp_id,
-                    origin=origin,
-                    expires=expires,
-                )
-                ceremony = authentication_options(
-                    rp_id=rp_id,
-                    origin=origin,
-                    allow=[],
-                    challenge=challenge,
-                )
-                self.store.conn.commit()
-            except Exception:
-                self.store.conn.rollback()
-                raise
+            key = self._read_key()
+            if key is None:
+                self.store.conn.execute("BEGIN IMMEDIATE")
+                try:
+                    key = self._key()
+                    self.store.conn.commit()
+                except Exception:
+                    self.store.conn.rollback()
+                    raise
+        expires = int(datetime.now(UTC).timestamp()) + CHALLENGE_TTL_SECONDS
+        challenge = _seal_sign_in(
+            challenge_key(key),
+            account_id=bound,
+            rp_id=rp_id,
+            origin=origin,
+            expires=expires,
+        )
+        ceremony = authentication_options(
+            rp_id=rp_id,
+            origin=origin,
+            allow=[],
+            challenge=challenge,
+        )
         return ceremony.options
 
     def finish_authentication(self, credential: object) -> Account | None:
@@ -738,7 +792,7 @@ class Factors:
         if key is None:
             return None
         try:
-            raw = unseal(key, challenge, aad=_SIGNIN_AAD)
+            raw = unseal(challenge_key(key), challenge, aad=_SIGNIN_AAD)
         except Exception:
             return None
         parsed = _unpack_sign_in(raw)
@@ -972,6 +1026,8 @@ class Factors:
         challenge: bytes,
         rp_id: str,
         origin: str,
+        *,
+        session_id: str = "",
     ) -> None:
         self.store.conn.execute(
             "DELETE FROM webauthn_challenges WHERE used = 1 OR expires_at <= ?",
@@ -1001,10 +1057,10 @@ class Factors:
         self.store.conn.execute(
             """
             INSERT INTO webauthn_challenges (
-                challenge, account_id, kind, rp_id, origin, expires_at, used
-            ) VALUES (?, ?, ?, ?, ?, ?, 0)
+                challenge, account_id, kind, rp_id, origin, expires_at, used, session_id
+            ) VALUES (?, ?, ?, ?, ?, ?, 0, ?)
             """,
-            (challenge, account_id, kind, rp_id, origin, expires),
+            (challenge, account_id, kind, rp_id, origin, expires, session_id),
         )
 
     def _take_challenge(
@@ -1012,10 +1068,12 @@ class Factors:
         challenge: bytes,
         kind: str,
         account_id: str,
+        *,
+        session_id: str | None = None,
     ) -> sqlite3.Row | None:
         row = self.store.conn.execute(
             """
-            SELECT account_id, kind, rp_id, origin, expires_at, used
+            SELECT account_id, kind, rp_id, origin, expires_at, used, session_id
             FROM webauthn_challenges WHERE challenge = ?
             """,
             (challenge,),
@@ -1023,6 +1081,11 @@ class Factors:
         if row is None or str(row["kind"]) != kind or int(row["used"]):
             return None
         if str(row["expires_at"]) <= _now() or str(row["account_id"]) != account_id:
+            return None
+        # A registration ceremony is bound to the session that spent the
+        # step-up. A mismatch leaves the row unused so that session can
+        # still finish it. Other ceremonies do not pass ``session_id``.
+        if session_id is not None and str(row["session_id"]) != session_id:
             return None
         cursor = self.store.conn.execute(
             "UPDATE webauthn_challenges SET used = 1 WHERE challenge = ? AND used = 0",

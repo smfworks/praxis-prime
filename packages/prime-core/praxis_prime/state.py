@@ -14,6 +14,7 @@ from __future__ import annotations
 import fcntl
 import os
 import sqlite3
+import stat
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -169,27 +170,80 @@ def refuse_misplaced_database(path: Path) -> None:
     """Refuse ``<account-root>/profiles/prime.db``, or an illegal profile id.
 
     ``--data-dir <data>/profiles`` would otherwise create
-    ``profiles/prime.db`` beside the real profile folders. A data directory
-    that is itself named ``profiles``, and is not that folder inside an
-    account root, is a normal data directory. A folder such as
-    ``profiles/Bad_Name`` is not a profile id and must not open without
-    profile scoping.
+    ``profiles/prime.db`` beside the real profile folders. The path is
+    resolved first, so ``..`` and a symlink do not skip the check. The
+    parent directory is also compared by device and inode with the
+    profiles directory, so a bind-mount alias is refused even when its
+    name is not ``profiles``. A data directory that is itself named
+    ``profiles``, and is not that folder inside an account root, is a
+    normal data directory. A folder such as ``profiles/Bad_Name`` is not
+    a profile id and must not open without profile scoping.
     """
-    candidate = Path(path)
+    candidate = _resolve_database(path)
     if candidate.name != DB_FILENAME:
         return
     parent = candidate.parent
-    if parent.name == "profiles" and _profiles_tree_inside_account_root(parent):
+    if _is_profiles_directory(parent):
         raise ValueError(
             "refusing to use a profiles directory as the data directory; "
             "pass the account data root"
         )
-    if parent.parent.name != "profiles":
+    profiles = parent.parent
+    if profiles.name != "profiles" and not _same_directory(profiles, _known_profiles_dir()):
         return
     from praxis_prime.profiles.ids import profile_id
 
     if profile_id(parent.name) is None:
         raise ValueError(f"invalid profile id {parent.name!r}")
+
+
+def _resolve_database(path: Path) -> Path:
+    """Collapse ``..`` and symlinks. A path that cannot be resolved is kept."""
+    try:
+        return Path(os.path.realpath(path, strict=False))
+    except (OSError, RuntimeError, ValueError):
+        return Path(path)
+
+
+def _directory_id(path: Path | None) -> tuple[int, int] | None:
+    if path is None:
+        return None
+    try:
+        info = os.stat(path)
+    except OSError:
+        return None
+    if not stat.S_ISDIR(info.st_mode):
+        return None
+    return (info.st_dev, info.st_ino)
+
+
+def _same_directory(left: Path, right: Path | None) -> bool:
+    ident = _directory_id(left)
+    other = _directory_id(right)
+    return ident is not None and ident == other
+
+
+def _known_profiles_dir() -> Path | None:
+    """The default account root's ``profiles`` directory, when it exists."""
+    try:
+        candidate = data_dir() / "profiles"
+    except (OSError, RuntimeError, ValueError):
+        return None
+    if _directory_id(candidate) is None:
+        return None
+    return candidate
+
+
+def _is_profiles_directory(parent: Path) -> bool:
+    """True when ``parent`` is an account root's profile tree.
+
+    The name check covers a custom ``--data-dir``. The inode check covers
+    a bind mount of that tree under another name, including the default
+    XDG ``profiles`` directory.
+    """
+    if parent.name == "profiles" and _profiles_tree_inside_account_root(parent):
+        return True
+    return _same_directory(parent, _known_profiles_dir())
 
 
 def _profiles_tree_inside_account_root(profiles_dir: Path) -> bool:

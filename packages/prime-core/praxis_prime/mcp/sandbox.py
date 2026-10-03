@@ -4,19 +4,24 @@ bubblewrap is used when ``bwrap`` is on PATH and the server asks for it.
 The parent environment is never passed through. Only the allowlist, plus
 values the user wrote on that server, are visible to the child.
 
-The server's working directory is mounted read-only. A read-write bind is
-added only for an explicit per-server directory that a person approved.
-That directory is never ``$HOME``, never the main checkout, and never an
-account-data root or a directory that contains one. Every account-data
-root inside a bind is covered with a tmpfs, including the read-only cwd
-and argument mounts. Path arguments that name account data are not
-mounted. The mount decision is written to the audit log. When the sandbox
-is off or ``bwrap`` is missing, the audit row says ``host`` and no
-write-scope approval is requested.
+The server's working directory is mounted read-only unless ``write_scope``
+is approved. That directory is never ``$HOME``, never the main checkout,
+and never an account-data root or a directory that contains one. Every
+account-data root inside a bind is covered with a tmpfs, including the
+read-only cwd and argument mounts. An approved task worktree inside that
+root is bound again after the tmpfs so the write is actually visible.
+Any hard link to account data inside a mount is covered with ``/dev/null``.
+The link count only decides whether to walk. There is no early stop, and a
+masked account-data directory is not walked, except an approved worktree.
+The check is at launch. A link created after the scan and before the
+process starts is not covered.
+Path arguments that name account data are not mounted. The mount decision
+is written to the audit log.
 
-A failed bubblewrap start does not fall back to the host. A missing
-``bwrap`` binary runs the command with the same allowlist and no extra
-variables. ARCHITECTURE §13.
+A failed bubblewrap start does not fall back to the host. The host is
+refused while account data exists, and an untrusted server is refused
+unless this call was approved. A trusted server with ``sandbox`` ``off``
+may start on the host when no account data exists. ARCHITECTURE §13.
 """
 
 from __future__ import annotations
@@ -31,7 +36,9 @@ from praxis_prime.sandbox.bwrap import (
     _data_dir_mask,
     _is_task_worktree,
     _path_inside,
+    _tmpfs_targets,
     bwrap_available,
+    hardlink_cover_argv,
     writable_scope_ok,
 )
 
@@ -199,9 +206,38 @@ def build_mcp_bwrap_argv(
         argv.extend(["--ro-bind", str(candidate), str(candidate)])
         bound.append(candidate)
         mounts.append((candidate, str(candidate)))
-    argv.extend(_data_dir_mask(mounts))
+    mask = _data_dir_mask(mounts)
+    argv.extend(mask)
+    rebind = _rebind_approved_worktree(mount)
+    argv.extend(rebind)
+    visible = [rebind[2]] if len(rebind) == 3 else []
+    argv.extend(hardlink_cover_argv(mounts, _tmpfs_targets(mask), visible))
     argv.extend(["--chdir", str(work), "--", command, *args])
     return argv
+
+
+def _rebind_approved_worktree(mount: McpMount) -> list[str]:
+    """Bind an approved worktree again so the data-root tmpfs does not hide it.
+
+    The first bind is underneath the mask. A later ``--bind`` of the same
+    worktree is the write the approval allowed. The audit row says ``rw``
+    only when this bind is the one that remains visible.
+    """
+    if mount.mode != "rw" or not mount.scope:
+        return []
+    scope = Path(mount.scope)
+    from praxis_prime.policy.boundary import _account_data_roots
+
+    roots = _account_data_roots()
+    if not roots:
+        return []
+    for root in roots:
+        relative = _path_inside(scope, root)
+        if relative is None or relative == Path("."):
+            continue
+        if _is_task_worktree(scope, relative):
+            return ["--bind", str(scope), str(scope)]
+    return []
 
 
 def popen_stdio(
@@ -219,8 +255,14 @@ def popen_stdio(
     main_checkout: Path | None = None,
     audit: Any = None,
     server: str = "",
+    host_approved: bool = False,
 ) -> subprocess.Popen[bytes]:
-    """Start the server. The returned process speaks MCP on stdin and stdout."""
+    """Start the server. The returned process speaks MCP on stdin and stdout.
+
+    ``host_approved`` is ignored when account data exists. The host is not
+    a fallback for that case. Callers set it for an approved untrusted
+    server, and for a trusted ``sandbox = "off"`` server with no account data.
+    """
     env = child_environment(command, allow, explicit, parent)
     work = cwd.resolve()
     work.mkdir(parents=True, exist_ok=True)
@@ -233,8 +275,25 @@ def popen_stdio(
             main_checkout=main_checkout,
         )
     else:
+        from praxis_prime.policy.boundary import account_data_present
+
         # Nothing is mounted. Recording ``ro`` would claim a sandbox that
-        # did not run, and a write scope is not applied on the host.
+        # did not run. Account data fails closed. A fresh install still
+        # needs an approval before the process starts.
+        if account_data_present() or not host_approved:
+            audit_mcp_mount(
+                audit,
+                server=server,
+                mount=McpMount("host", "deny", ""),
+                main_checkout=main_checkout,
+            )
+            if account_data_present():
+                raise RuntimeError(
+                    "refusing to run this MCP server on the host while account data exists"
+                )
+            raise RuntimeError(
+                "this MCP server was not approved to run on the host; it was not started"
+            )
         mount = McpMount("host", "allow", "")
     audit_mcp_mount(audit, server=server, mount=mount, main_checkout=main_checkout)
     if use_bwrap:

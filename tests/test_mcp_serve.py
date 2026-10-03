@@ -68,6 +68,8 @@ def test_serve_decide_recall_and_skills(tmp_path: Path):
             "XDG_CACHE_HOME": env["XDG_CACHE_HOME"],
         }
     )
+    # Trusted sandbox=off is the product's own serve path. No account data
+    # is present, so it starts on the host without an approval gate.
     client = McpClient(spec, cwd=tmp_path, parent_env=env)
     try:
         client.connect()
