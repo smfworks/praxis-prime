@@ -133,24 +133,18 @@ def test_confirming_totp_deletes_pending_step_up_rows(tmp_path: Path) -> None:
         store.close()
 
 
-def test_anonymous_passkey_options_skip_the_write_lock_and_use_a_subkey(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_anonymous_passkey_options_skip_the_write_lock_and_use_a_subkey(tmp_path: Path) -> None:
     store = AccountStore(tmp_path / "accounts.db")
     try:
         factors = Factors(store)
         origin = "http://127.0.0.1:18790"
         factors.begin_authentication("", origin_header=origin, port=18790)
         seen: list[str] = []
-        real = store.conn.execute
-
-        def wrapped(sql: object, *args: object, **kwargs: object) -> object:
-            if isinstance(sql, str):
-                seen.append(sql)
-            return real(sql, *args, **kwargs)
-
-        monkeypatch.setattr(store.conn, "execute", wrapped)
-        options = factors.begin_authentication("", origin_header=origin, port=18790)
+        store.conn.set_trace_callback(seen.append)
+        try:
+            options = factors.begin_authentication("", origin_header=origin, port=18790)
+        finally:
+            store.conn.set_trace_callback(None)
         assert not any(item.strip().upper().startswith("BEGIN") for item in seen)
         challenge = options["challenge"]
         assert isinstance(challenge, str)

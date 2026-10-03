@@ -6,6 +6,7 @@ import os
 import sys
 from pathlib import Path
 
+from praxis_prime.approvals.gate import ApprovalDecision
 from praxis_prime.mcp.client import McpClient
 from praxis_prime.mcp.config import ServerSpec
 from praxis_prime.memory.tiers import MemoryStore
@@ -68,7 +69,14 @@ def test_serve_decide_recall_and_skills(tmp_path: Path):
             "XDG_CACHE_HOME": env["XDG_CACHE_HOME"],
         }
     )
-    client = McpClient(spec, cwd=tmp_path, parent_env=env)
+    class _AllowHost:
+        def authorize(self, request: object) -> ApprovalDecision:
+            del request
+            return ApprovalDecision.ALLOW_ONCE
+
+    # sandbox is off, and this tree has no account data, so the host start
+    # is an approval. The gate records that choice.
+    client = McpClient(spec, cwd=tmp_path, parent_env=env, gate=_AllowHost())
     try:
         client.connect()
         names = [tool.name for tool in client.tools]
