@@ -5,7 +5,7 @@
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-3776AB)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-**Status: pre-alpha.** A local agent loop is running: terminal chat, a model router, tools, a session audit log, coding mode (`praxis-prime code`), a loopback daemon (`praxis-primed`) with a WebSocket and HTTP gateway, and a local Decision Engine (`praxis-prime decide`, `POST /v1/decide`). Telegram can chat and approve. Swarm, voice, and the desktop UI are still stubs. Compliance dials, and the decision pre-screener, still default to off.
+**Status: pre-alpha.** A local agent loop is running: terminal chat, a model router, tools, a session audit log, coding mode (`praxis-prime code`), a loopback daemon (`praxis-primed`) with a WebSocket and HTTP gateway, and a local Decision Engine (`praxis-prime decide`, `POST /v1/decide`). When profiles exist, the daemon supervises one worker process per profile (memory, skills, routines, and approvals stay in that profile's data root). Telegram can chat and approve, and a bound chat only decides that person's approvals. Swarm, voice, and the desktop UI are still stubs. Compliance dials, and the decision pre-screener, still default to off.
 
 Praxis Prime is an open-source, local-first autonomous AI agent for Linux, by [SMF Works](https://github.com/smfworks) (Michael Gannotti). It is the flagship evolution of [SMF Praxis](https://github.com/smfworks/smf-praxis): a governed agent that can read, research, and draft on its own, and that stops for a human when an action has consequences. Sending, deleting, spending, sharing, and publishing stay behind that approval spine. Regulatory overlays are optional dials, and they ship **off**.
 
@@ -147,7 +147,7 @@ Condensed from [ARCHITECTURE §29](docs/ARCHITECTURE.md) and [Blueprint Addendum
 | # | Milestone | Phase |
 |---|---|---|
 | **M0** | Packs ship in the wheel. Legacy `pack.json` loader ignores `ollama-cloud` model pins and pack dashboard JavaScript. | MVP completion (v0.2–0.3) |
-| **M1** | Web shell, accounts, and profiles. Loopback only. **M1a** accounts, roles, and profiles (merged). **M1b** passkeys + TOTP (local enrollment and sign-in on the loopback daemon). **M1c** per-profile workers and supervisor. **M1d** SPA (shell, profile picker, admin console). **M1e** OIDC. | MVP completion (v0.2–0.3) |
+| **M1** | Web shell, accounts, and profiles. Loopback only. **M1a** accounts, roles, and profiles (merged). **M1b** passkeys + TOTP (local enrollment and sign-in on the loopback daemon). **M1c** per-profile workers and supervisor (in the tree; see [SECURITY.md](docs/SECURITY.md)). **M1d** SPA (shell, profile picker, admin console). **M1e** OIDC. | MVP completion (v0.2–0.3) |
 | **M2** | First-run wizard. Remove the hard-coded Ollama default. | MVP completion (v0.2–0.3) |
 | **M3** | Theme packages and seven built-in themes. | MVP completion (v0.2–0.3) |
 | **M4** | Local sandbox and agent computer: T1 bubblewrap (data-root mask and denylist) for shell, T2 rootless Podman for builds and the virtual desktop. | v0.5 |

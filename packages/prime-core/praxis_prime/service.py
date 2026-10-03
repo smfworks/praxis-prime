@@ -19,6 +19,7 @@ from pathlib import Path
 from praxis_prime.paths import cache_dir, data_dir, state_dir
 
 UNIT_NAME = "praxis-prime.service"
+SLICE_NAME = "praxis-prime-workers.slice"
 _PACKAGED_EXEC = "/usr/bin/praxis-primed"
 
 
@@ -51,6 +52,8 @@ def render_user_unit(exec_start: str) -> str:
         "Environment=PRAXIS_PRIME_LOG=info\n"
         "Environment=PYTHONUNBUFFERED=1\n"
         "Environment=PYTHONDONTWRITEBYTECODE=1\n"
+        "# Profile workers join praxis-prime-workers.slice when this is on.\n"
+        "Environment=PRAXIS_PRIME_WORKER_SLICE=on\n"
         "\n"
         "[Install]\n"
         "WantedBy=default.target\n"
@@ -59,6 +62,23 @@ def render_user_unit(exec_start: str) -> str:
 
 def packaged_unit_text() -> str:
     return render_user_unit(_PACKAGED_EXEC)
+
+
+def render_worker_slice() -> str:
+    """User slice for profile workers. ARCHITECTURE §26."""
+    return (
+        "# Resource cap for per-profile workers.\n"
+        "# Installed by `praxis-prime service install`.\n"
+        "# ARCHITECTURE §26. The daemon sets PRAXIS_PRIME_WORKER_SLICE=on.\n"
+        "[Unit]\n"
+        "Description=Praxis Prime profile workers\n"
+        "Documentation=https://github.com/smfworks/praxis-prime\n"
+        "\n"
+        "[Slice]\n"
+        "MemoryMax=512M\n"
+        "CPUQuota=50%\n"
+        "TasksMax=64\n"
+    )
 
 
 def systemd_user_dir(env: Mapping[str, str] | None = None) -> Path:
@@ -74,6 +94,10 @@ def unit_path(env: Mapping[str, str] | None = None) -> Path:
     return systemd_user_dir(env) / UNIT_NAME
 
 
+def slice_path(env: Mapping[str, str] | None = None) -> Path:
+    return systemd_user_dir(env) / SLICE_NAME
+
+
 def daemon_exec() -> list[str]:
     found = shutil.which("praxis-primed")
     if found:
@@ -87,6 +111,7 @@ def install(env: Mapping[str, str] | None = None) -> int:
     path = unit_path(env)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(render_user_unit(command), encoding="utf-8")
+    slice_path(env).write_text(render_worker_slice(), encoding="utf-8")
     _ensure_state_dirs(env)
     print(f"praxis-prime service: wrote {path}")
     reload = _systemctl(["daemon-reload"])
@@ -103,6 +128,8 @@ def uninstall(env: Mapping[str, str] | None = None) -> int:
     _systemctl(["disable", "--now", UNIT_NAME], check=False)
     path = unit_path(env)
     path.unlink(missing_ok=True)
+    workers = slice_path(env)
+    workers.unlink(missing_ok=True)
     print(f"praxis-prime service: removed {path}")
     return _systemctl(["daemon-reload"], check=False)
 

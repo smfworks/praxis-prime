@@ -1,0 +1,11 @@
+# Resource cap for per-profile workers.
+# Installed by `praxis-prime service install`.
+# ARCHITECTURE §26. The daemon sets PRAXIS_PRIME_WORKER_SLICE=on.
+[Unit]
+Description=Praxis Prime profile workers
+Documentation=https://github.com/smfworks/praxis-prime
+
+[Slice]
+MemoryMax=512M
+CPUQuota=50%
+TasksMax=64

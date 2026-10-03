@@ -113,8 +113,9 @@ def authenticate_http(
     return Denial(401, "unauthorized", "authentication required")
 
 
-# Chat, approval, routine fire, model.set, and session.drop. Until per-profile
-# workers exist, these run only on the profile this process opened.
+# Chat, approval, routine fire, model.set, and session.drop. With one
+# in-process runtime, these run only on the profile that process opened.
+# The supervisor sets multi_profile so each call names its own worker.
 _SCOPED_ACTIONS = frozenset({"chat", "approve"})
 
 
@@ -126,13 +127,14 @@ def authorize_action(
     profile: str,
     profile_exists: Callable[[str], bool] | None = None,
     runtime_profile: str = "",
+    multi_profile: bool = False,
 ) -> Denial:
-    """Enforce the server role and membership on this process's profile.
+    """Enforce the server role and membership.
 
-    An empty profile is not a pass. Scoped actions need the runtime profile
-    and a membership, unless the caller is owner or admin. Unscoped
-    approvals (no profile on the card and none on this process) are
-    owner/admin only.
+    An empty profile is not a pass. A single-process daemon only runs the
+    profile it opened. The supervisor accepts any profile the caller may
+    use. Unscoped approvals (no profile on the card and none on this
+    process) are owner/admin only.
     """
     if principal.kind == "legacy" or store is None or not accounts_enforced(store):
         return _ALLOW
@@ -148,7 +150,7 @@ def authorize_action(
         return Denial(403, "forbidden", "auditor cannot read chat content")
     effective = profile
     if action in _SCOPED_ACTIONS:
-        scoped = _scoped_profile(profile, runtime_profile)
+        scoped = _scoped_profile(profile, runtime_profile, multi=multi_profile)
         if scoped.code == "unscoped" and action == "approve":
             if can_approve(principal.role, None):
                 return _ALLOW
@@ -319,14 +321,27 @@ def principal_from_ticket(store: AccountStore, token: str) -> Principal | None:
     )
 
 
-def _scoped_profile(requested: str, runtime_profile: str) -> Denial:
+def _scoped_profile(requested: str, runtime_profile: str, *, multi: bool = False) -> Denial:
     """The profile this action may use, or a denial.
 
     ``message`` holds the profile id when ``code`` is empty. ``unscoped``
-    means neither the caller nor this process named a profile.
+    means neither the caller nor this process named a profile. ``multi``
+    is the supervisor: a named profile is not compared to one runtime.
     """
     raw = requested.strip()
     bound = runtime_profile.strip()
+    if multi:
+        if raw:
+            named = profile_id(raw)
+            if named is None:
+                return Denial(400, "bad_request", "invalid profile id")
+            return Denial(0, "", named)
+        if bound:
+            named = profile_id(bound)
+            if named is None:
+                return Denial(403, "forbidden", "invalid profile id")
+            return Denial(0, "", named)
+        return Denial(0, "unscoped", "")
     if raw:
         named = profile_id(raw)
         if named is None:

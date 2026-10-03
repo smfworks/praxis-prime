@@ -289,6 +289,9 @@ class StateDB:
     def __init__(self, path: Path, *, allow_during_migration: bool = False) -> None:
         self.path = Path(path)
         self._lock_fds: list[int] = []
+        from praxis_prime.supervisor.confine import refuse_worker_path
+
+        refuse_worker_path(self.path)
         refuse_misplaced_database(self.path)
         if not allow_during_migration:
             refuse_if_migrating(self.path)

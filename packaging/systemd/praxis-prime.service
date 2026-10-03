@@ -23,6 +23,8 @@ WorkingDirectory=%h
 Environment=PRAXIS_PRIME_LOG=info
 Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONDONTWRITEBYTECODE=1
+# Profile workers join praxis-prime-workers.slice when this is on.
+Environment=PRAXIS_PRIME_WORKER_SLICE=on
 
 [Install]
 WantedBy=default.target

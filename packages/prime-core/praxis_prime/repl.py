@@ -313,6 +313,7 @@ def run_remote_repl(
     write: Write,
     color: bool = False,
     interactive: bool = False,
+    profile: str = "",
 ) -> int:
     """Chat through a running daemon. Approvals can be answered here or elsewhere."""
     try:
@@ -351,7 +352,7 @@ def run_remote_repl(
         if command.startswith("/model "):
             spec = command.split(None, 1)[1].strip()
             try:
-                chosen = client.set_model(spec)
+                chosen = client.set_model(spec, profile=profile or None)
             except GatewayError as exc:
                 write(f"{exc}\n")
                 continue
@@ -389,6 +390,7 @@ def run_remote_repl(
                 session_id=session_id,
                 on_event=lambda payload: _render_remote(payload, write, color=color),
                 decider=decider,
+                profile=profile or None,
             )
         except KeyboardInterrupt:
             write("\n  (interrupt)\n")
@@ -411,6 +413,7 @@ def run_remote_ask(
     color: bool = False,
     decider: Callable[[dict[str, object]], str | None] | None = None,
     session_id: str | None = None,
+    profile: str = "",
 ) -> int:
     try:
         result = client.chat(
@@ -418,6 +421,7 @@ def run_remote_ask(
             session_id=session_id,
             on_event=lambda payload: _render_remote_ask(payload, write_out, write_err, color=color),
             decider=decider,
+            profile=profile or None,
         )
     except KeyboardInterrupt:
         write_err("\n(turn cancelled)\n")

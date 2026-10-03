@@ -16,6 +16,7 @@ from praxis_prime import __version__
 from praxis_prime.approvals.gate import approval_account_id
 from praxis_prime.approvals.queue import ApprovalQueue
 from praxis_prime.channels.trust import untrusted_channel_message
+from praxis_prime.loop.control import TurnControl
 from praxis_prime.loop.events import StatusEvent, TurnEnded
 from praxis_prime.memory.tiers import memory_channel
 from praxis_prime.router.types import TextDelta
@@ -41,6 +42,8 @@ class Host:
         self.started_at = time.time()
         self._lock = threading.RLock()
         self._closed = False
+        self._control: TurnControl | None = None
+        self._active_account = ""
         self.runtime.gate.approver = queue.authorize
 
     def chat(
@@ -68,10 +71,13 @@ class Host:
             final = ""
             error: str | None = None
             cancelled = False
+            control = TurnControl()
+            self._control = control
+            self._active_account = owner_account
             token = memory_channel.set(channel)
             account_token = approval_account_id.set(owner_account)
             try:
-                for event in loop.run_turn(body):
+                for event in loop.run_turn(body, control):
                     payload = event_payload(event)
                     if on_event is not None:
                         on_event(payload)
@@ -82,6 +88,8 @@ class Host:
                         error = event.error
                         cancelled = event.cancelled
             finally:
+                self._control = None
+                self._active_account = ""
                 approval_account_id.reset(account_token)
                 memory_channel.reset(token)
             return TurnResult(
@@ -91,7 +99,8 @@ class Host:
                 cancelled=cancelled,
             )
 
-    def set_model(self, spec: str) -> str:
+    def set_model(self, spec: str, *, profile: str = "") -> str:
+        del profile
         with self._lock:
             if self._closed:
                 raise RuntimeError("daemon is shut down")
@@ -114,6 +123,18 @@ class Host:
                 self.runtime.gate.clear(session_id, account_id=account_id)
                 return
             self.runtime.gate.clear(session_id)
+
+    def active_account(self) -> str:
+        return self._active_account
+
+    def cancel_turn(self, *, actor: str) -> bool:
+        """Stop the running turn. Returns False when nothing is running."""
+        control = self._control
+        if control is None:
+            return False
+        control.cancel()
+        self.queue.deny_all(actor=actor)
+        return True
 
     def status(self) -> dict[str, object]:
         with self._lock:

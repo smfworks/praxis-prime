@@ -6,7 +6,7 @@ import os
 import stat
 from pathlib import Path
 
-from praxis_prime.service import install, packaged_unit_text, uninstall
+from praxis_prime.service import install, packaged_unit_text, render_worker_slice, uninstall
 
 
 def test_packaged_unit_matches_the_file_and_stays_loopback():
@@ -22,6 +22,10 @@ def test_packaged_unit_matches_the_file_and_stays_loopback():
     assert "apt" not in text
     assert "pacman" not in text
     assert "Requires=graphical-session.target" not in text
+    assert "PRAXIS_PRIME_WORKER_SLICE=on" in text
+    slice_file = Path("packaging/systemd/praxis-prime-workers.slice")
+    assert slice_file.read_text(encoding="utf-8") == render_worker_slice()
+    assert "MemoryMax=512M" in slice_file.read_text(encoding="utf-8")
 
 
 def test_install_and_uninstall_use_the_local_binary(tmp_path: Path, monkeypatch):
@@ -53,11 +57,15 @@ def test_install_and_uninstall_use_the_local_binary(tmp_path: Path, monkeypatch)
     recorded = log.read_text(encoding="utf-8")
     assert "--user daemon-reload" in recorded
     assert "--user enable --now praxis-prime.service" in recorded
+    assert "PRAXIS_PRIME_WORKER_SLICE=on" in text
+    slice_unit = tmp_path / "config" / "systemd" / "user" / "praxis-prime-workers.slice"
+    assert "MemoryMax=512M" in slice_unit.read_text(encoding="utf-8")
     assert (tmp_path / "data" / "praxis-prime").is_dir()
     assert (tmp_path / "state" / "praxis-prime").is_dir()
 
     assert uninstall() == 0
     assert not unit_path.exists()
+    assert not slice_unit.exists()
     recorded = log.read_text(encoding="utf-8")
     assert "disable --now praxis-prime.service" in recorded
     assert stat.S_ISREG(daemon.stat().st_mode)

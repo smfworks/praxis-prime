@@ -166,6 +166,18 @@ flowchart LR
 - Voice and channel adapters run as **separate processes** so a crash, a leaking microphone stream or a misbehaving third-party SDK can't take down the kernel. They pair like OpenClaw nodes (`role: node`, declared capabilities and commands).
 - Default ports: `18790` (TCP, loopback only), chosen to avoid OpenClaw's `18789` so both can be installed side by side. The CLI prefers the Unix socket.
 
+When `profiles/` exists, `praxis-primed` is the supervisor and does not open a profile database. Each profile has its own worker process (`python -m praxis_prime.worker`) with that profile's memory, skills, routines, and approval queue. The worker binds the existing profile and data-root stacks (`bind_profile`, `bind_data_root`). Idle workers exit and start again on the next request. A crash waits through exponential backoff (0.5s, doubling, capped at 30s) before the next start. An install with no profile directory still runs the agent in the daemon process, so a pre-migration checkout keeps the same CLI. The M1c marker `supervisor/m1c.json` is written once and does not move `prime.db` again.
+
+```mermaid
+flowchart LR
+  CLI["praxis-prime CLI"] -- "loopback / prime.sock" --> SUP["praxis-primed<br/>supervisor + gateway"]
+  TG["Telegram"] -- "Approve / Deny" --> SUP
+  SUP -- "Unix socket + HMAC" --> WA["worker: profile A<br/>memory, approvals, routines"]
+  SUP -- "Unix socket + HMAC" --> WB["worker: profile B"]
+```
+
+The trust boundary is in [SECURITY.md](SECURITY.md). Landlock and a separate Linux user per profile are not this process split. NVIDIA GPUs may still be used for model inference. Isolation is Praxis Prime's own sandbox, not an NVIDIA security container.
+
 ---
 
 ## 4. The Gateway Protocol
@@ -997,6 +1009,7 @@ One React SPA serves both the web UI and the Tauri desktop app. There is also a 
 | Unauthorized clients / channels | loopback-only binds; device pairing with Ed25519 challenge; owner identity for approvals; unknown senders read-only |
 | Secret leakage | keychain storage; placeholders in prompts; redaction in logs; short-lived injection into sandboxes |
 | Account sign-in | argon2id passwords; passkeys (WebAuthn) and TOTP live in `accounts.db`; recovery codes stored as SHA-256; five failures lock the account for 15 minutes; loopback bearer token stays a local owner credential and is not a WebAuthn ceremony |
+| Cross-profile worker compromise | one worker process per profile; HMAC credential derived from a supervisor-only master key; the supervisor stamps the profile and ignores a claimed one; `StateDB` refuses a path outside that profile; sandboxed tools keep the data-root masks. Same-UID `ptrace` or `open()` outside Praxis paths is not stopped here (that is a later Linux-user boundary). Landlock is still M4 |
 | Runaway autonomy / cost | budgets; max depth/concurrency; kill switch; timed mode elevation; 3-denials escalation |
 | Audit tampering | hash chain + signed checkpoints; audit files protected (approval to modify) |
 | Supply chain | signed releases (minisign/Sigstore), reproducible builds target, SBOM (CycloneDX) per release, pinned deps (`uv.lock`, `pnpm-lock.yaml`) |
@@ -1131,7 +1144,7 @@ per_task_usd = 1.00
 | `~/.local/share/praxis-prime/` | `accounts.db` (accounts, sessions, passkey public keys, encrypted TOTP seeds, recovery-code hashes), `prime.db` (sessions, memory, jobs, blackboard), `audit.db`, `worktrees/`, `models/` (ONNX, whisper, wake word), `packs/` |
 | `~/.local/state/praxis-prime/` | logs, `killswitch`, crash dumps, last-run state |
 | `~/.cache/praxis-prime/` | web cache, embeddings cache, downloaded skill archives |
-| `$XDG_RUNTIME_DIR/praxis-prime/` | `prime.sock`, pid files, ephemeral sandbox mounts |
+| `$XDG_RUNTIME_DIR/praxis-prime/` | `prime.sock`, pid files, ephemeral sandbox mounts, `worker-master.key` (mode 0600), `supervisor.sock`, and one `<profile>.sock` per worker |
 | `./.prime/` (per project) | `rules/`, `skills/`, `environment.toml`, `hooks.toml` |
 
 ## 26. Services (systemd --user)
@@ -1152,10 +1165,13 @@ PrivateTmp=yes
 ProtectSystem=strict
 ReadWritePaths=%h/.local/share/praxis-prime %h/.local/state/praxis-prime %h/.cache/praxis-prime %t/praxis-prime
 Environment=PRAXIS_PRIME_LOG=info
+Environment=PRAXIS_PRIME_WORKER_SLICE=on
 
 [Install]
 WantedBy=default.target
 ```
+
+`praxis-prime-workers.slice` caps profile workers (`MemoryMax=512M`, `CPUQuota=50%`, `TasksMax=64`). `service install` writes it next to the user unit. The daemon puts a worker in that slice only when `PRAXIS_PRIME_WORKER_SLICE` is `on` (the packaged unit sets it) and `systemd-run` is on `PATH`. A worker also caps its open files at 256. Address space is capped only when `PRAXIS_PRIME_WORKER_AS_BYTES` is set. `RLIMIT_NPROC` is not set: that limit is per user and would count the daemon and the tests.
 
 - `praxis-prime-voice.service`: `After=pipewire.service praxis-prime.service`, `PartOf=graphical-session.target` (it only runs in a desktop session).
 - `praxis-prime-gateway@telegram.service` etc.: optional out-of-process channel adapters.
@@ -1252,7 +1268,7 @@ M0 packs/packaging ─┐
 | # | Milestone | Phase | Exit criterion |
 |---|---|---|---|
 | **M0** | Packaging and packs. Compliance and jurisdiction packs ship in the wheel. A loader reads the six public legacy `pack.json` packs, ignores their `ollama-cloud` model pins, and does not serve their dashboard JavaScript. | MVP completion (v0.2–0.3) | A clean install of the wheel loads every compliance TOML pack. All six legacy packs inspect cleanly. |
-| **M1** | Web UI shell, accounts, roles, and profiles. Still loopback-only. **M1a** accounts, roles, and profiles (merged). **M1b** passkeys + TOTP. **M1c** per-profile workers and supervisor. **M1d** SPA. **M1e** OIDC. | MVP completion (v0.2–0.3) | Two accounts and two profiles, with isolated memory. The audit log names the actor. M1b: a user can enroll and sign in with a passkey, and can enroll TOTP as a second factor or fallback, on the loopback daemon. |
+| **M1** | Web UI shell, accounts, roles, and profiles. Still loopback-only. **M1a** accounts, roles, and profiles (merged). **M1b** passkeys + TOTP. **M1c** per-profile workers and supervisor (in the tree). **M1d** SPA. **M1e** OIDC. | MVP completion (v0.2–0.3) | Two accounts and two profiles, with isolated memory. The audit log names the actor. M1b: a user can enroll and sign in with a passkey, and can enroll TOTP as a second factor or fallback, on the loopback daemon. M1c: each profile's worker has its own data root; one worker cannot read another's. |
 | **M2** | First-run wizard (web and `praxis-prime setup`). Remove the hard-coded Ollama default. Nothing selects a provider implicitly, and nothing falls back in silence. | MVP completion (v0.2–0.3) | A fresh install cannot chat until a chosen provider passes a live completion and a tool call. |
 | **M3** | Theme packages and the seven built-in themes. Palette contrast is checked with [`scripts/contrast_check.py`](../scripts/contrast_check.py). | MVP completion (v0.2–0.3) | All seven themes pass WCAG 2.2 AA in both modes. Packages that hide controls or load remote resources are rejected. |
 | **M4** | Local sandbox and agent computer. T1 bubblewrap for shell, with the data-root mask and the shell denylist already in the code. T2 rootless Podman for builds, untrusted code, and the nested virtual desktop. Optional T3 microVM where KVM exists. Network off unless an approved egress allowlist says otherwise. | v0.5 | On Ubuntu 24.04, a regulated profile's shell runs under bubblewrap with the account-data mask and no network. A build or virtual desktop uses rootless Podman with no network, or does not start if Podman is absent. `doctor` reports the tier. |
@@ -1270,7 +1286,9 @@ The relying party id is the browser origin host, `localhost` or `127.0.0.1`, on 
 
 TOTP seeds are encrypted with AES-GCM. The key sits in `accounts.db` next to the ciphertext, and the associated data is the account id. A blob sealed with the earlier fixed label is rewritten under that id on the next successful read. The file is the account-data boundary (mode 0600, the shell denylist, and the sandbox mask). Recovery codes and WebAuthn challenges are not seeds. Challenges are single-use and last five minutes. When an authenticator keeps a signature counter, a counter that does not advance is rejected.
 
-Registering or removing a passkey, enrolling TOTP, and disabling TOTP over HTTP require a five-minute step-up: the current password plus a TOTP or recovery code when TOTP is confirmed, or a passkey assertion just performed. The token is bound to the session that minted it, may be reused until it expires, and is deleted on logout. Single-use step-up tokens are deferred until before the M1d web app. `account totp disable` remains password-only. `account passwd` deletes passkeys. The loopback bearer token and `praxis-prime account` stay local-operator credentials. HTTP factor changes still need the step-up. The CLI writes an audit event and does not perform a WebAuthn ceremony. Telegram Approve and Deny stay on the paired chat. OIDC is M1e. Per-profile workers are M1c. The SPA that will call these HTTP routes is M1d. Requiring MFA for every role above viewer when the gateway is not on loopback, and passkey re-authentication on a SEND or SPEND, are M6.
+Registering or removing a passkey, enrolling TOTP, and disabling TOTP over HTTP require a five-minute step-up: the current password plus a TOTP or recovery code when TOTP is confirmed, or a passkey assertion just performed. The token is bound to the session that minted it, may be reused until it expires, and is deleted on logout. Single-use step-up tokens are deferred until before the M1d web app. `account totp disable` remains password-only. `account passwd` deletes passkeys. The loopback bearer token and `praxis-prime account` stay local-operator credentials. HTTP factor changes still need the step-up. The CLI writes an audit event and does not perform a WebAuthn ceremony. Telegram Approve and Deny go to the chat bound to that profile and requester; with no bindings, the paired owner chat still receives the `default` profile. OIDC is M1e. The SPA that will call these HTTP routes is M1d. Requiring MFA for every role above viewer when the gateway is not on loopback, and passkey re-authentication on a SEND or SPEND, are M6.
+
+**M1c workers.** Once `profiles/` exists, `praxis-primed` supervises one process per profile and stays on loopback. The worker holds that profile's memory, skills, routines, and approval queue. The supervisor holds the master key, `accounts.db`, the audit log, and the Telegram token. A worker may ask the supervisor only to check a grant for its own profile and to record an approval, audit, or routine event. `praxis-prime chat --profile` and `ask --profile` name the worker; omitting `--profile` uses `default` when that profile exists, otherwise the only profile. Idle workers exit after 15 minutes (`PRAXIS_PRIME_WORKER_IDLE` overrides it) and start on the next request. The trust boundary, and what same-UID access can still do, is in [SECURITY.md](SECURITY.md). Landlock and a Linux user per profile are not in this milestone. Per-profile provider keys are M2.
 
 **Where this sits in the phase table.** M0–M3 complete the MVP (v0.2–0.3). M4, M5a, M5b, and M6 sit in **v0.5** beside the items already in that row. Microsoft Teams is **M8**. Tauri desktop is **M7** (v0.6–v0.8). Jury, Jarvis, swarm, and the other work already described below stay in the phase table and are sequenced after M3. PR-sized splits and exit detail are in the addendum §8.
 

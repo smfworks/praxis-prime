@@ -13,7 +13,8 @@ praxis-prime service uninstall
 
 | Unit | Role |
 |---|---|
-| `praxis-prime.service` | Kernel and gateway. |
+| `praxis-prime.service` | Kernel, gateway, and the profile-worker supervisor. Loopback only. |
+| `praxis-prime-workers.slice` | Memory, CPU, and task cap for per-profile workers. |
 | `praxis-prime-voice.service` | Jarvis layer. Off unless a person enables it. |
 | `praxis-prime-gateway@.service` | Optional out-of-process channel adapter. Not used by the in-process Telegram MVP. |
 | `praxis-prime-sweeper.timer` | Daily retention sweep backup. |

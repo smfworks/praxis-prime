@@ -6,7 +6,7 @@ for this session. Denied and unanswered requests do not run the tool.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass
 from enum import StrEnum
@@ -56,6 +56,9 @@ class ApprovalGate:
 
     def __init__(self, approver: Approver | None = None) -> None:
         self.approver = approver
+        self.recheck: Callable[[ApprovalRequest], bool] | None = None
+        self.persist: Callable[[ApprovalRequest], None] | None = None
+        self.on_revoke: Callable[[ApprovalRequest], None] | None = None
         self._grants: set[str] = set()
         self._session_grants: dict[str, set[str]] = {}
 
@@ -71,6 +74,12 @@ class ApprovalGate:
             return
         self._session_grants.pop(_grant_bucket(session_id, account_id), None)
 
+    def remember(self, account_id: str, session_id: str, grant_key: str) -> None:
+        """Restore one grant that is still valid after a restart."""
+        if not account_id or not session_id or not grant_key:
+            return
+        self._session_grants.setdefault(f"{account_id}:{session_id}", set()).add(grant_key)
+
     def _bucket(self, session_id: str | None) -> set[str]:
         key = _grant_bucket(session_id, approval_account_id.get())
         if not key:
@@ -80,6 +89,12 @@ class ApprovalGate:
     def authorize(self, request: ApprovalRequest) -> ApprovalDecision:
         grants = self._bucket(approval_session_id.get())
         if request.grant_key in grants:
+            if self.recheck is not None and not self.recheck(request):
+                grants.discard(request.grant_key)
+                if self.on_revoke is not None:
+                    self.on_revoke(request)
+                approval_actor.set("grant-revoked")
+                return ApprovalDecision.DENY
             approval_actor.set("session-grant")
             return ApprovalDecision.ALLOW_SESSION
         if self.approver is None:
@@ -93,6 +108,8 @@ class ApprovalGate:
             return ApprovalDecision.DENY
         if decision == ApprovalDecision.ALLOW_SESSION:
             grants.add(request.grant_key)
+            if self.persist is not None:
+                self.persist(request)
             return decision
         if decision == ApprovalDecision.ALLOW_ONCE:
             return decision

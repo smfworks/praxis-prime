@@ -47,8 +47,10 @@ class FakeHost:
         source: str = "channel",
         channel: str = "",
         on_event: object = None,
+        owner_account: str = "",
+        owner_profile: str = "",
     ) -> TurnResult:
-        del session_id, on_event
+        del session_id, on_event, owner_account, owner_profile
         assert untrusted is True
         assert source == "telegram"
         assert channel == "telegram"

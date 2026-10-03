@@ -21,7 +21,7 @@ In the gaps below, "OC" means OpenClaw and "HE" means Hermes Agent.
 One agent per person. Chat accounts bind to agents, with one-time pairing. Each person gets their own process, folder, secrets, and chat bindings, and approvals go back to whoever asked.
 
 - **Upstream:** OC `docs/concepts/multi-agent.md` and `agent-bindings.md`; HE `user-guide/profiles.md`.
-- **Praxis:** designed ([Addendum A §6](blueprint-addendum-2026-09.md#6-multi-user-and-multi-profile), M1). There are no per-profile workers yet. Not yet planned there: per-profile secrets, chat-account-to-profile binding, approvals routed to the requester, routines that run as a named person, and resource limits. The [per-person agents](OPENDOTS-BORROWED-PATTERNS.md#per-person-agents) note now lists those gaps.
+- **Praxis:** M1c is in the tree. Each profile has a worker process, its own data root, an HMAC credential, and a Telegram binding for approvals. A routine can run as a named account, and the worker slice caps memory, CPU, and tasks. Per-profile provider secrets stay M2. Channel bindings beyond Telegram approval routing stay M6. Landlock and a Linux user per profile are not in this change. The [per-person agents](OPENDOTS-BORROWED-PATTERNS.md#per-person-agents) note lists what is still open.
 - **Milestone:** M1, plus M1c for the workers (large). M1c is the existing M1 PR 6 (per-person workers), not a new PR series.
 - **Acceptance criteria:**
   - Each person has a separate worker process, data folder, secrets, and chat bindings.
@@ -29,6 +29,7 @@ One agent per person. Chat accounts bind to agents, with one-time pairing. Each 
   - An approval goes back to the person who asked.
   - A routine runs as a named person, and a revoked membership cancels it.
   - The worker has a resource limit.
+- **Landed in M1c:** separate worker process and data folder, Telegram chat binding for approvals, requester routing for those cards, run-as routines with revocation, and the worker slice. Per-profile secrets are still M2. One-time pairing of a Telegram chat to a profile is a local bindings file, not a second pairing ceremony.
 
 ### 2. API-key pools and fallback for side tasks
 
