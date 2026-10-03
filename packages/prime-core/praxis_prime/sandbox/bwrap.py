@@ -19,6 +19,7 @@ unsandboxed run.
 from __future__ import annotations
 
 import contextvars
+import errno
 import os
 import shutil
 import signal
@@ -236,6 +237,10 @@ def build_bwrap_argv(
 
 
 _HARDLINK_SCAN_CAP = 20_000
+# A workspace file that disappears is tried again, then the whole walk is
+# tried again, before the launch is refused. Three passes absorb a rename
+# during a build without treating a stuck error as success.
+_WORKSPACE_VANISH_ATTEMPTS = 3
 # Read-only system binds added by the launcher. A workspace that merely
 # lives under one of these trees, such as ``/opt`` or ``/usr/local``, is
 # a separate mount and is still scanned.
@@ -274,9 +279,18 @@ def hardlink_cover_argv(
     ``/lib``, ``/lib64``, ``/etc``) are not walked. A workspace under ``/opt``
     or ``/usr/local`` is. A path under a data-root tmpfs is already hidden,
     except a worktree that was bound again on top of that tmpfs
-    (``exposed``). The walk refuses to launch when it cannot finish: a
-    directory that cannot be listed, an entry that vanishes, a tree deeper
-    than the scan limit, or a walk that passes the hard-link cap.
+    (``exposed``). One directory entry is counted once. The identity is its
+    real path and the device and inode of its parent, so a working directory
+    and a write scope inside it cannot use up the link count twice. A mount
+    nested in another is not walked again when the sandbox path nests the
+    same way. When two mounts overlap and their sandbox paths do not, the
+    walk does not stop early. The walk refuses to launch when it cannot
+    finish: a directory that cannot be listed, a workspace entry that is
+    still missing after a short retry, a tree deeper than the scan limit,
+    or a walk that passes the hard-link cap. The error names the folder and
+    the reason. A file that disappears inside the account data directory is
+    not a failure. The check is at launch: a link created after the scan
+    and before bubblewrap starts is not covered.
     """
     from praxis_prime.policy.boundary import (
         _account_data_roots,
@@ -291,10 +305,10 @@ def hardlink_cover_argv(
     for root in roots:
         _inodes, problem = _cached_private_inodes(root)
         if problem:
-            raise SandboxError("refusing to launch; the account-data scan did not finish")
+            raise _account_scan_error(problem)
         linked, link_problem = _cached_linked_inodes(root)
         if link_problem:
-            raise SandboxError("refusing to launch; the account-data scan did not finish")
+            raise _account_scan_error(link_problem)
         for key, nlink in linked.items():
             extra = nlink - 1
             if extra > remaining.get(key, 0):
@@ -302,27 +316,102 @@ def hardlink_cover_argv(
     if not remaining:
         return []
     visible = list(exposed or [])
-    argv: list[str] = []
-    scanned = 0
-    for src, dest in mounts:
-        if _links_found(remaining):
-            break
-        if _skip_hardlink_scan(dest):
-            continue
+    vanished: _Vanished | None = None
+    for _attempt in range(_WORKSPACE_VANISH_ATTEMPTS):
         try:
-            root = Path(os.path.realpath(src, strict=False))
-        except OSError as exc:
-            raise SandboxError("refusing to launch; a mount could not be scanned") from exc
-        kind = _scan_kind(root)
-        if kind == "missing":
+            return _cover_mounts(mounts, masked, visible, dict(remaining))
+        except _Vanished as exc:
+            vanished = exc
+    assert vanished is not None
+    raise _mount_error(vanished.folder, reason=vanished.reason) from vanished
+
+
+class _Vanished(Exception):
+    """A workspace entry disappeared. The walk may be tried again."""
+
+    def __init__(self, folder: Path, reason: str) -> None:
+        self.folder = folder
+        self.reason = reason
+        super().__init__(reason)
+
+
+@dataclass
+class _CoverScan:
+    remaining: dict[tuple[int, int], int]
+    seen_paths: set[str]
+    seen_dirs: set[tuple[int, int, str]]
+    covered: set[str]
+    stop_early: bool
+    masked: list[str]
+    exposed: list[str]
+    argv: list[str]
+    scanned: int = 0
+
+
+def _account_scan_error(problem: str) -> SandboxError:
+    detail = _public_scan_problem(problem)
+    return SandboxError(
+        "refusing to launch; the account-data scan did not finish (" + detail + ")"
+    )
+
+
+def _public_scan_problem(problem: str) -> str:
+    """Drop absolute account-data paths from a reason string."""
+    from praxis_prime.paths import runtime_dir
+    from praxis_prime.policy.boundary import _account_data_roots
+
+    text = problem
+    roots: list[Path] = list(_account_data_roots() or [])
+    try:
+        roots.append(runtime_dir())
+    except OSError:
+        pass
+    for root in roots:
+        root_s = str(root).rstrip("/")
+        if not root_s:
             continue
-        if kind == "file":
-            scanned = _cover_file(root, dest, remaining, masked, visible, argv, scanned)
-            continue
-        if kind != "dir":
-            raise SandboxError("refusing to launch; a mount could not be scanned")
-        scanned = _cover_tree(root, dest, remaining, masked, visible, argv, scanned)
-    return argv
+        text = text.replace(root_s + os.sep, "")
+        text = text.replace(root_s + "/", "")
+        if root_s in text:
+            text = text.replace(root_s, "the account data directory")
+    return text
+
+
+def _errno_reason(exc: OSError | None) -> str:
+    if exc is None:
+        return "could not be read"
+    if exc.errno in {errno.EACCES, errno.EPERM}:
+        return "permission denied"
+    if exc.errno in {errno.ENOENT, errno.ENOTDIR}:
+        return "a directory vanished during the scan"
+    if exc.errno == errno.ENAMETOOLONG:
+        return "a path is too long"
+    if exc.errno == errno.ELOOP:
+        return "too many symlinks"
+    return exc.strerror or "could not be read"
+
+
+def _show_folder(folder: Path) -> str:
+    from praxis_prime.policy.boundary import _account_relative
+
+    relative = _account_relative(folder)
+    if relative is not None:
+        return relative
+    return str(folder)
+
+
+def _mount_error(
+    folder: Path, exc: OSError | None = None, reason: str = ""
+) -> SandboxError:
+    why = reason or _errno_reason(exc)
+    return SandboxError(
+        "refusing to launch; a mount could not be scanned "
+        f"({_show_folder(folder)}: {why})"
+    )
+
+
+def _gone(exc: OSError) -> bool:
+    return exc.errno in {errno.ENOENT, errno.ENOTDIR}
 
 
 def _scan_kind(path: Path) -> str:
@@ -331,7 +420,9 @@ def _scan_kind(path: Path) -> str:
     except FileNotFoundError:
         return "missing"
     except OSError as exc:
-        raise SandboxError("refusing to launch; a mount could not be scanned") from exc
+        if _gone(exc):
+            return "missing"
+        raise _mount_error(path, exc) from exc
     if stat.S_ISREG(info.st_mode):
         return "file"
     if stat.S_ISDIR(info.st_mode):
@@ -357,6 +448,176 @@ def _links_found(remaining: dict[tuple[int, int], int]) -> bool:
     return all(count <= 0 for count in remaining.values())
 
 
+def _finished(scan: _CoverScan) -> bool:
+    return scan.stop_early and _links_found(scan.remaining)
+
+
+def _cover_mounts(
+    mounts: list[tuple[Path, str]],
+    masked: list[str],
+    exposed: list[str],
+    remaining: dict[tuple[int, int], int],
+) -> list[str]:
+    chosen, overlap = _mounts_to_walk(mounts)
+    scan = _CoverScan(
+        remaining=remaining,
+        seen_paths=set(),
+        seen_dirs=set(),
+        covered=set(),
+        # A later mount can show a link the first mount already counted.
+        # Stop early only when this launch has a single tree to walk.
+        stop_early=not overlap and len(chosen) <= 1,
+        masked=masked,
+        exposed=exposed,
+        argv=[],
+    )
+    for host, dest in chosen:
+        if _finished(scan):
+            break
+        kind = _scan_kind(host)
+        if kind == "missing":
+            raise _Vanished(host, "a mount vanished during the scan")
+        if kind == "file":
+            _cover_file(host, dest, scan)
+            continue
+        if kind != "dir":
+            raise _mount_error(host, reason="not a directory")
+        _cover_tree(host, dest, scan)
+    return scan.argv
+
+
+def _mounts_to_walk(
+    mounts: list[tuple[Path, str]],
+) -> tuple[list[tuple[Path, str]], bool]:
+    """Drop a nested mount whose sandbox path is already inside another.
+
+    The second value is true when two mounts still share a host tree but
+    their sandbox paths differ, so the walk must not stop early.
+    """
+    planned: list[tuple[Path, str]] = []
+    for src, dest in mounts:
+        if _skip_hardlink_scan(dest):
+            continue
+        try:
+            host = Path(os.path.realpath(src, strict=False))
+        except OSError as exc:
+            if _gone(exc):
+                raise _Vanished(Path(src), "a mount vanished during the scan") from exc
+            raise _mount_error(Path(src), exc) from exc
+        planned.append((host, dest))
+    skip: set[int] = set()
+    overlap = False
+    for index, (host, dest) in enumerate(planned):
+        for other, (outer_host, outer_dest) in enumerate(planned):
+            if index == other:
+                continue
+            if host == outer_host:
+                if _same_sandbox(dest, outer_dest) and index > other:
+                    skip.add(index)
+                elif not _same_sandbox(dest, outer_dest):
+                    overlap = True
+                continue
+            if not _is_within(host, outer_host):
+                continue
+            relative = host.relative_to(outer_host)
+            expected = Path(outer_dest) / relative
+            if _same_sandbox(dest, expected):
+                skip.add(index)
+            else:
+                overlap = True
+    chosen = [item for number, item in enumerate(planned) if number not in skip]
+    return chosen, overlap
+
+
+def _is_within(child: Path, parent: Path) -> bool:
+    try:
+        child.relative_to(parent)
+    except ValueError:
+        return False
+    return True
+
+
+def _same_sandbox(left: str | Path, right: str | Path) -> bool:
+    return os.path.normpath(str(left)) == os.path.normpath(str(right))
+
+
+def _list_mount(directory: Path) -> list[os.DirEntry[str]]:
+    """List ``directory``. A vanished directory is retried once, then raised."""
+    try:
+        return list(os.scandir(directory))
+    except OSError as exc:
+        if not _gone(exc):
+            raise _mount_error(directory, exc) from exc
+    try:
+        return list(os.scandir(directory))
+    except OSError as exc:
+        if _gone(exc):
+            raise _Vanished(directory, "a directory vanished during the scan") from exc
+        raise _mount_error(directory, exc) from exc
+
+
+def _lstat_mount(path: Path) -> os.stat_result:
+    try:
+        return os.lstat(path)
+    except OSError as exc:
+        if not _gone(exc):
+            raise _mount_error(path, exc) from exc
+    try:
+        return os.lstat(path)
+    except OSError as exc:
+        if _gone(exc):
+            raise _Vanished(path, "a file vanished during the scan") from exc
+        raise _mount_error(path, exc) from exc
+
+
+def _lstat_entry(entry: os.DirEntry[str]) -> os.stat_result:
+    path = Path(entry.path)
+    try:
+        return entry.stat(follow_symlinks=False)
+    except OSError as exc:
+        if not _gone(exc):
+            raise _mount_error(path, exc) from exc
+    try:
+        return entry.stat(follow_symlinks=False)
+    except OSError as exc:
+        if _gone(exc):
+            raise _Vanished(path, "a file vanished during the scan") from exc
+        raise _mount_error(path, exc) from exc
+
+
+def _already_seen(host: Path, scan: _CoverScan) -> bool:
+    """True when this directory entry was already counted.
+
+    The real path catches a symlink and a direct name. The parent device,
+    parent inode, and filename catch the same entry seen through two mounts,
+    including a bind-mount alias whose real path differs.
+    """
+    try:
+        resolved = os.path.realpath(host, strict=False)
+    except OSError as exc:
+        raise _mount_error(host, exc) from exc
+    try:
+        parent = os.lstat(host.parent)
+    except OSError as exc:
+        if _gone(exc):
+            raise _Vanished(host.parent, "a directory vanished during the scan") from exc
+        raise _mount_error(host.parent, exc) from exc
+    dir_key = (parent.st_dev, parent.st_ino, host.name)
+    seen = resolved in scan.seen_paths or dir_key in scan.seen_dirs
+    scan.seen_paths.add(resolved)
+    scan.seen_dirs.add(dir_key)
+    return seen
+
+
+def _emit_cover(dest: str, scan: _CoverScan) -> None:
+    if dest in scan.covered:
+        return
+    scan.covered.add(dest)
+    if _under_mask(dest, scan.masked, scan.exposed):
+        return
+    scan.argv.extend(["--ro-bind", "/dev/null", dest])
+
+
 def _bulky_dir(parent: str, name: str) -> bool:
     """True for trees that are large and are scanned only if a link is left.
 
@@ -369,144 +630,69 @@ def _bulky_dir(parent: str, name: str) -> bool:
     return name == "objects" and os.path.basename(parent) == ".git"
 
 
-def _cover_file(
-    host: Path,
-    dest: str,
-    remaining: dict[tuple[int, int], int],
-    masked: list[str],
-    exposed: list[str],
-    argv: list[str],
-    scanned: int,
-) -> int:
-    try:
-        info = os.lstat(host)
-    except OSError as exc:
-        raise SandboxError("refusing to launch; a mount could not be scanned") from exc
-    return _cover_stat(host, dest, info, remaining, masked, exposed, argv, scanned)
+def _cover_file(host: Path, dest: str, scan: _CoverScan) -> None:
+    info = _lstat_mount(host)
+    _cover_stat(host, dest, info, scan)
 
 
-def _cover_stat(
-    host: Path,
-    dest: str,
-    info: os.stat_result,
-    remaining: dict[tuple[int, int], int],
-    masked: list[str],
-    exposed: list[str],
-    argv: list[str],
-    scanned: int,
-) -> int:
-    del host
+def _cover_stat(host: Path, dest: str, info: os.stat_result, scan: _CoverScan) -> None:
     if not stat.S_ISREG(info.st_mode) or info.st_nlink <= 1:
-        return scanned
+        return
     key = (info.st_dev, info.st_ino)
-    left = remaining.get(key, 0)
-    if left <= 0:
-        return scanned
-    scanned = _note_scan(scanned)
-    remaining[key] = left - 1
-    if _under_mask(dest, masked, exposed):
-        return scanned
-    argv.extend(["--ro-bind", "/dev/null", dest])
-    return scanned
+    if key not in scan.remaining:
+        return
+    if _already_seen(host, scan):
+        _emit_cover(dest, scan)
+        return
+    scan.scanned = _note_scan(scan.scanned)
+    if scan.remaining[key] > 0:
+        scan.remaining[key] -= 1
+    _emit_cover(dest, scan)
 
 
-def _cover_tree(
-    root: Path,
-    dest: str,
-    remaining: dict[tuple[int, int], int],
-    masked: list[str],
-    exposed: list[str],
-    argv: list[str],
-    scanned: int,
-) -> int:
-    return _cover_descent(
-        root,
-        dest,
-        remaining,
-        masked,
-        exposed,
-        argv,
-        scanned,
-        defer_bulky=True,
-    )
+def _cover_tree(root: Path, dest: str, scan: _CoverScan) -> None:
+    _cover_descent(root, dest, scan, defer_bulky=True)
 
 
-def _cover_bulky(
-    root: Path,
-    dest: str,
-    remaining: dict[tuple[int, int], int],
-    masked: list[str],
-    exposed: list[str],
-    argv: list[str],
-    scanned: int,
-) -> int:
+def _cover_bulky(root: Path, dest: str, scan: _CoverScan) -> None:
     """Walk a deferred tree. Symlinks are not followed."""
     kind = _scan_kind(root)
     if kind == "missing":
-        # Queued because an extra link was still unaccounted for. A directory
-        # that vanished before this pass means the scan did not finish.
-        raise SandboxError("refusing to launch; a mount could not be scanned")
+        raise _Vanished(root, "a directory vanished during the scan")
     if kind == "file":
-        return _cover_file(root, dest, remaining, masked, exposed, argv, scanned)
+        _cover_file(root, dest, scan)
+        return
     if kind != "dir":
-        # Not a directory and not a regular file. There is nothing to list.
-        # An unreadable path already raised in ``_scan_kind``.
-        return scanned
-    return _cover_descent(
-        root,
-        dest,
-        remaining,
-        masked,
-        exposed,
-        argv,
-        scanned,
-        defer_bulky=False,
-    )
+        return
+    _cover_descent(root, dest, scan, defer_bulky=False)
 
 
-def _cover_descent(
-    root: Path,
-    dest: str,
-    remaining: dict[tuple[int, int], int],
-    masked: list[str],
-    exposed: list[str],
-    argv: list[str],
-    scanned: int,
-    *,
-    defer_bulky: bool,
-) -> int:
-    """List ``root`` with ``os.scandir``. Any error refuses the launch.
+def _cover_descent(root: Path, dest: str, scan: _CoverScan, *, defer_bulky: bool) -> None:
+    """List ``root`` with ``os.scandir``. A listing error refuses the launch.
 
-    ``os.walk`` without ``onerror`` skips a directory it cannot list, and
-    ``DirEntry.is_dir`` failures are treated as files. A mode ``0300``
-    directory (enter allowed, list denied) would hide a hard link. This
-    walk raises instead. A vanished entry, a stat error, and a tree past
-    the depth limit do too. Symlinks are not followed.
+    ``os.walk`` without ``onerror`` skips a directory it cannot list. A mode
+    ``0300`` directory would hide a hard link. Symlinks are not followed.
+    A vanished entry is retried by the caller. Permission errors are not.
     """
     from praxis_prime.policy.boundary import _SCAN_DEPTH_LIMIT
 
     bulky: list[tuple[Path, str]] = []
     pending: list[tuple[Path, str, int]] = [(root, dest, 1)]
     while pending:
-        if _links_found(remaining):
-            return scanned
+        if _finished(scan):
+            return
         directory, sandbox_dir, depth = pending.pop()
         if depth > _SCAN_DEPTH_LIMIT:
             raise SandboxError(
-                "refusing to launch; a directory tree is too deep to scan for hard links"
+                "refusing to launch; a directory tree is too deep to scan for hard links "
+                f"({_show_folder(directory)}: too deep)"
             )
-        try:
-            entries = list(os.scandir(directory))
-        except OSError as exc:
-            raise SandboxError("refusing to launch; a mount could not be scanned") from exc
+        entries = _list_mount(directory)
         children: list[tuple[Path, str, int]] = []
         for entry in entries:
-            if _links_found(remaining):
-                return scanned
-            try:
-                info = entry.stat(follow_symlinks=False)
-            except OSError as exc:
-                raise SandboxError("refusing to launch; a mount could not be scanned") from exc
+            if _finished(scan):
+                return
+            info = _lstat_entry(entry)
             child_dest = str(Path(sandbox_dir) / entry.name)
             if stat.S_ISLNK(info.st_mode):
                 continue
@@ -517,24 +703,14 @@ def _cover_descent(
                 else:
                     children.append((child, child_dest, depth + 1))
                 continue
-            scanned = _cover_stat(
-                Path(directory) / entry.name,
-                child_dest,
-                info,
-                remaining,
-                masked,
-                exposed,
-                argv,
-                scanned,
-            )
+            _cover_stat(Path(directory) / entry.name, child_dest, info, scan)
         pending.extend(reversed(children))
-    if not defer_bulky or _links_found(remaining):
-        return scanned
+    if not defer_bulky or _finished(scan):
+        return
     for host, sandbox in bulky:
-        if _links_found(remaining):
+        if _finished(scan):
             break
-        scanned = _cover_bulky(host, sandbox, remaining, masked, exposed, argv, scanned)
-    return scanned
+        _cover_bulky(host, sandbox, scan)
 
 
 def _skip_hardlink_scan(dest: str) -> bool:

@@ -45,6 +45,7 @@ from praxis_prime.sandbox.bwrap import (
     bind_profile,
     build_bwrap_argv,
     bwrap_available,
+    hardlink_cover_argv,
     run_bwrap,
 )
 from praxis_prime.state import StateDB, refuse_misplaced_database
@@ -1053,9 +1054,11 @@ def test_unreadable_directory_refuses_shell_and_mcp(
     os.chmod(hidden, 0o300)
     clear_data_inode_cache()
     try:
-        with pytest.raises(SandboxError, match="could not be scanned"):
+        with pytest.raises(SandboxError, match="could not be scanned") as shell_scan:
             build_bwrap_argv("true", work)
-        with pytest.raises(SandboxError, match="could not be scanned"):
+        assert "permission denied" in str(shell_scan.value)
+        assert str(hidden) in str(shell_scan.value)
+        with pytest.raises(SandboxError, match="could not be scanned") as mcp_scan:
             build_mcp_bwrap_argv(
                 "/bin/sh",
                 ("-c", "strings d/known"),
@@ -1063,6 +1066,8 @@ def test_unreadable_directory_refuses_shell_and_mcp(
                 env={"PATH": "/usr/bin:/bin"},
                 network="off",
             )
+        assert "permission denied" in str(mcp_scan.value)
+        assert str(hidden) in str(mcp_scan.value)
         if bwrap_available():
             from praxis_prime.tools.registry import ToolContext
             from praxis_prime.tools.shell import execute_shell
@@ -1127,8 +1132,155 @@ def test_vanished_directory_refuses_the_hardlink_scan(
 
     monkeypatch.setattr(os, "scandir", scanning)
     clear_data_inode_cache()
-    with pytest.raises(SandboxError, match="could not be scanned"):
+    with pytest.raises(SandboxError, match="could not be scanned") as caught:
         build_bwrap_argv("true", work)
+    assert "vanished" in str(caught.value)
+    assert str(gone) in str(caught.value)
+
+
+def test_overlapping_mcp_mounts_cover_both_hard_links(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A write scope inside the cwd must not use up the link count twice."""
+    home = _isolate(tmp_path, monkeypatch)
+    soul = home / ".local" / "share" / "praxis-prime" / "profiles" / "bob" / "SOUL.md"
+    soul.parent.mkdir(parents=True)
+    soul.write_text("SECRET-PSOUL\n", encoding="utf-8")
+    proj = home / "proj"
+    out = proj / "out"
+    out.mkdir(parents=True)
+    other = home / "other"
+    other.mkdir()
+    os.link(soul, out / "L1.txt")
+    os.link(soul, other / "L2.txt")
+    command = f"echo L1:; cat {out / 'L1.txt'}; echo L2:; cat {other / 'L2.txt'}"
+
+    def covers(
+        *, write_scope: Path | None = None, write_approved: bool = False
+    ) -> tuple[list[str], list[str]]:
+        clear_data_inode_cache()
+        argv = build_mcp_bwrap_argv(
+            "/bin/sh",
+            ("-c", command, str(other)),
+            cwd=proj,
+            env={"PATH": "/usr/bin:/bin"},
+            network="off",
+            write_scope=write_scope,
+            write_approved=write_approved,
+        )
+        found = [
+            argv[index + 2]
+            for index in range(len(argv) - 2)
+            if argv[index] == "--ro-bind" and argv[index + 1] == "/dev/null"
+        ]
+        return argv, found
+
+    _argv, plain = covers()
+    assert str(out / "L1.txt") in plain
+    assert str(other / "L2.txt") in plain
+    argv, nested = covers(write_scope=out, write_approved=True)
+    assert str(out / "L1.txt") in nested
+    assert str(other / "L2.txt") in nested
+    assert nested.count(str(out / "L1.txt")) == 1
+    clear_data_inode_cache()
+    split = hardlink_cover_argv(
+        [
+            (proj, "/sandbox/proj"),
+            (out, "/sandbox/elsewhere"),
+            (other, "/sandbox/other"),
+        ],
+        [],
+    )
+    split_covers = [
+        split[index + 2]
+        for index in range(len(split) - 2)
+        if split[index] == "--ro-bind" and split[index + 1] == "/dev/null"
+    ]
+    assert "/sandbox/proj/out/L1.txt" in split_covers
+    assert "/sandbox/elsewhere/L1.txt" in split_covers
+    assert "/sandbox/other/L2.txt" in split_covers
+    if not bwrap_available():
+        return
+    ran = subprocess.run(argv, capture_output=True, text=True, timeout=30, check=False)
+    assert "SECRET" not in ran.stdout
+
+
+def test_unreadable_profile_names_the_folder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = _isolate(tmp_path, monkeypatch)
+    hidden = home / ".local" / "share" / "praxis-prime" / "profiles" / "bob" / "mem"
+    hidden.mkdir(parents=True)
+    (hidden.parent / "SOUL.md").write_text("s\n", encoding="utf-8")
+    os.chmod(hidden, 0o300)
+    work = home / "proj"
+    work.mkdir()
+    clear_data_inode_cache()
+    try:
+        with pytest.raises(SandboxError, match="did not finish") as caught:
+            build_bwrap_argv("true", work)
+    finally:
+        os.chmod(hidden, 0o700)
+    text = str(caught.value)
+    assert "permission denied" in text
+    assert "profiles" in text
+    assert str(home) not in text
+    assert "hard-link cap" not in text
+
+
+def test_vanished_profile_file_does_not_refuse(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = _isolate(tmp_path, monkeypatch)
+    bob = home / ".local" / "share" / "praxis-prime" / "profiles" / "bob"
+    bob.mkdir(parents=True)
+    (bob / "SOUL.md").write_text("s\n", encoding="utf-8")
+    work = home / "proj"
+    work.mkdir()
+    real_scandir = os.scandir
+
+    def scanning(path: object) -> object:
+        if Path(path) == bob:
+            gone = bob / "gone.md"
+            gone.write_text("x", encoding="utf-8")
+            entries = list(real_scandir(path))
+            gone.unlink()
+            return entries
+        return real_scandir(path)
+
+    monkeypatch.setattr(os, "scandir", scanning)
+    clear_data_inode_cache()
+    build_bwrap_argv("true", work)
+
+
+def test_workspace_vanished_entry_is_retried(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = _isolate(tmp_path, monkeypatch)
+    secret = home / ".local" / "share" / "praxis-prime" / "accounts.db"
+    secret.parent.mkdir(parents=True)
+    secret.write_text("SECRET\n", encoding="utf-8")
+    work = home / "proj"
+    work.mkdir()
+    os.link(secret, work / "notes.txt")
+    real_scandir = os.scandir
+    misses = {"count": 0}
+
+    def scanning(path: object) -> object:
+        if Path(path) == work and misses["count"] < 2:
+            misses["count"] += 1
+            raise FileNotFoundError(2, "No such file or directory", str(path))
+        return real_scandir(path)
+
+    monkeypatch.setattr(os, "scandir", scanning)
+    clear_data_inode_cache()
+    argv = build_bwrap_argv("true", work)
+    assert _cover(argv, "/workspace/notes.txt") == [
+        "--ro-bind",
+        "/dev/null",
+        "/workspace/notes.txt",
+    ]
+    assert misses["count"] == 2
 
 
 def test_deep_workspace_refuses_the_hardlink_scan(

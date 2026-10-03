@@ -1339,7 +1339,7 @@ def _collect_tree_inodes(
     if kind is StatKind.MISSING:
         return ""
     if kind is StatKind.UNREADABLE:
-        return f"unreadable directory {folder}"
+        return f"unreadable directory {_scan_place(folder)}"
     if kind is StatKind.FILE:
         return _record_optional_file(folder, found, linked, files)
     if kind is not StatKind.DIR:
@@ -1348,14 +1348,18 @@ def _collect_tree_inodes(
     while stack:
         directory, depth = stack.pop()
         if depth > _SCAN_DEPTH_LIMIT:
-            return f"directory tree under {folder} is too deep to scan"
+            return f"directory tree under {_scan_place(folder)} is too deep to scan"
         stamp = _dir_stamp(directory)
         if stamp is not None:
             dirs.append(stamp)
-        try:
-            entries = list(os.scandir(directory))
-        except OSError:
-            return f"unreadable directory {directory}"
+        listed = _list_data_entries(directory)
+        if isinstance(listed, str):
+            return listed
+        if listed is None:
+            # The directory was removed or replaced. Its names are gone.
+            # A journal or temporary file disappearing is not a failed scan.
+            continue
+        entries = listed
         for entry in entries:
             if len(found) > _PRIVATE_INODE_CAP:
                 return (
@@ -1363,8 +1367,12 @@ def _collect_tree_inodes(
                 )
             try:
                 st = entry.stat(follow_symlinks=False)
-            except OSError:
-                return f"unreadable directory {directory}"
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                if exc.errno in {errno.ENOENT, errno.ENOTDIR}:
+                    continue
+                return f"unreadable directory {_scan_place(directory)}"
             if stat.S_ISLNK(st.st_mode):
                 continue
             if stat.S_ISREG(st.st_mode):
@@ -1403,6 +1411,74 @@ def _note_inode(
         linked[key] = int(st.st_nlink)
 
 
+def _list_data_entries(directory: Path) -> list[os.DirEntry[str]] | str | None:
+    """Names in a data-root directory, a problem string, or None if it vanished.
+
+    ``ENOENT`` and ``ENOTDIR`` are tried once. A directory that is still gone
+    is skipped. Permission errors fail the scan and name the directory
+    relative to the account data root.
+    """
+    for _attempt in (1, 2):
+        try:
+            return list(os.scandir(directory))
+        except OSError as exc:
+            if exc.errno in {errno.ENOENT, errno.ENOTDIR}:
+                continue
+            return f"unreadable directory {_scan_place(directory)}: {_errno_phrase(exc)}"
+    return None
+
+
+def _errno_phrase(exc: OSError) -> str:
+    if exc.errno in {errno.EACCES, errno.EPERM}:
+        return "permission denied"
+    if exc.errno == errno.ENAMETOOLONG:
+        return "a path is too long"
+    if exc.errno == errno.ELOOP:
+        return "too many symlinks"
+    return exc.strerror or "could not be read"
+
+
+def _scan_place(path: Path) -> str:
+    """A folder name safe to show. Absolute account-data paths stay relative."""
+    relative = _account_relative(path)
+    if relative is not None:
+        return relative
+    return path.name or "a directory"
+
+
+def _account_relative(path: Path) -> str | None:
+    """Path relative to an account-data root or the runtime directory.
+
+    None when ``path`` is outside those trees. Callers use that for a
+    workspace path they can show in full.
+    """
+    try:
+        resolved = Path(os.path.realpath(path, strict=False))
+    except OSError:
+        resolved = path
+    candidates: list[Path] = []
+    roots = _account_data_roots()
+    if roots:
+        candidates.extend(roots)
+    try:
+        candidates.append(runtime_dir())
+    except OSError:
+        pass
+    for root in candidates:
+        try:
+            root_real = Path(os.path.realpath(root, strict=False))
+        except OSError:
+            root_real = root
+        for candidate in (resolved, path):
+            try:
+                rel = candidate.relative_to(root_real)
+            except ValueError:
+                continue
+            text = rel.as_posix()
+            return text or "the account data directory"
+    return None
+
+
 def _add_regular_inode(
     path: Path,
     found: set[tuple[int, int]],
@@ -1411,7 +1487,11 @@ def _add_regular_inode(
 ) -> bool:
     try:
         st = os.lstat(path)
-    except OSError:
+    except FileNotFoundError:
+        return True
+    except OSError as exc:
+        if exc.errno in {errno.ENOENT, errno.ENOTDIR}:
+            return True
         return False
     if not stat.S_ISREG(st.st_mode):
         return True

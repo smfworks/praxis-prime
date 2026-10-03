@@ -10,7 +10,10 @@ and never an account-data root or a directory that contains one. Every
 account-data root inside a bind is covered with a tmpfs, including the
 read-only cwd and argument mounts. An approved task worktree inside that
 root is bound again after the tmpfs so the write is actually visible.
-A hard link to account data inside a mount is covered with ``/dev/null``.
+A hard link to account data inside a mount is covered with ``/dev/null``,
+including when the working directory and a write scope overlap. The check
+is at launch. A link created after the scan and before the process starts
+is not covered.
 Path arguments that name account data are not mounted. The mount decision
 is written to the audit log.
 
