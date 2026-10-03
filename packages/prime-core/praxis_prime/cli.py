@@ -18,6 +18,7 @@ from pathlib import Path
 
 from praxis_prime import __version__
 from praxis_prime.accounts.cli import account_command, add_account_parser
+from praxis_prime.accounts.oidc_cli import add_oidc_parser, oidc_command
 from praxis_prime.compliance.cli import add_compliance_parsers, dispatch_compliance
 from praxis_prime.config import describe_write, resolve_config_dir, write_default_config
 from praxis_prime.doctor import format_report, report_exit_code, run_system_doctor
@@ -68,6 +69,8 @@ def _main(argv: list[str] | None = None) -> int:
         return mcp_command(args)
     if args.command == "account":
         return account_command(args)
+    if args.command == "oidc":
+        return oidc_command(args)
     if args.command == "profile":
         return profile_command(args)
     handled = dispatch_packs(args)
@@ -189,6 +192,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print a one-time code. Send it to the bot as /pair CODE.",
     )
     add_account_parser(commands)
+    add_oidc_parser(commands)
     add_profile_parser(commands)
     add_mcp_parser(commands)
     add_packs_parsers(commands)

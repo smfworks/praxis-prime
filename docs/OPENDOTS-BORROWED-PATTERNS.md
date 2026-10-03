@@ -40,7 +40,7 @@ How the milestone labels map to [Addendum A §8](blueprint-addendum-2026-09.md#8
 | M1b | M1 PR (3): passkeys + TOTP |
 | M1c | M1 PR (6): per-profile workers and the supervisor |
 | M1d | M1 PRs (1) and (7): the SPA shell, profile picker, and admin console |
-| M1e | M1 PR (9): generic OIDC |
+| M1e | M1 PR (9): generic OIDC (in the tree) |
 | M2, M4, M6 | Those milestones |
 | "browser tool" | The existing tool in [BROWSER.md](BROWSER.md) |
 

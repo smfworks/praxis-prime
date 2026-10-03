@@ -147,7 +147,7 @@ Condensed from [ARCHITECTURE §29](docs/ARCHITECTURE.md) and [Blueprint Addendum
 | # | Milestone | Phase |
 |---|---|---|
 | **M0** | Packs ship in the wheel. Legacy `pack.json` loader ignores `ollama-cloud` model pins and pack dashboard JavaScript. | MVP completion (v0.2–0.3) |
-| **M1** | Web shell, accounts, and profiles. Loopback only. **M1a** accounts, roles, and profiles (merged). **M1b** passkeys + TOTP (local enrollment and sign-in on the loopback daemon). **M1c** per-profile workers and supervisor (in the tree; see [SECURITY.md](docs/SECURITY.md)). **M1d** SPA (sign-in, chat, approvals, profile picker, factors, read-only catalog). **M1e** OIDC. | MVP completion (v0.2–0.3) |
+| **M1** | Web shell, accounts, and profiles. Loopback only. **M1a** accounts, roles, and profiles (merged). **M1b** passkeys + TOTP (local enrollment and sign-in on the loopback daemon). **M1c** per-profile workers and supervisor (in the tree; see [SECURITY.md](docs/SECURITY.md)). **M1d** SPA (sign-in, chat, approvals, profile picker, factors, read-only catalog). **M1e** OIDC sign-in (in the tree; see [SECURITY.md](docs/SECURITY.md)). | MVP completion (v0.2–0.3) |
 | **M2** | First-run wizard. Remove the hard-coded Ollama default. | MVP completion (v0.2–0.3) |
 | **M3** | Theme packages and seven built-in themes. | MVP completion (v0.2–0.3) |
 | **M4** | Local sandbox and agent computer: T1 bubblewrap (data-root mask and denylist) for shell, T2 rootless Podman for builds and the virtual desktop. | v0.5 |

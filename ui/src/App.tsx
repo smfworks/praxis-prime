@@ -77,10 +77,22 @@ async function loadSession(): Promise<Account | null> {
 function Shell({ account, route }: { account: Account; route: string }) {
   const client = useQueryClient();
   const [profile, setProfile] = useState(currentProfile);
+  const [notice, setNotice] = useState("");
   const profiles = useQuery({
     queryKey: ["profiles"],
     queryFn: async () => rowsOf(await api("GET", "/v1/profiles"), "profiles"),
   });
+  useEffect(() => {
+    const flag = new URLSearchParams(window.location.search).get("oidc");
+    if (flag === "ok") setNotice("Signed in.");
+    else if (flag === "linked") setNotice("Identity linked.");
+    if (flag) {
+      const url = new URL(window.location.href);
+      url.searchParams.delete("oidc");
+      window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
+      if (!location.hash) location.hash = "#/chat";
+    }
+  }, []);
   useEffect(() => {
     const names = (profiles.data ?? []).map((item) => textOf(item.id)).filter(Boolean);
     if (!names.length) return;
@@ -143,8 +155,13 @@ function Shell({ account, route }: { account: Account; route: string }) {
       </header>
       <main id="main" className="mx-auto max-w-5xl px-4 py-6">
         <p className="mb-4 text-sm text-muted">
-          Signed in as {account.username} ({account.role})
+          Signed in as {account.username}. <span className="text-muted">({account.role})</span>
         </p>
+        {notice ? (
+          <p className="mb-4" role="status">
+            {notice}
+          </p>
+        ) : null}
         {profile ? (
           <>
             {route === "approvals" ? <Approvals profile={profile} /> : null}
@@ -169,13 +186,62 @@ function Shell({ account, route }: { account: Account; route: string }) {
   );
 }
 
+function oidcNeedsCode(): boolean {
+  return new URLSearchParams(window.location.search).get("oidc") === "mfa";
+}
+
 function Login({ onSignedIn }: { onSignedIn: () => void }) {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [code, setCode] = useState("");
   const [mfaToken, setMfaToken] = useState("");
+  // OIDC leaves the second-factor token in the pp_mfa cookie. The code form
+  // must show even though mfaToken stays empty; the server reads the cookie.
+  const [codeStep, setCodeStep] = useState(oidcNeedsCode);
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
+  const [providers, setProviders] = useState<{ id: string; displayName: string }[]>([]);
+
+  useEffect(() => {
+    const flag = new URLSearchParams(window.location.search).get("oidc");
+    if (flag === "ok") setNotice("Signed in.");
+    else if (flag === "linked") setNotice("Identity linked.");
+    else if (flag === "mfa") {
+      setNotice("Enter your authenticator code to finish sign-in.");
+      setCodeStep(true);
+    } else if (flag === "error") setError("Sign-in could not be completed.");
+    if (flag) {
+      const url = new URL(window.location.href);
+      url.searchParams.delete("oidc");
+      window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
+    }
+    void api("GET", "/v1/auth/oidc/providers")
+      .then((body) => {
+        const rows = rowsOf(body, "providers")
+          .map((item) => ({
+            id: textOf(item.id),
+            displayName: textOf(item.displayName),
+          }))
+          .filter((item) => item.id && item.displayName);
+        setProviders(rows);
+      })
+      .catch(() => setProviders([]));
+  }, []);
+
+  async function startOidc(provider: string) {
+    setBusy(true);
+    setError("");
+    try {
+      const body = await api("POST", "/v1/auth/oidc/login", { provider });
+      const url = textOf(body.authorizationUrl);
+      if (!url) throw new Error("Sign-in could not be completed.");
+      window.location.assign(url);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Sign-in could not be completed.");
+      setBusy(false);
+    }
+  }
 
   async function submitPassword(event: FormEvent) {
     event.preventDefault();
@@ -236,7 +302,7 @@ function Login({ onSignedIn }: { onSignedIn: () => void }) {
     <main className="mx-auto max-w-md px-4 py-12">
       <h1 className="mb-2 text-2xl font-semibold">Praxis Prime</h1>
       <p className="mb-6 text-muted">Sign in on this machine. The app does not call out.</p>
-      {mfaToken ? (
+      {codeStep || mfaToken ? (
         <form className="grid gap-3" onSubmit={(event) => void submitCode(event)}>
           <label className="grid gap-1">
             Authenticator code
@@ -282,8 +348,24 @@ function Login({ onSignedIn }: { onSignedIn: () => void }) {
           <button className="btn-quiet" type="button" disabled={busy} onClick={() => void usePasskey()}>
             Use a passkey
           </button>
+          {providers.map((item) => (
+            <button
+              key={item.id}
+              className="btn-quiet"
+              type="button"
+              disabled={busy}
+              onClick={() => void startOidc(item.id)}
+            >
+              Sign in with {item.displayName}
+            </button>
+          ))}
         </form>
       )}
+      {notice ? (
+        <p className="mt-4" role="status">
+          {notice}
+        </p>
+      ) : null}
       {error ? (
         <p className="mt-4 text-danger" role="alert">
           {error}

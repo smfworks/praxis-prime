@@ -26,6 +26,7 @@ classifiers = [
 dependencies = [
   "argon2-cffi>=23.1.0",
   "cryptography>=49,<51",
+  "joserfc>=1.6,<2",
   "pyotp>=2.9.0,<3",
   "webauthn>=3.0.0,<4",
 ]
@@ -66,7 +67,7 @@ packages = ["packages/prime-core/praxis_prime"]
 package = true
 
 [tool.pytest.ini_options]
-pythonpath = [".", "packages/prime-core"]
+pythonpath = [".", "packages/prime-core", "tests"]
 testpaths = ["tests"]
 addopts = "-q"
 markers = [
