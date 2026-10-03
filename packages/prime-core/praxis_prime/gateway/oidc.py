@@ -13,7 +13,6 @@ TOTP is confirmed, the callback sets ``pp_mfa`` and waits for
 from __future__ import annotations
 
 import json
-import secrets
 from collections.abc import Callable
 from urllib.parse import parse_qs
 
@@ -28,7 +27,7 @@ from praxis_prime.accounts.oidc import (
     apply_mapped_role,
     begin,
     binding_cookie,
-    client_cookie,
+    client_binding,
     complete,
     get_provider,
     list_identities,
@@ -146,7 +145,11 @@ def oidc_public(
     if store is None:
         return 503, _error("unavailable", "accounts are not configured"), []
     if method == "GET" and route == "/v1/auth/oidc/providers":
-        return 200, {"ok": True, "providers": public_providers(store)}, []
+        # The login page calls this before the button, so a browser already
+        # holds a signed pp_client when it starts sign-in.
+        presented = cookie_value(headers.get("cookie", ""), CLIENT_COOKIE)
+        _client, cookies = client_binding(store, presented)
+        return 200, {"ok": True, "providers": public_providers(store)}, cookies
     if method == "POST" and route == "/v1/auth/oidc/login":
         return _start_login(store, headers, body, audit, logger, port=port, peer=peer)
     return _callback(store, headers, query, audit, logger, peer=peer)
@@ -197,7 +200,7 @@ def _start_login(
     provider_id = parsed.get("provider", "")
     if not isinstance(provider_id, str):
         return 400, _error("bad_request", "provider must be a string"), []
-    client, client_cookies = _browser_key(headers)
+    client, client_cookies = _browser_key(store, headers)
     try:
         redirect = loopback_redirect(headers.get("host", ""), port)
         url, binding = begin(
@@ -561,13 +564,12 @@ def _clear_binding() -> list[tuple[str, str]]:
     return [("Set-Cookie", binding_cookie("", max_age=0))]
 
 
-def _browser_key(headers: dict[str, str]) -> tuple[str, list[tuple[str, str]]]:
-    """The pp_client cookie, minted when this browser does not have one yet."""
-    current = cookie_value(headers.get("cookie", ""), CLIENT_COOKIE)
-    if current and len(current) <= 256:
-        return current, []
-    token = secrets.token_urlsafe(32)
-    return token, [("Set-Cookie", client_cookie(token))]
+def _browser_key(
+    store: AccountStore, headers: dict[str, str]
+) -> tuple[str, list[tuple[str, str]]]:
+    """A verified pp_client id, or the anonymous bucket when the cookie fails."""
+    presented = cookie_value(headers.get("cookie", ""), CLIENT_COOKIE)
+    return client_binding(store, presented)
 
 
 def _object(body: bytes) -> dict[str, object] | None:

@@ -150,11 +150,13 @@ class _Handler(BaseHTTPRequestHandler):
         if self._special(parts.path):
             return
         if parts.path == "/.well-known/openid-configuration":
+            # Endpoints stay on the origin. The issuer string may end in `/`.
+            origin = fake.issuer[:-1] if fake.issuer.endswith("/") else fake.issuer
             body = {
                 "issuer": fake.issuer,
-                "authorization_endpoint": f"{fake.issuer}/authorize",
-                "token_endpoint": f"{fake.issuer}/token",
-                "jwks_uri": f"{fake.issuer}/jwks",
+                "authorization_endpoint": f"{origin}/authorize",
+                "token_endpoint": f"{origin}/token",
+                "jwks_uri": f"{origin}/jwks",
             }
             self._json(body)
             return

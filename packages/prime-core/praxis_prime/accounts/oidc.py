@@ -74,6 +74,11 @@ NONCE_TTL_SECONDS = 10 * 60
 MFA_TTL_SECONDS = 5 * 60
 _PENDING_CAP = 100
 _PENDING_PER_CLIENT = 8
+# New signed browser keys. A process that omits or forges pp_client does not
+# get one of these; it stays on the single anonymous bucket.
+_CLIENT_MINT_LIMIT = 20
+_CLIENT_MINT_WINDOW = 60.0
+_CLIENT_KEY_NAME = "oidc_client"
 _HTTP_TIMEOUT = 5
 _JWKS_REFRESH_SECONDS = 30.0
 _DISCOVERY_LIMIT = 65_536
@@ -214,16 +219,23 @@ _jwks_forced: dict[str, float] = {}
 # checkpoint or a WAL frame cannot keep the verifier after it is forgotten.
 _verifiers: dict[str, tuple[float, str]] = {}
 _verifier_lock = threading.Lock()
+_mint_lock = threading.Lock()
+_mint_tokens = float(_CLIENT_MINT_LIMIT)
+_mint_at = 0.0
 
 
 def clear_caches() -> None:
-    """Drop cached discovery documents, key sets, and in-memory verifiers."""
+    """Drop cached discovery documents, key sets, verifiers, and the mint bucket."""
+    global _mint_tokens, _mint_at
     _DISCOVERY.clear()
     _JWKS.clear()
     with _jwks_lock:
         _jwks_forced.clear()
     with _verifier_lock:
         _verifiers.clear()
+    with _mint_lock:
+        _mint_tokens = float(_CLIENT_MINT_LIMIT)
+        _mint_at = 0.0
 
 
 def forget_pending_verifier(state: str) -> None:
@@ -322,10 +334,19 @@ def secret_name(provider_id: str) -> str:
 
 
 def normalize_issuer(value: str) -> str:
-    text = value.strip()
-    if text.endswith("/"):
-        text = text[:-1]
-    return text
+    """Issuer as published, apart from surrounding whitespace.
+
+    A trailing slash is part of the identifier. ``https://x/`` and
+    ``https://x`` do not match. Discovery removes one slash only when it
+    builds the well-known URL.
+    """
+    return value.strip()
+
+
+def _discovery_url(issuer: str) -> str:
+    """OpenID Connect Discovery 1.0 §4. One terminating slash is removed."""
+    base = issuer[:-1] if issuer.endswith("/") else issuer
+    return base + "/.well-known/openid-configuration"
 
 
 def add_provider(
@@ -573,9 +594,11 @@ def begin(
 ) -> tuple[str, str]:
     """Start a transaction. Returns the authorization URL and the binding token.
 
-    ``client_key`` is the browser session id or the ``pp_client`` cookie.
-    One client can hold only a few unused sign-ins, so it cannot fill the
-    global pool. The PKCE verifier is kept in memory, not in the database.
+    ``client_key`` is a verified browser id or the signed-in session id.
+    An empty key is the one anonymous bucket. One client can hold only a
+    few unused sign-ins. When the global pool is full, the oldest unused
+    row is dropped so the pool cannot be held shut. The per-client cap is
+    applied first. The PKCE verifier is kept in memory, not in the database.
     """
     if kind not in {"login", "link"}:
         raise OidcError("bad_request")
@@ -615,8 +638,11 @@ def begin(
             pending = store.conn.execute(
                 "SELECT COUNT(*) AS n FROM oidc_transactions WHERE used = 0"
             ).fetchone()
-            if pending is not None and int(pending["n"]) >= _PENDING_CAP:
-                raise OidcError("busy", status=429)
+            while pending is not None and int(pending["n"]) >= _PENDING_CAP:
+                _evict_oldest_pending(store)
+                pending = store.conn.execute(
+                    "SELECT COUNT(*) AS n FROM oidc_transactions WHERE used = 0"
+                ).fetchone()
             store.conn.execute(
                 """
                 INSERT INTO oidc_transactions (
@@ -733,16 +759,16 @@ def complete(
 
 def discover(issuer: str, *, dev_loopback: bool, force: bool = False) -> _Discovery:
     """Fetch ``.well-known/openid-configuration``. HTTPS, or explicit loopback."""
-    normalized = normalize_issuer(issuer)
-    _require_issuer(normalized, dev_loopback=dev_loopback)
+    exact = normalize_issuer(issuer)
+    _require_issuer(exact, dev_loopback=dev_loopback)
     if not force:
-        cached = _DISCOVERY.get(normalized)
+        cached = _DISCOVERY.get(exact)
         if isinstance(cached, _Discovery):
             return cached
-    url = normalized + "/.well-known/openid-configuration"
+    url = _discovery_url(exact)
     document = _get_json(url, allow_http=dev_loopback, limit=_DISCOVERY_LIMIT)
-    parsed = _parse_discovery(document, normalized, allow_http=dev_loopback)
-    _DISCOVERY.put(normalized, parsed)
+    parsed = _parse_discovery(document, exact, allow_http=dev_loopback)
+    _DISCOVERY.put(exact, parsed)
     return parsed
 
 
@@ -1552,6 +1578,129 @@ def _client_key(value: str) -> str:
     if not isinstance(value, str) or not value or len(value) > 256:
         value = "\0anonymous"
     return _hash("oidc-client:" + value)
+
+
+def client_binding(store: AccountStore, presented: str) -> tuple[str, list[tuple[str, str]]]:
+    """Resolve ``pp_client`` for one request.
+
+    A verified cookie returns its id and no new cookie. A missing, malformed,
+    or forged cookie is the anonymous id. A fresh signed cookie is set for
+    the next request when the mint limit allows it. This request does not
+    use the cookie it just minted.
+    """
+    verified = _verified_client_id(store, presented) if presented else ""
+    if verified:
+        return verified, []
+    minted = _mint_client_cookie(store)
+    if minted is None:
+        return "", []
+    return "", [("Set-Cookie", client_cookie(minted))]
+
+
+def _verified_client_id(store: AccountStore, presented: str) -> str:
+    """The id inside a signed cookie, or ``""`` when the signature fails."""
+    parts = presented.split(".")
+    client_id = parts[1] if len(parts) == 3 else ""
+    mac = parts[2] if len(parts) == 3 else ""
+    material = client_id if client_id.isascii() and len(client_id) <= 128 else ""
+    expected = hmac.new(
+        _client_mac_key(store),
+        f"v1.{material}".encode("ascii"),
+        hashlib.sha256,
+    ).hexdigest()
+    presented_mac = mac if len(mac) == 64 and mac.isascii() else "0" * 64
+    signed = hmac.compare_digest(presented_mac, expected)
+    if (
+        not signed
+        or len(parts) != 3
+        or parts[0] != "v1"
+        or not material
+        or any(char not in "0123456789abcdef" for char in mac)
+    ):
+        return ""
+    return client_id
+
+
+def _mint_client_cookie(store: AccountStore) -> str | None:
+    """A new signed cookie, or None when the process is minting too quickly."""
+    if not _take_client_mint():
+        return None
+    client_id = secrets.token_urlsafe(32)
+    mac = hmac.new(
+        _client_mac_key(store),
+        f"v1.{client_id}".encode("ascii"),
+        hashlib.sha256,
+    ).hexdigest()
+    return f"v1.{client_id}.{mac}"
+
+
+def _take_client_mint() -> bool:
+    """Token bucket. About ``_CLIENT_MINT_LIMIT`` new keys per minute."""
+    global _mint_tokens, _mint_at
+    now = time.monotonic()
+    with _mint_lock:
+        if _mint_at <= 0.0:
+            _mint_at = now
+        else:
+            rate = _CLIENT_MINT_LIMIT / _CLIENT_MINT_WINDOW
+            _mint_tokens = min(float(_CLIENT_MINT_LIMIT), _mint_tokens + (now - _mint_at) * rate)
+            _mint_at = now
+        if _mint_tokens < 1.0:
+            return False
+        _mint_tokens -= 1.0
+        return True
+
+
+def _client_mac_key(store: AccountStore) -> bytes:
+    """HMAC key for ``pp_client``. Created once and kept in ``accounts.db``."""
+    with store._lock:
+        row = store.conn.execute(
+            "SELECT value FROM auth_meta WHERE key = ?",
+            (_CLIENT_KEY_NAME,),
+        ).fetchone()
+        if row is not None and len(bytes(row["value"])) == 32:
+            return bytes(row["value"])
+        if row is not None:
+            store.conn.execute(
+                "DELETE FROM auth_meta WHERE key = ?",
+                (_CLIENT_KEY_NAME,),
+            )
+        fresh = secrets.token_bytes(32)
+        store.conn.execute(
+            "INSERT INTO auth_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO NOTHING",
+            (_CLIENT_KEY_NAME, fresh),
+        )
+        store.conn.commit()
+        stored = store.conn.execute(
+            "SELECT value FROM auth_meta WHERE key = ?",
+            (_CLIENT_KEY_NAME,),
+        ).fetchone()
+    if stored is None or len(bytes(stored["value"])) != 32:
+        raise OidcError("rejected")
+    return bytes(stored["value"])
+
+
+def _evict_oldest_pending(store: AccountStore) -> None:
+    """Drop the oldest unused sign-in and its in-memory verifier.
+
+    The caller holds the account lock and an open write transaction.
+    """
+    row = store.conn.execute(
+        """
+        SELECT state_hash FROM oidc_transactions
+        WHERE used = 0
+        ORDER BY created_at ASC, state_hash ASC
+        LIMIT 1
+        """
+    ).fetchone()
+    if row is None:
+        raise OidcError("busy", status=429)
+    digest = str(row["state_hash"])
+    store.conn.execute(
+        "DELETE FROM oidc_transactions WHERE state_hash = ?",
+        (digest,),
+    )
+    _forget_verifier_hashes([digest])
 
 
 def _sweep_pending(store: AccountStore) -> None:

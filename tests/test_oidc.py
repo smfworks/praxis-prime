@@ -90,6 +90,7 @@ def world(
     allow: tuple[str, ...] = (),
     role_claim: str = "",
     role_map: dict[str, str] | None = None,
+    issuer_slash: bool = False,
 ) -> Iterator[World]:
     clear_caches()
     data = tmp_path / "data"
@@ -106,6 +107,8 @@ def world(
         email="ada@example.com",
     )
     fake = FakeOidc(client_id=_CLIENT, secret=_SECRET)
+    if issuer_slash:
+        fake.issuer = fake.issuer + "/"
     add_provider(
         store,
         provider_id="local",
@@ -1162,17 +1165,21 @@ def test_one_client_cannot_exhaust_pending_sign_ins(
 ) -> None:
     assert NONCE_TTL_SECONDS == 10 * 60
     with world(tmp_path, monkeypatch) as ctx:
-        status, cookies, _headers, body = _http(
+        status, cookies, _headers, body = _http(ctx.port, "GET", "/v1/auth/oidc/providers")
+        assert status == 200, body
+        client, client_line = _cookie(cookies, "pp_client")
+        assert client.startswith("v1.")
+        assert "HttpOnly" in client_line and "Secure" in client_line
+        cookie = f"pp_client={client}"
+        status, login_cookies, _headers, body = _http(
             ctx.port,
             "POST",
             "/v1/auth/oidc/login",
             body={"provider": "local"},
+            cookie=cookie,
         )
         assert status == 200, body
-        client, client_line = _cookie(cookies, "pp_client")
-        assert client
-        assert "HttpOnly" in client_line and "Secure" in client_line
-        _binding, binding_line = _cookie(cookies, "pp_oidc")
+        _binding, binding_line = _cookie(login_cookies, "pp_oidc")
         assert f"Max-Age={TXN_TTL_SECONDS}" in binding_line
         row = ctx.store.conn.execute(
             "SELECT expires_at, created_at FROM oidc_transactions WHERE used = 0"
@@ -1185,7 +1192,6 @@ def test_one_client_cannot_exhaust_pending_sign_ins(
             - datetime.fromisoformat(str(row["created_at"]))
         ).total_seconds()
         assert 60 <= lifetime <= 150
-        cookie = f"pp_client={client}"
         for _ in range(_PENDING_PER_CLIENT - 1):
             status, _cookies, _headers, body = _http(
                 ctx.port,
@@ -1204,15 +1210,18 @@ def test_one_client_cannot_exhaust_pending_sign_ins(
         )
         assert status == 429
         assert body["error"]["message"] == SIGN_IN
-        status, other_cookies, _headers, body = _http(
+        status, other_cookies, _headers, body = _http(ctx.port, "GET", "/v1/auth/oidc/providers")
+        assert status == 200, body
+        other, _line = _cookie(other_cookies, "pp_client")
+        assert other and other != client
+        status, _cookies, _headers, body = _http(
             ctx.port,
             "POST",
             "/v1/auth/oidc/login",
             body={"provider": "local"},
+            cookie=f"pp_client={other}",
         )
         assert status == 200, body
-        other, _line = _cookie(other_cookies, "pp_client")
-        assert other and other != client
         from datetime import UTC, timedelta
 
         stale = (datetime.now(UTC) - timedelta(seconds=5)).isoformat(timespec="seconds")
@@ -1226,6 +1235,243 @@ def test_one_client_cannot_exhaust_pending_sign_ins(
             cookie=cookie,
         )
         assert status == 200, body
+
+
+def _pending_keys(ctx: World) -> list[str]:
+    rows = ctx.store.conn.execute(
+        "SELECT client_key FROM oidc_transactions WHERE used = 0"
+    ).fetchall()
+    return [str(row["client_key"]) for row in rows]
+
+
+def test_unsigned_client_cookies_share_one_bucket(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with world(tmp_path, monkeypatch) as ctx:
+        opened = 0
+        for _ in range(_PENDING_PER_CLIENT + 4):
+            status, _cookies, _headers, body = _http(
+                ctx.port,
+                "POST",
+                "/v1/auth/oidc/login",
+                body={"provider": "local"},
+            )
+            if status == 200:
+                opened += 1
+            else:
+                assert status == 429, body
+        for index in range(4):
+            status, _cookies, _headers, body = _http(
+                ctx.port,
+                "POST",
+                "/v1/auth/oidc/login",
+                body={"provider": "local"},
+                cookie=f"pp_client=forged-{index}",
+            )
+            assert status == 429, body
+        status, _cookies, _headers, body = _http(
+            ctx.port,
+            "POST",
+            "/v1/auth/oidc/login",
+            body={"provider": "local"},
+            cookie="pp_client=v1.not-a-real-id." + ("ab" * 32),
+        )
+        assert status == 429, body
+        assert opened == _PENDING_PER_CLIENT
+        keys = _pending_keys(ctx)
+        assert len(keys) == _PENDING_PER_CLIENT
+        assert len(set(keys)) == 1
+
+
+def test_signed_client_can_start_when_the_pool_is_full(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with world(tmp_path, monkeypatch) as ctx:
+        status, cookies, _headers, body = _http(ctx.port, "GET", "/v1/auth/oidc/providers")
+        assert status == 200, body
+        client, _line = _cookie(cookies, "pp_client")
+        assert client.startswith("v1.")
+        cookie = f"pp_client={client}"
+        for _ in range(_PENDING_PER_CLIENT):
+            status, _cookies, _headers, body = _http(
+                ctx.port,
+                "POST",
+                "/v1/auth/oidc/login",
+                body={"provider": "local"},
+            )
+            assert status == 200, body
+        status, _cookies, _headers, body = _http(
+            ctx.port,
+            "POST",
+            "/v1/auth/oidc/login",
+            body={"provider": "local"},
+        )
+        assert status == 429, body
+        status, _cookies, _headers, body = _http(
+            ctx.port,
+            "POST",
+            "/v1/auth/oidc/login",
+            body={"provider": "local"},
+            cookie=cookie,
+        )
+        assert status == 200, body
+        oldest = "a" * 64
+        planted = "planted-verifier-value"
+        ctx.store.conn.execute(
+            """
+            INSERT INTO oidc_transactions (
+                state_hash, binding_hash, provider_id, nonce_hash, verifier,
+                kind, account_id, session_id, redirect_uri, expires_at,
+                used, created_at, client_key
+            ) VALUES (?, ?, 'local', ?, '', 'login', '', '', ?, ?, 0, ?, ?)
+            """,
+            (
+                oldest,
+                "b" * 64,
+                "c" * 64,
+                "http://127.0.0.1:9/v1/auth/oidc/callback",
+                "2099-01-01T00:00:00+00:00",
+                "2000-01-01T00:00:00+00:00",
+                "filler-oldest",
+            ),
+        )
+        oidc_mod._verifiers[oldest] = (time.time() + 600, planted)
+        have = len(_pending_keys(ctx))
+        for index in range(oidc_mod._PENDING_CAP - have):
+            ctx.store.conn.execute(
+                """
+                INSERT INTO oidc_transactions (
+                    state_hash, binding_hash, provider_id, nonce_hash, verifier,
+                    kind, account_id, session_id, redirect_uri, expires_at,
+                    used, created_at, client_key
+                ) VALUES (?, ?, 'local', ?, '', 'login', '', '', ?, ?, 0, ?, ?)
+                """,
+                (
+                    f"{index:064x}",
+                    "d" * 64,
+                    "e" * 64,
+                    "http://127.0.0.1:9/v1/auth/oidc/callback",
+                    "2099-01-01T00:00:00+00:00",
+                    "2020-01-01T00:00:00+00:00",
+                    f"filler-{index}",
+                ),
+            )
+        ctx.store.conn.commit()
+        assert len(_pending_keys(ctx)) == oidc_mod._PENDING_CAP
+        status, _cookies, _headers, body = _http(
+            ctx.port,
+            "POST",
+            "/v1/auth/oidc/login",
+            body={"provider": "local"},
+            cookie=cookie,
+        )
+        assert status == 200, body
+        gone = ctx.store.conn.execute(
+            "SELECT 1 FROM oidc_transactions WHERE state_hash = ?",
+            (oldest,),
+        ).fetchone()
+        assert gone is None
+        assert oldest not in oidc_mod._verifiers
+        # The signed client is under its own cap here (two rows). Fill it.
+        for _ in range(_PENDING_PER_CLIENT - 2):
+            status, _cookies, _headers, body = _http(
+                ctx.port,
+                "POST",
+                "/v1/auth/oidc/login",
+                body={"provider": "local"},
+                cookie=cookie,
+            )
+            assert status == 200, body
+        held = "f" * 64
+        ctx.store.conn.execute(
+            """
+            INSERT INTO oidc_transactions (
+                state_hash, binding_hash, provider_id, nonce_hash, verifier,
+                kind, account_id, session_id, redirect_uri, expires_at,
+                used, created_at, client_key
+            ) VALUES (?, ?, 'local', ?, '', 'login', '', '', ?, ?, 0, ?, ?)
+            """,
+            (
+                held,
+                "b" * 64,
+                "c" * 64,
+                "http://127.0.0.1:9/v1/auth/oidc/callback",
+                "2099-01-01T00:00:00+00:00",
+                "1999-01-01T00:00:00+00:00",
+                "filler-held",
+            ),
+        )
+        ctx.store.conn.commit()
+        oidc_mod._verifiers[held] = (time.time() + 600, planted)
+        status, _cookies, _headers, body = _http(
+            ctx.port,
+            "POST",
+            "/v1/auth/oidc/login",
+            body={"provider": "local"},
+            cookie=cookie,
+        )
+        assert status == 429, body
+        still = ctx.store.conn.execute(
+            "SELECT 1 FROM oidc_transactions WHERE state_hash = ?",
+            (held,),
+        ).fetchone()
+        assert still is not None
+        assert oidc_mod._verifiers[held][1] == planted
+
+
+def test_client_cookie_mint_is_rate_limited(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with world(tmp_path, monkeypatch) as ctx:
+        minted = 0
+        for _ in range(oidc_mod._CLIENT_MINT_LIMIT + 1):
+            status, cookies, _headers, body = _http(ctx.port, "GET", "/v1/auth/oidc/providers")
+            assert status == 200, body
+            if _cookie(cookies, "pp_client")[0]:
+                minted += 1
+        assert minted == oidc_mod._CLIENT_MINT_LIMIT
+        status, cookies, _headers, body = _http(ctx.port, "GET", "/v1/auth/session")
+        assert status == 401, body
+        assert _cookie(cookies, "pp_client")[0] == ""
+        status, cookies, _headers, body = _http(
+            ctx.port,
+            "POST",
+            "/v1/auth/oidc/login",
+            body={"provider": "local"},
+        )
+        assert status == 200, body
+        assert _cookie(cookies, "pp_client")[0] == ""
+        status, _cookies, _headers, body = _http(
+            ctx.port,
+            "POST",
+            "/v1/auth/oidc/login",
+            body={"provider": "local"},
+            cookie="pp_client=also-forged",
+        )
+        assert status == 200, body
+        keys = _pending_keys(ctx)
+        assert len(keys) == 2
+        assert len(set(keys)) == 1
+
+
+def test_logged_out_session_mints_a_signed_client_cookie(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with world(tmp_path, monkeypatch) as ctx:
+        status, cookies, _headers, body = _http(ctx.port, "GET", "/v1/auth/session")
+        assert status == 401, body
+        client, line = _cookie(cookies, "pp_client")
+        assert client.startswith("v1.")
+        assert "HttpOnly" in line and "Path=/" in line
+        status, _cookies, _headers, body = _http(
+            ctx.port,
+            "POST",
+            "/v1/auth/oidc/login",
+            body={"provider": "local"},
+            cookie=f"pp_client={client}",
+        )
+        assert status == 200, body
+        assert len(_pending_keys(ctx)) == 1
 
 
 def test_pkce_verifier_is_not_written_to_the_database(
@@ -1437,19 +1683,78 @@ def test_trailing_slash_issuer_is_rejected(
         prelink(ctx.store, username_text="ada", issuer=ctx.fake.issuer, subject="subject-1")
         ctx.fake.iss = ctx.fake.issuer + "/"
         _nav_error(ctx, "bad_issuer")
-    issuer = "https://idp.example"
-    document = {
-        "issuer": issuer + "/",
-        "authorization_endpoint": issuer + "/authorize",
-        "token_endpoint": issuer + "/token",
-        "jwks_uri": issuer + "/jwks",
+    plain = "https://idp.example"
+    slash = plain + "/"
+    endpoints = {
+        "authorization_endpoint": plain + "/authorize",
+        "token_endpoint": plain + "/token",
+        "jwks_uri": plain + "/jwks",
     }
     with pytest.raises(OidcError) as caught:
-        oidc_mod._parse_discovery(document, issuer, allow_http=False)
+        oidc_mod._parse_discovery({**endpoints, "issuer": slash}, plain, allow_http=False)
     assert caught.value.reason == "discovery_issuer"
-    document["issuer"] = issuer
-    parsed = oidc_mod._parse_discovery(document, issuer, allow_http=False)
-    assert parsed.authorization == issuer + "/authorize"
+    with pytest.raises(OidcError) as caught:
+        oidc_mod._parse_discovery({**endpoints, "issuer": plain}, slash, allow_http=False)
+    assert caught.value.reason == "discovery_issuer"
+    parsed = oidc_mod._parse_discovery({**endpoints, "issuer": slash}, slash, allow_http=False)
+    assert parsed.authorization == plain + "/authorize"
+    assert oidc_mod._discovery_url(slash) == plain + "/.well-known/openid-configuration"
+    assert oidc_mod._discovery_url(plain) == plain + "/.well-known/openid-configuration"
+    assert oidc_mod.normalize_issuer("  " + slash + "  ") == slash
+
+
+def test_issuer_with_a_trailing_slash_signs_in(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with world(tmp_path, monkeypatch, issuer_slash=True) as ctx:
+        assert ctx.fake.issuer.endswith("/")
+        provider = oidc_mod.get_provider(ctx.store, "local")
+        assert provider is not None and provider.issuer == ctx.fake.issuer
+        ada = ctx.store.get_username("ada")
+        assert ada is not None
+        prelink(ctx.store, username_text="ada", issuer=ctx.fake.issuer, subject="subject-1")
+        status, _cookies, headers, _body = _sign_in(ctx)
+        assert status == 302 and headers["location"] == "/?oidc=ok"
+        linked = list_identities(ctx.store, ada.id)
+        assert linked[0]["issuer"] == ctx.fake.issuer
+        ctx.fake.iss = ctx.fake.issuer[:-1]
+        _nav_error(ctx, "bad_issuer")
+        with pytest.raises(OidcError) as caught:
+            oidc_mod.unlink(ctx.store, ada.id, ctx.fake.issuer[:-1], "subject-1")
+        assert caught.value.reason == "not_linked"
+        assert list_identities(ctx.store, ada.id)
+        oidc_mod.remove_provider(ctx.store, "local")
+        assert list_identities(ctx.store, ada.id) == []
+
+
+def test_opening_the_store_clears_a_legacy_pkce_verifier(tmp_path: Path) -> None:
+    path = tmp_path / "accounts.db"
+    secret = "legacy-pkce-verifier-value"
+    store = AccountStore(path)
+    store.conn.execute(
+        """
+        INSERT INTO oidc_transactions (
+            state_hash, binding_hash, provider_id, nonce_hash, verifier,
+            kind, account_id, session_id, redirect_uri, expires_at,
+            used, created_at, client_key
+        ) VALUES (?, ?, 'local', ?, ?, 'login', '', '', ?, ?, 0, ?, '')
+        """,
+        (
+            "ab" * 32,
+            "cd" * 32,
+            "ef" * 32,
+            secret,
+            "http://127.0.0.1:9/v1/auth/oidc/callback",
+            "2099-01-01T00:00:00+00:00",
+            "2020-01-01T00:00:00+00:00",
+        ),
+    )
+    store.conn.commit()
+    store.close()
+    again = AccountStore(path)
+    row = again.conn.execute("SELECT verifier FROM oidc_transactions").fetchone()
+    assert row is not None and str(row["verifier"]) == ""
+    again.close()
 
 
 def test_provider_responses_are_bounded(monkeypatch: pytest.MonkeyPatch) -> None:

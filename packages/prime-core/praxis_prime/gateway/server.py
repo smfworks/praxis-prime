@@ -18,7 +18,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import parse_qs
 
-from praxis_prime.accounts.db import AccountStore
+from praxis_prime.accounts.db import AccountStore, cookie_value
+from praxis_prime.accounts.oidc import CLIENT_COOKIE, client_binding
 from praxis_prime.accounts.roles import sees_all_profiles
 from praxis_prime.approvals.queue import ApprovalQueue, parse_decision
 from praxis_prime.audit.log import AuditLog, actor_account_var, profile_var
@@ -359,6 +360,14 @@ class GatewayServer:
         if isinstance(principal, Denial):
             if principal.status == 401 and self.logger is not None:
                 self.logger.warning("http_unauthorized", path=route)
+            # The SPA asks for the session before it shows the login form.
+            if (
+                principal.status == 401
+                and method == "GET"
+                and route == "/v1/auth/session"
+                and self.accounts is not None
+            ):
+                extras.extend(_client_cookie(self.accounts, headers))
             return principal.status, _error(principal.code, principal.message)
         explicit_profile = headers.get("x-praxis-profile", "").strip()
         profile_name = explicit_profile
@@ -452,6 +461,8 @@ class GatewayServer:
                 session = self.accounts.session_from_token(principal.session_token)
                 if session is not None:
                     body_out["csrfToken"] = session.csrf_token
+            if self.accounts is not None:
+                extras.extend(_client_cookie(self.accounts, headers))
             return 200, body_out
         if method == "GET" and route == "/v1/memory":
             return self._profile_catalog("list_memory", "entries", profile_name)
@@ -1356,6 +1367,15 @@ class _Subscriber:
     outgoing: queue.Queue[dict[str, object] | None]
     principal: Principal
     conn: socket.socket
+
+
+def _client_cookie(
+    store: AccountStore, headers: dict[str, str]
+) -> list[tuple[str, str]]:
+    """Set a signed pp_client when this browser does not already have one."""
+    presented = cookie_value(headers.get("cookie", ""), CLIENT_COOKIE)
+    _client, cookies = client_binding(store, presented)
+    return cookies
 
 
 def _approval_meta(item: dict[str, object]) -> dict[str, object]:

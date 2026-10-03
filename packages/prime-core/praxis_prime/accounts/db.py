@@ -1009,6 +1009,10 @@ class AccountStore:
             "client_key",
             "client_key TEXT NOT NULL DEFAULT ''",
         )
+        # Rows written before the verifier moved to process memory still hold
+        # it. Clear the column on every open so a leftover value does not stay
+        # in the database.
+        self.conn.execute("UPDATE oidc_transactions SET verifier = '' WHERE verifier != ''")
         self.conn.commit()
         tighten_file(self.path)
 
