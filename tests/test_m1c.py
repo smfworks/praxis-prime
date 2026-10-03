@@ -5,9 +5,12 @@ from __future__ import annotations
 import json
 import os
 import queue
+import signal
 import socket
 import sqlite3
+import subprocess
 import sys
+import textwrap
 import threading
 import time
 import urllib.request
@@ -33,23 +36,30 @@ from praxis_prime.gateway.routes import frame_session_ids_agree, ids_agree, rout
 from praxis_prime.gateway.server import GatewayServer
 from praxis_prime.host import Host, TurnResult
 from praxis_prime.loop.control import TurnControl
+from praxis_prime.policy.boundary import _EXACT_NAMES, _FILE_ROOT_NAMES
 from praxis_prime.profiles.home import create_profile
 from praxis_prime.router.http import open_lines
 from praxis_prime.router.types import ProviderUnreachable
 from praxis_prime.state import StateDB
-from praxis_prime.supervisor.confine import ProfileBoundary, refuse_worker_path
+from praxis_prime.supervisor.confine import (
+    ProfileBoundary,
+    clear_worker_boundary,
+    refuse_worker_path,
+)
 from praxis_prime.supervisor.credentials import (
+    CredentialError,
     bump_generation,
     credential_matches,
     derive,
     generation_for,
+    load_generations,
     load_or_create_master,
     rotate_master,
 )
 from praxis_prime.supervisor.grants import is_revoked, load_live_grants, migrate_grants
-from praxis_prime.supervisor.ipc import IpcError, recv_message, send_message
+from praxis_prime.supervisor.ipc import IpcError, recv_message, same_user, send_message
 from praxis_prime.supervisor.leases import LeaseStore
-from praxis_prime.supervisor.migrate import marker_path, migrate_install
+from praxis_prime.supervisor.migrate import MigrationError, marker_path, migrate_install
 from praxis_prime.supervisor.redact import redact
 from praxis_prime.supervisor.routing import RoutingHost, RoutingQueue
 from praxis_prime.supervisor.supervisor import Supervisor, WorkerUnavailable
@@ -91,13 +101,22 @@ def test_worker_path_guard_refuses_another_profile(tmp_path: Path, monkeypatch):
     refuse_worker_path(bea_db)
     monkeypatch.setenv("PRAXIS_PRIME_WORKER_PROFILE", "ada")
     monkeypatch.setenv("PRAXIS_PRIME_WORKER_DATA", str(root))
-    StateDB(ada_db).close()
-    with pytest.raises(ProfileBoundary):
-        StateDB(bea_db)
-    alias = root / "profiles" / "ada" / "other.db"
-    alias.symlink_to(bea_db)
-    with pytest.raises(ProfileBoundary):
-        StateDB(alias)
+    try:
+        StateDB(ada_db).close()
+        with pytest.raises(ProfileBoundary):
+            StateDB(bea_db)
+        alias = root / "profiles" / "ada" / "other.db"
+        alias.symlink_to(bea_db)
+        with pytest.raises(ProfileBoundary):
+            StateDB(alias)
+        monkeypatch.setenv("PRAXIS_PRIME_WORKER_PROFILE", "bea")
+        with pytest.raises(ProfileBoundary):
+            StateDB(bea_db)
+        monkeypatch.delenv("PRAXIS_PRIME_WORKER_DATA")
+        with pytest.raises(ProfileBoundary):
+            StateDB(bea_db)
+    finally:
+        clear_worker_boundary()
 
 
 def test_m1c_migration_is_idempotent_and_does_not_move_the_database(tmp_path: Path):
@@ -179,6 +198,7 @@ def test_routine_lease_retries_once_after_a_crash(tmp_path: Path):
         clock = {"now": 0.0}
         store = LeaseStore(db, clock=lambda: clock["now"], ttl=30)
         assert store.acquire("routine", "owner-a") == "run"
+        assert store.acquire("routine", "owner-a") == "skip"
         assert store.acquire("routine", "owner-b") == "skip"
         clock["now"] = 31
         assert store.acquire("routine", "owner-b") == "retry"
@@ -448,12 +468,16 @@ def test_telegram_routes_approve_and_deny_to_the_bound_chat(tmp_path: Path):
     assert store.destination("ada", "acct-bea") is None
     assert store.may_decide(11, "ada", "acct-ada") is True
     assert store.may_decide(22, "ada", "acct-ada") is False
+    assert store.may_decide(22, "", "") is False
+    assert store.may_decide(22, "ada", "") is False
+    assert store.may_decide(33, "ada", "acct-ada") is False
+    assert store.may_decide(11, "bea", "") is False
+    assert store.destination("", "") is None
 
     queue = ApprovalQueue(ttl=30)
     queue.profile_id = "ada"
     transport = _Transport()
     adapter = TelegramAdapter(transport, store, _Host(), queue)
-    account = approval_account_id.set("acct-ada")
     request = ApprovalRequest(
         tool="shell",
         risk=Risk.DESTRUCTIVE,
@@ -465,7 +489,11 @@ def test_telegram_routes_approve_and_deny_to_the_bound_chat(tmp_path: Path):
     )
 
     def wait() -> None:
-        queue.authorize(request)
+        account = approval_account_id.set("acct-ada")
+        try:
+            queue.authorize(request)
+        finally:
+            approval_account_id.reset(account)
 
     thread = threading.Thread(target=wait)
     thread.start()
@@ -499,7 +527,6 @@ def test_telegram_routes_approve_and_deny_to_the_bound_chat(tmp_path: Path):
         assert not thread.is_alive()
         assert queue.get(approval_id)["state"] == "deny"  # type: ignore[index]
     finally:
-        approval_account_id.reset(account)
         queue.deny_all(actor="shutdown")
         thread.join(1)
 
@@ -669,7 +696,7 @@ def test_upstream_cap_counts_a_body_with_no_newlines():
             return b"a" * take
 
     with pytest.raises(ValueError, match="4MB"):
-        list(iter_bounded(Reader(), deadline=time.monotonic() + 30))
+        list(iter_bounded(Reader()))
 
 
 def test_upstream_refuses_redirects_oversized_bodies_and_deadlines(monkeypatch):
@@ -749,6 +776,322 @@ def test_telegram_transport_refuses_a_redirect():
     transport = HttpTelegramTransport("telegram-token", opener=opener)
     with pytest.raises(TelegramError, match="redirect refused"):
         transport.call("getMe", {})
+
+
+def test_upstream_lines_arrive_as_they_are_sent():
+    for chunked in (True, False):
+        url = _paced_upstream(chunked=chunked, count=5, gap=0.5)
+        started = time.monotonic()
+        arrivals = [
+            time.monotonic() - started
+            for line in open_lines(url, b"{}", {}, timeout=10, secrets=[], provider="p")
+            if line.strip()
+        ]
+        assert len(arrivals) == 5
+        assert arrivals[0] < 1.0
+        assert arrivals[-1] - arrivals[0] > 1.5
+
+
+def test_upstream_idle_timeout_allows_a_slow_healthy_stream():
+    url = _paced_upstream(chunked=False, count=4, gap=0.4)
+    lines = [
+        line
+        for line in open_lines(url, b"{}", {}, timeout=1, secrets=[], provider="p")
+        if line.strip()
+    ]
+    assert len(lines) == 4
+
+
+def test_peer_cred_rejects_a_different_uid(monkeypatch: pytest.MonkeyPatch):
+    left, right = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        assert same_user(left) is True
+        current = os.getuid()
+        monkeypatch.setattr("praxis_prime.supervisor.ipc.os.getuid", lambda: current + 1)
+        assert same_user(right) is False
+    finally:
+        left.close()
+        right.close()
+
+
+def test_long_runtime_path_uses_a_private_socket_directory(tmp_path: Path):
+    root = tmp_path / "data"
+    create_profile(root, "ada")
+    supervisor = Supervisor(
+        data_root=root,
+        runtime_dir=tmp_path / ("x" * 90) / "run",
+        state_dir=tmp_path / "state",
+        env=_child_env(),
+        command=[sys.executable, str(_STUB)],
+    )
+    control = None
+    try:
+        supervisor.start()
+        control = supervisor.control_path
+        assert control.parent != Path("/tmp")
+        assert not str(control).startswith("/tmp/pp-")
+        assert control.parent.stat().st_mode & 0o777 == 0o700
+        assert control.stat().st_mode & 0o777 == 0o600
+        assert control.name.endswith("-supervisor.sock")
+        ada = Path(str(control).replace("-supervisor.sock", "-ada.sock"))
+        assert ada.exists()
+        assert ada.stat().st_uid == os.getuid()
+        assert ada.stat().st_mode & 0o777 == 0o600
+        log = supervisor.ensure("ada").log_path
+        assert log is not None
+        assert log.stat().st_mode & 0o777 == 0o600
+    finally:
+        supervisor.close()
+    assert control is not None
+    assert not control.parent.exists()
+
+
+def test_session_owner_does_not_start_idle_profiles(tmp_path: Path):
+    from praxis_prime.policy.engine import PolicyEngine
+    from praxis_prime.router.settings import load_settings
+
+    supervisor = _supervisor(tmp_path, names=("ada", "bea"))
+    host = RoutingHost(supervisor, PolicyEngine({}), load_settings({}))
+    try:
+        supervisor.start()
+        supervisor.ensure("ada")
+        assert set(supervisor.running()) == {"ada"}
+        assert host.session_owner("missing-session") is None
+        assert set(supervisor.running()) == {"ada"}
+    finally:
+        supervisor.close()
+
+
+def test_approval_profile_keeps_the_first_writer(tmp_path: Path):
+    supervisor = _supervisor(tmp_path, names=("ada", "bea"))
+    try:
+        supervisor.note_approval("ada", "ap_same")
+        supervisor.note_approval("bea", "ap_same")
+        assert supervisor.approval_profile("ap_same") == "ada"
+    finally:
+        supervisor.close()
+
+
+def test_generation_bump_rejects_an_open_control_connection(tmp_path: Path):
+    supervisor = _supervisor(tmp_path, names=("ada",))
+    try:
+        supervisor.start()
+        slot = supervisor.ensure("ada")
+        live = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        live.settimeout(3)
+        live.connect(str(supervisor.control_path))
+        send_message(
+            live,
+            {
+                "id": "1",
+                "method": "auth",
+                "profile": "ada",
+                "generation": slot.generation,
+                "token": slot.credential,
+            },
+        )
+        assert recv_message(live).get("ok") is True
+        supervisor.bump("ada")
+        send_message(live, {"id": "g", "method": "grant.check", "account": "acct-x"})
+        assert recv_message(live).get("ok") is False
+        send_message(
+            live,
+            {
+                "id": "e",
+                "method": "event",
+                "kind": "approval",
+                "body": {"approval": {"id": "ap_after_bump"}},
+            },
+        )
+        assert recv_message(live).get("ok") is False
+        assert supervisor.approval_profile("ap_after_bump") == ""
+        fresh = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        fresh.settimeout(3)
+        fresh.connect(str(supervisor.control_path))
+        send_message(
+            fresh,
+            {
+                "id": "1",
+                "method": "auth",
+                "profile": "ada",
+                "generation": 1,
+                "token": slot.credential,
+            },
+        )
+        assert recv_message(fresh).get("ok") is False
+        fresh.close()
+        live.close()
+    finally:
+        supervisor.close()
+
+
+def test_derive_rejects_a_profile_that_is_not_an_id():
+    master = os.urandom(32)
+    ada = derive(master, "ada", 12)
+    with pytest.raises(CredentialError):
+        derive(master, "ada:1", 2)
+    assert ada != derive(master, "ada", 1)
+
+
+def test_generation_bumps_are_not_lost_across_threads(tmp_path: Path):
+    path = tmp_path / "worker-generations.json"
+    profiles = [f"p{i}" for i in range(16)]
+
+    def bump(profile: str) -> None:
+        for _ in range(20):
+            bump_generation(path, profile)
+
+    threads = [threading.Thread(target=bump, args=(profile,)) for profile in profiles]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    final = load_generations(path)
+    assert final == {profile: 21 for profile in profiles}
+
+
+def test_corrupt_generations_file_does_not_revive_a_credential(tmp_path: Path):
+    path = tmp_path / "worker-generations.json"
+    path.write_text("{corrupt", encoding="utf-8")
+    with pytest.raises(CredentialError, match="corrupt"):
+        generation_for(path, "ada")
+    supervisor = _supervisor(tmp_path, names=("ada",))
+    try:
+        supervisor.start()
+        slot = supervisor.ensure("ada")
+        token = slot.credential
+        supervisor.generation_path.write_text("{corrupt", encoding="utf-8")
+        reply = _rpc(supervisor.control_path, "ada", token, "health", {})
+        assert reply.get("ok") is False
+    finally:
+        supervisor.close()
+
+
+def test_bad_m1c_marker_names_the_problem(tmp_path: Path):
+    for label, content, match in (
+        ("corrupt", "{oops", "corrupt"),
+        ("empty", "", "empty"),
+        ("future", json.dumps({"version": 2}), "not supported"),
+    ):
+        root = tmp_path / label
+        (root / "supervisor").mkdir(parents=True)
+        marker_path(root).write_text(content, encoding="utf-8")
+        with pytest.raises(MigrationError, match=match):
+            migrate_install(root)
+
+
+def test_corrupt_marker_is_not_reported_as_bind_failed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+):
+    _isolate(tmp_path, monkeypatch)
+    from praxis_prime.gateway.discover import log_path
+    from praxis_prime.paths import data_dir
+
+    root = data_dir()
+    create_profile(root, "ada")
+    marker = marker_path(root)
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text("{oops", encoding="utf-8")
+    assert serve(stop=threading.Event(), listen="127.0.0.1:0") == 1
+    assert "m1c marker is corrupt" in capsys.readouterr().err
+    logged = log_path().read_text(encoding="utf-8")
+    assert "migration_failed" in logged
+    assert "bind_failed" not in logged
+
+
+def test_reboot_clock_still_allows_one_lease_retry(tmp_path: Path):
+    db = StateDB(tmp_path / "prime.db")
+    try:
+        clock = {"now": 864000.0}
+        first = LeaseStore(db, clock=lambda: clock["now"])
+        assert first.acquire("rt_00000001", "pid100") == "run"
+        second = LeaseStore(db, clock=lambda: 60.0)
+        assert second.acquire("rt_00000001", "pid200") == "retry"
+        later = LeaseStore(db, clock=lambda: 864040.0)
+        assert later.acquire("rt_00000001", "pid200") == "skip"
+        assert later.acquire("rt_00000002", "pid200") == "run"
+        assert later.acquire("rt_00000002", "pid200") == "skip"
+    finally:
+        db.close()
+
+
+def test_worker_master_key_is_on_the_read_denylist():
+    assert "worker-master.key" in _EXACT_NAMES
+    assert "worker-master.key" in _FILE_ROOT_NAMES
+
+
+def test_a_killed_supervisor_does_not_leave_its_worker(tmp_path: Path):
+    script = textwrap.dedent(
+        """
+        import os, sys, time
+        from praxis_prime.paths import data_dir
+        from praxis_prime.profiles.home import create_profile
+        from praxis_prime.supervisor.supervisor import Supervisor
+        root = data_dir()
+        if not (root / "profiles" / "ada").exists():
+            create_profile(root, "ada")
+        env = os.environ.copy()
+        sup = Supervisor(
+            data_root=root,
+            runtime_dir=root.parent / "run",
+            state_dir=root.parent / "state",
+            env=env,
+            start_timeout=30,
+            backoff_cap=2,
+        )
+        sup.start()
+        try:
+            sup.call("ada", "memory.list")
+            print("PID", sup._slots["ada"].process.pid, flush=True)
+        except Exception as exc:
+            print("START_FAIL", type(exc).__name__, exc, flush=True)
+            log = root.parent / "state" / "worker-ada.log"
+            if log.is_file():
+                print(log.read_text(encoding="utf-8")[-800:], flush=True)
+        time.sleep(float(sys.argv[1]))
+        sup.close()
+        """
+    )
+    child = tmp_path / "child.py"
+    child.write_text(script, encoding="utf-8")
+    env = _child_env(
+        {
+            "XDG_DATA_HOME": str(tmp_path / "xdg-data"),
+            "XDG_CONFIG_HOME": str(tmp_path / "xdg-config"),
+            "XDG_STATE_HOME": str(tmp_path / "xdg-state"),
+            "XDG_RUNTIME_DIR": str(tmp_path / "xdg-run"),
+            "HOME": str(tmp_path / "home"),
+        }
+    )
+    first = subprocess.Popen(
+        [sys.executable, str(child), "60"],
+        stdout=subprocess.PIPE,
+        text=True,
+        env=env,
+    )
+    assert first.stdout is not None
+    line = first.stdout.readline().strip()
+    assert line.startswith("PID "), line
+    worker_pid = int(line.split()[1])
+    first.send_signal(signal.SIGKILL)
+    first.wait(timeout=5)
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline and Path(f"/proc/{worker_pid}").exists():
+        time.sleep(0.1)
+    assert not Path(f"/proc/{worker_pid}").exists()
+    second = subprocess.run(
+        [sys.executable, str(child), "2"],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=60,
+        check=False,
+    )
+    assert second.returncode == 0, second.stderr
+    assert second.stdout.startswith("PID "), second.stdout + second.stderr
+    assert not Path(f"/proc/{worker_pid}").exists()
 
 
 def test_real_workers_keep_memory_in_separate_databases(tmp_path: Path, monkeypatch):
@@ -1003,6 +1346,44 @@ def _http(
 
 
 _SERVERS: list[ThreadingHTTPServer] = []
+
+
+def _paced_upstream(*, chunked: bool, count: int, gap: float) -> str:
+    """Serve ``count`` lines ``gap`` seconds apart, chunked or closed at EOF."""
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    sock.listen(1)
+    port = sock.getsockname()[1]
+
+    def run() -> None:
+        conn, _addr = sock.accept()
+        try:
+            buf = b""
+            while b"\r\n\r\n" not in buf:
+                buf += conn.recv(65536)
+            while not buf.endswith(b"{}"):
+                buf += conn.recv(65536)
+            header = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n"
+            if chunked:
+                header += b"Transfer-Encoding: chunked\r\n\r\n"
+            else:
+                header += b"Connection: close\r\n\r\n"
+            conn.sendall(header)
+            for index in range(count):
+                line = f"data: token{index}\n".encode()
+                if chunked:
+                    conn.sendall(b"%x\r\n" % len(line) + line + b"\r\n")
+                else:
+                    conn.sendall(line)
+                time.sleep(gap)
+            if chunked:
+                conn.sendall(b"0\r\n\r\n")
+        finally:
+            conn.close()
+            sock.close()
+
+    threading.Thread(target=run, daemon=True).start()
+    return f"http://127.0.0.1:{port}/"
 
 
 def _serve(handler: type[BaseHTTPRequestHandler]) -> str:

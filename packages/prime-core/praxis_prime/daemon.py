@@ -312,6 +312,15 @@ def _serve_workers(
             if queue.on_resolved is not None:
                 queue.on_resolved(item)
             return
+        if kind == "audit":
+            audit.append(
+                session_id=None,
+                kind=str(body.get("kind") or "worker"),
+                summary=str(body.get("summary") or "worker audit"),
+                payload={"profile": profile},
+                profile=profile,
+            )
+            return
         if kind != "routine":
             return
         current = holder.get("adapter")
@@ -393,9 +402,19 @@ def _serve_workers(
         return code, body
 
     server.routine_fire = fire
+    from praxis_prime.supervisor.migrate import MigrationError
+
     try:
         supervisor.start()
         server.start()
+    except MigrationError as exc:
+        logger.error("migration_failed", error=type(exc).__name__)
+        print(f"praxis-primed: {exc}", file=sys.stderr)
+        supervisor.close()
+        accounts.close()
+        audit.close()
+        audit_db.close()
+        return 1
     except OSError as exc:
         logger.error("bind_failed", error=type(exc).__name__)
         print(f"praxis-primed: {exc}", file=sys.stderr)

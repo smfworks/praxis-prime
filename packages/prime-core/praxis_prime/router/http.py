@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import time
 from collections.abc import Iterator
 from urllib.error import HTTPError, URLError
 from urllib.request import Request
@@ -26,9 +25,10 @@ def open_lines(
 ) -> Iterator[str]:
     """POST ``body`` and yield decoded lines. Redirects and oversized bodies are refused."""
     request = Request(url, data=body, headers=headers, method="POST")
-    limit = timeout if deadline is None else deadline
+    # ``deadline`` shortens the idle timeout. It is not a cap on the whole stream.
+    idle = timeout if deadline is None else min(timeout, deadline)
     try:
-        response = _OPENER.open(request, timeout=timeout)  # noqa: S310
+        response = _OPENER.open(request, timeout=idle)  # noqa: S310
     except RedirectRefused as exc:
         raise ProviderUnreachable(provider, "redirect refused") from exc
     except HTTPError as exc:
@@ -41,11 +41,10 @@ def open_lines(
         raise ProviderUnreachable(provider, f"could not reach {url} ({exc.reason})") from exc
     except OSError as exc:
         raise ProviderUnreachable(provider, f"could not reach {url} ({exc})") from exc
-    ends = time.monotonic() + limit
 
     def lines() -> Iterator[str]:
         try:
-            for raw in iter_bounded(response, deadline=ends):
+            for raw in iter_bounded(response):
                 yield redact(raw.decode("utf-8", errors="replace"), secrets)
         except TimeoutError as exc:
             raise ProviderUnreachable(provider, "upstream deadline exceeded") from exc

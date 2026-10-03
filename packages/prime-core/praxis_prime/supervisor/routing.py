@@ -104,7 +104,7 @@ class RoutingHost:
         )
 
     def session_owner(self, session_id: str) -> tuple[str, str] | None:
-        for profile in self.supervisor.profiles():
+        for profile in self.supervisor.running():
             try:
                 result = self.supervisor.call(
                     profile,

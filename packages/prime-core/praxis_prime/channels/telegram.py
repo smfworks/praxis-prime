@@ -220,15 +220,15 @@ class PairingStore:
         rows = self.bindings()
         if not rows:
             return self.is_owner(chat_id)
+        if not profile or not requester:
+            return False
         row = self.binding_for(chat_id)
         if row is None:
             return False
-        if profile and row.get("profile") != profile:
+        if row.get("profile") != profile:
             return False
         account = str(row.get("account_id", ""))
-        if requester and account and account != requester:
-            return False
-        return True
+        return bool(account) and account == requester
 
 
 class TelegramAdapter:

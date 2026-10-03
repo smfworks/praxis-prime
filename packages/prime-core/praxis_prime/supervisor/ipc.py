@@ -8,6 +8,7 @@ before any other method; this module only moves bytes.
 from __future__ import annotations
 
 import json
+import os
 import socket
 import struct
 from collections.abc import Mapping
@@ -18,6 +19,27 @@ _HEADER = 4
 
 class IpcError(RuntimeError):
     """The peer closed or sent a frame this process will not accept."""
+
+
+def same_user(sock: socket.socket) -> bool:
+    """True when the peer's uid is this process's uid.
+
+    Linux ``SO_PEERCRED`` is checked before either end sends a credential.
+    A platform without that option keeps the socket-mode check only.
+    A failed lookup is refused.
+    """
+    peercred = getattr(socket, "SO_PEERCRED", None)
+    if peercred is None:
+        return True
+    size = struct.calcsize("3i")
+    try:
+        raw = sock.getsockopt(socket.SOL_SOCKET, peercred, size)
+    except (AttributeError, OSError):
+        return False
+    if len(raw) < size:
+        return False
+    _pid, uid, _gid = struct.unpack("3i", raw[:size])
+    return uid == os.getuid()
 
 
 def send_message(sock: socket.socket, payload: Mapping[str, object]) -> None:

@@ -15,6 +15,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -32,6 +33,7 @@ from praxis_prime.supervisor.ipc import (
     WORKER_METHODS,
     IpcError,
     recv_message,
+    same_user,
     send_message,
 )
 from praxis_prime.supervisor.redact import redact_value
@@ -94,6 +96,7 @@ class Supervisor:
     _master: bytes = b""
     _migrated: bool = False
     _sock_tag: str = ""
+    _socket_dir: Path | None = None
 
     def __post_init__(self) -> None:
         self.data_root = Path(self.data_root)
@@ -121,6 +124,8 @@ class Supervisor:
         """Listen for worker calls and watch process health."""
         with self._lock:
             self._migrated = migrate.migrate_install(self.data_root) or self._migrated
+            for name in self.profiles():
+                self._reserve_socket(name)
             if self._control is None:
                 self._control = _bind_unix(self.control_path)
                 self._control_thread = threading.Thread(
@@ -151,8 +156,14 @@ class Supervisor:
                 control.close()
             except OSError:
                 pass
-        if self.control_path.exists():
+        if self._socket_dir is not None and self.control_path.exists():
             self.control_path.unlink(missing_ok=True)
+        directory = self._socket_dir
+        if directory is not None and directory != self.runtime_dir:
+            shutil.rmtree(directory, ignore_errors=True)
+        elif directory is not None:
+            for name in self.profiles():
+                (directory / f"{self._sock_tag}-{name}.sock").unlink(missing_ok=True)
 
     def profiles(self) -> list[str]:
         return list_profiles(self.data_root)
@@ -219,6 +230,7 @@ class Supervisor:
         checked = _require_profile(profile)
         if checked not in self.profiles():
             raise WorkerUnavailable(f"no profile {checked}")
+        owner = False
         with self._lock:
             slot = self._slots.get(checked)
             now = self.clock()
@@ -226,9 +238,22 @@ class Supervisor:
                 assert slot is not None
                 slot.wanted = True
                 return slot
-            if slot is not None and slot.next_start > now:
+            if (
+                slot is not None
+                and slot.state == "starting"
+                and slot.process is not None
+                and slot.process.poll() is None
+            ):
+                pass
+            elif slot is not None and slot.state == "backoff" and slot.next_start > now:
                 raise WorkerUnavailable("worker restart is backing off")
-            return self._start_unlocked(checked)
+            else:
+                slot = self._spawn_unlocked(checked)
+                owner = True
+        assert slot is not None
+        if owner:
+            return self._wait_ready(slot)
+        return self._wait_for_peer(slot)
 
     def call(
         self,
@@ -314,8 +339,7 @@ class Supervisor:
                 self._take_events(profile, pulled)
             if slot.state == "backoff" and slot.wanted and now >= slot.next_start:
                 try:
-                    with self._lock:
-                        self._start_unlocked(profile)
+                    self.ensure(profile)
                 except WorkerUnavailable:
                     if slot.state != "backoff":
                         self._note_failure(profile)
@@ -343,9 +367,14 @@ class Supervisor:
             return self._approval_profile.get(approval_id, "")
 
     def note_approval(self, profile: str, approval_id: str) -> None:
-        if approval_id:
-            with self._lock:
-                self._approval_profile[approval_id] = profile
+        """Remember which profile created an approval. A later profile cannot replace it."""
+        if not approval_id:
+            return
+        checked = profile_id(profile)
+        if checked is None:
+            return
+        with self._lock:
+            self._approval_profile.setdefault(approval_id, checked)
 
     def account_allowed(self, profile: str, account_id: str) -> bool:
         """True when ``account_id`` may still act on ``profile``."""
@@ -368,6 +397,7 @@ class Supervisor:
         env = {key: value for key, value in self.env.items() if key not in _DROPPED_ENV}
         env["PRAXIS_PRIME_WORKER_PROFILE"] = profile
         env["PRAXIS_PRIME_WORKER_DATA"] = str(self.data_root)
+        env["PRAXIS_PRIME_SUPERVISOR_PID"] = str(os.getpid())
         env.pop("PRAXIS_PRIME_WORKER_MASTER", None)
         return env
 
@@ -377,9 +407,13 @@ class Supervisor:
             values.extend(slot.credential for slot in self._slots.values())
         return values
 
-    def _start_unlocked(self, profile: str) -> WorkerSlot:
-        generation = credentials.generation_for(self.generation_path, profile)
-        token = credentials.derive(self._master, profile, generation)
+    def _spawn_unlocked(self, profile: str) -> WorkerSlot:
+        """Start the process. The caller holds ``_lock`` and waits outside it."""
+        try:
+            generation = credentials.generation_for(self.generation_path, profile)
+            token = credentials.derive(self._master, profile, generation)
+        except credentials.CredentialError as exc:
+            raise WorkerUnavailable("worker generations file is corrupt") from exc
         slot = self._slots.get(profile)
         if slot is None:
             slot = WorkerSlot(
@@ -398,7 +432,7 @@ class Supervisor:
             slot.socket_path.unlink(missing_ok=True)
         log_path = self.state_dir / f"worker-{profile}.log"
         slot.log_path = log_path
-        handle = log_path.open("ab")
+        handle = _open_log(log_path)
         try:
             proc = subprocess.Popen(
                 self._argv(profile, generation),
@@ -415,9 +449,14 @@ class Supervisor:
         proc.stdin.close()
         slot.process = proc
         slot.state = "starting"
+        return slot
+
+    def _wait_ready(self, slot: WorkerSlot) -> WorkerSlot:
+        proc = slot.process
+        profile = slot.profile
         deadline = time.monotonic() + self.start_timeout
         while time.monotonic() < deadline:
-            if proc.poll() is not None:
+            if proc is None or proc.poll() is not None:
                 self._note_failure(profile)
                 raise WorkerUnavailable(f"worker {profile} exited during start")
             try:
@@ -425,20 +464,36 @@ class Supervisor:
             except (IpcError, OSError):
                 time.sleep(0.05)
                 continue
-            slot.state = "running"
-            slot.failures = 0
-            slot.next_start = 0
-            return slot
+            with self._lock:
+                if slot.process is proc:
+                    slot.state = "running"
+                    slot.failures = 0
+                    slot.next_start = 0
+                    return slot
+            if _alive(slot):
+                return slot
+            raise WorkerUnavailable(f"worker {profile} exited during start")
         self._note_failure(profile)
         raise WorkerUnavailable(f"worker {profile} did not become ready")
+
+    def _wait_for_peer(self, slot: WorkerSlot) -> WorkerSlot:
+        """Another caller is already starting this profile."""
+        deadline = time.monotonic() + self.start_timeout
+        while time.monotonic() < deadline:
+            if _alive(slot):
+                return slot
+            if slot.state == "backoff":
+                raise WorkerUnavailable("worker restart is backing off")
+            time.sleep(0.05)
+        raise WorkerUnavailable(f"worker {slot.profile} did not become ready")
 
     def _note_failure(self, profile: str) -> None:
         with self._lock:
             slot = self._slots.get(profile)
-            if slot is None:
+            if slot is None or slot.process is None:
                 return
             proc = slot.process
-            if proc is not None and proc.poll() is None:
+            if proc.poll() is None:
                 proc.kill()
             slot.process = None
             slot.failures += 1
@@ -499,6 +554,8 @@ class Supervisor:
         sock.settimeout(timeout)
         try:
             sock.connect(str(slot.socket_path))
+            if not same_user(sock):
+                raise IpcError("peer uid rejected")
             send_message(
                 sock,
                 {
@@ -554,15 +611,30 @@ class Supervisor:
     def _serve_control(self, conn: socket.socket) -> None:
         conn.settimeout(5)
         profile = ""
+        generation = 0
+        token = ""
         try:
+            if not same_user(conn):
+                return
             first = recv_message(conn)
             profile = self._authenticate_worker(first)
             if not profile:
                 send_message(conn, {"id": first.get("id", ""), "ok": False, "error": "rejected"})
                 return
+            try:
+                generation = int(first.get("generation", 0))
+            except (TypeError, ValueError):
+                generation = 0
+            token = str(first.get("token", ""))
             send_message(conn, {"id": first.get("id", ""), "ok": True, "result": {}})
             while not self._stop.is_set():
                 message = recv_message(conn)
+                if not self._credential_current(profile, generation, token):
+                    send_message(
+                        conn,
+                        {"id": message.get("id", ""), "ok": False, "error": "rejected"},
+                    )
+                    continue
                 method = str(message.get("method", ""))
                 if method not in WORKER_METHODS:
                     send_message(
@@ -592,13 +664,30 @@ class Supervisor:
         except (TypeError, ValueError):
             return ""
         token = str(message.get("token", ""))
-        current = credentials.generation_for(self.generation_path, profile)
+        try:
+            current = credentials.generation_for(self.generation_path, profile)
+        except credentials.CredentialError:
+            return ""
         if generation != current or profile_id(profile) is None:
             return ""
-        expected = credentials.derive(self._master, profile, current)
+        try:
+            expected = credentials.derive(self._master, profile, current)
+        except credentials.CredentialError:
+            return ""
         if not credentials.credential_matches(token, expected):
             return ""
         return profile
+
+    def _credential_current(self, profile: str, generation: int, token: str) -> bool:
+        """True when this connection's credential still matches the current generation."""
+        try:
+            current = credentials.generation_for(self.generation_path, profile)
+            expected = credentials.derive(self._master, profile, current)
+        except credentials.CredentialError:
+            return False
+        if generation != current:
+            return False
+        return credentials.credential_matches(token, expected)
 
     def _worker_request(
         self,
@@ -629,11 +718,36 @@ class Supervisor:
                 pass
         return {"accepted": True}
 
+    def _reserve_socket(self, name: str) -> None:
+        """Create the profile socket path before a worker binds it.
+
+        The name exists, mode 0600, inside a 0700 directory, so another uid
+        cannot pre-bind it. The worker unlinks and binds when it starts.
+        """
+        path = self._socket_file(name)
+        if path.exists():
+            try:
+                os.chmod(path, 0o600)
+            except OSError:
+                pass
+            return
+        held = _bind_unix(path)
+        held.close()
+
+    def _socket_directory(self) -> Path:
+        if self._socket_dir is not None:
+            return self._socket_dir
+        sample = self.runtime_dir / f"{self._sock_tag}-supervisor.sock"
+        if len(os.fsencode(sample)) <= 100:
+            self._socket_dir = self.runtime_dir
+            return self.runtime_dir
+        directory = Path(tempfile.mkdtemp(prefix="praxis-prime-socks-"))
+        os.chmod(directory, 0o700)
+        self._socket_dir = directory
+        return directory
+
     def _socket_file(self, name: str) -> Path:
-        candidate = self.runtime_dir / f"{name}.sock"
-        if len(os.fsencode(candidate)) <= 100:
-            return candidate
-        return Path(f"/tmp/pp-{self._sock_tag}-{name}.sock")
+        return self._socket_directory() / f"{self._sock_tag}-{name}.sock"
 
 
 def _require_profile(profile: str) -> str:
@@ -658,16 +772,27 @@ def _as_dict(value: object) -> dict[str, object]:
     return {}
 
 
+def _open_log(path: Path):
+    """Append to a worker log. The file is mode 0600."""
+    fd = os.open(path, os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
+    try:
+        os.chmod(path, 0o600)
+        return os.fdopen(fd, "ab")
+    except Exception:
+        os.close(fd)
+        raise
+
+
 def _bind_unix(path: Path) -> socket.socket:
     if path.exists():
         path.unlink()
     path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        os.chmod(path.parent, 0o700)
-    except OSError:
-        pass
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    sock.bind(str(path))
+    try:
+        sock.bind(str(path))
+    except OSError:
+        sock.close()
+        raise
     os.chmod(path, 0o600)
     sock.listen(16)
     sock.settimeout(0.5)

@@ -15,6 +15,10 @@ from pathlib import Path
 _VERSION = 1
 
 
+class MigrationError(RuntimeError):
+    """The M1c marker is present but cannot be trusted."""
+
+
 def marker_path(data_root: Path) -> Path:
     return Path(data_root) / "supervisor" / "m1c.json"
 
@@ -38,10 +42,23 @@ def _already(path: Path) -> bool:
     if not path.is_file():
         return False
     try:
-        loaded = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, UnicodeError):
-        return False
-    return isinstance(loaded, dict) and loaded.get("version") == _VERSION
+        raw = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise MigrationError("m1c marker cannot be read") from exc
+    if not raw.strip():
+        raise MigrationError("m1c marker is empty")
+    try:
+        loaded = json.loads(raw)
+    except (json.JSONDecodeError, UnicodeError) as exc:
+        raise MigrationError("m1c marker is corrupt") from exc
+    if not isinstance(loaded, dict) or "version" not in loaded:
+        raise MigrationError("m1c marker is corrupt")
+    version = loaded.get("version")
+    if version == _VERSION:
+        return True
+    if isinstance(version, int) and not isinstance(version, bool) and version > _VERSION:
+        raise MigrationError(f"m1c marker version {version} is not supported")
+    raise MigrationError("m1c marker is corrupt")
 
 
 def _write(path: Path, text: str) -> None:

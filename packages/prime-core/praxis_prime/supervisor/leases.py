@@ -41,8 +41,8 @@ class LeaseStore:
     def acquire(self, routine_id: str, owner: str) -> str:
         """Return ``run``, ``retry``, or ``skip``.
 
-        ``skip`` means another runner holds the lease, or the one allowed
-        retry already happened.
+        ``skip`` means the lease is still live, including for this owner,
+        or the one allowed retry already happened.
         """
         now = self.clock()
         row = self.db.conn.execute(
@@ -52,13 +52,14 @@ class LeaseStore:
         if row is None:
             self._write(routine_id, owner, now + self.ttl, 0)
             return "run"
-        held_by = str(row[0])
         until = float(row[1])
         attempts = int(row[2])
-        if until > now and held_by != owner:
+        # A lease that ends further ahead than a fresh one is a clock that
+        # moved backwards (a monotonic value stored across a reboot). Treat
+        # it as expired so the one retry still happens.
+        expired = until <= now or until > now + self.ttl
+        if not expired:
             return "skip"
-        if until > now and held_by == owner:
-            return "run"
         if attempts >= 1:
             return "skip"
         self._write(routine_id, owner, now + self.ttl, 1)

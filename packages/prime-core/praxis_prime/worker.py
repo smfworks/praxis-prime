@@ -11,8 +11,10 @@ and answers the supervisor on a Unix socket.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import os
 import resource
+import signal
 import socket
 import sys
 import threading
@@ -31,7 +33,7 @@ from praxis_prime.policy.boundary import bind_data_root
 from praxis_prime.sandbox.bwrap import bind_profile
 from praxis_prime.scheduler.service import scheduler_for
 from praxis_prime.scheduler.store import RoutineRun
-from praxis_prime.supervisor.confine import ProfileBoundary, assert_profile_file
+from praxis_prime.supervisor.confine import ProfileBoundary, assert_profile_file, freeze_worker_env
 from praxis_prime.supervisor.credentials import credential_matches
 from praxis_prime.supervisor.grants import (
     is_revoked,
@@ -44,6 +46,7 @@ from praxis_prime.supervisor.ipc import (
     SUPERVISOR_METHODS,
     IpcError,
     recv_message,
+    same_user,
     send_message,
 )
 from praxis_prime.supervisor.leases import LeaseStore
@@ -53,6 +56,7 @@ _NOFILE = 256
 
 
 def main(argv: list[str] | None = None) -> int:
+    _arm_parent_death()
     parser = argparse.ArgumentParser(prog="praxis-prime-worker")
     parser.add_argument("--profile", required=True)
     parser.add_argument("--socket", required=True)
@@ -68,6 +72,7 @@ def main(argv: list[str] | None = None) -> int:
     os.environ.pop("PRAXIS_PRIME_WORKER_MASTER", None)
     os.environ["PRAXIS_PRIME_WORKER_PROFILE"] = args.profile
     os.environ["PRAXIS_PRIME_WORKER_DATA"] = args.data_dir
+    freeze_worker_env()
     apply_limits()
     try:
         app = WorkerApp(
@@ -147,7 +152,7 @@ class WorkerApp:
         self.queue.on_resolved = self._queue_event
         self.host = Host(self.runtime, self.queue)
         self._install_grants()
-        self.leases = LeaseStore(self.runtime.db, clock=time.monotonic)
+        self.leases = LeaseStore(self.runtime.db, clock=time.time)
         self._profile_mtime = _mtime(self.runtime_home() / "profile.toml")
         self.scheduler = scheduler_for(
             self.runtime,
@@ -215,6 +220,8 @@ class WorkerApp:
 
     def _client(self, conn: socket.socket) -> None:
         try:
+            if not same_user(conn):
+                return
             first = recv_message(conn)
             if not self._auth(first):
                 send_message(conn, {"id": first.get("id", ""), "ok": False, "error": "rejected"})
@@ -406,10 +413,11 @@ class WorkerApp:
         )
 
     def _supervisor_allows(self, account: str) -> bool:
-        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        sock.settimeout(2)
         try:
-            sock.connect(str(self.supervisor_socket))
+            sock = _connect_supervisor(self.supervisor_socket, 2)
+        except (IpcError, OSError):
+            return False
+        try:
             send_message(
                 sock,
                 {
@@ -458,6 +466,9 @@ class WorkerApp:
 
     def _watch_loop(self) -> None:
         while not self._stop.wait(0.2):
+            if _supervisor_gone():
+                os.kill(os.getpid(), signal.SIGTERM)
+                return
             account = self.host.active_account()
             if account and not self._supervisor_allows(account):
                 if self.host.cancel_turn(actor="revoked"):
@@ -477,10 +488,11 @@ class WorkerApp:
         self._emit("routine", {"text": text})
 
     def _emit(self, kind: str, body: dict[str, object]) -> None:
-        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        sock.settimeout(2)
         try:
-            sock.connect(str(self.supervisor_socket))
+            sock = _connect_supervisor(self.supervisor_socket, 2)
+        except (IpcError, OSError):
+            return
+        try:
             send_message(
                 sock,
                 {
@@ -518,7 +530,8 @@ class WorkerApp:
                 payload={"profile": self.profile},
             )
         except Exception:
-            return
+            pass
+        self._emit("audit", {"kind": kind, "summary": summary})
 
 
 class WorkerStop(Exception):
@@ -528,15 +541,56 @@ class WorkerStop(Exception):
 def _lock_profile(home: Path) -> int:
     home.mkdir(parents=True, exist_ok=True)
     path = home / "worker.lock"
-    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
-    import fcntl
+    fd = _lock_once(path)
+    if fd < 0 and _reap_stale_holder(path):
+        fd = _lock_once(path)
+    if fd < 0:
+        raise ProfileBoundary("this profile already has a worker")
+    _stamp_lock(fd)
+    return fd
 
+
+def _lock_once(path: Path) -> int:
+    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError as exc:
+    except BlockingIOError:
         os.close(fd)
-        raise ProfileBoundary("this profile already has a worker") from exc
+        return -1
     return fd
+
+
+def _stamp_lock(fd: int) -> None:
+    supervisor = os.environ.get("PRAXIS_PRIME_SUPERVISOR_PID", "0").strip() or "0"
+    os.ftruncate(fd, 0)
+    os.lseek(fd, 0, os.SEEK_SET)
+    os.write(fd, f"{os.getpid()} {supervisor}\n".encode())
+
+
+def _reap_stale_holder(path: Path) -> bool:
+    """Stop a worker whose supervisor is already gone, then let the caller retry."""
+    try:
+        text = path.read_text(encoding="utf-8").split()
+    except OSError:
+        return False
+    if len(text) < 2:
+        return False
+    try:
+        worker_pid = int(text[0])
+        supervisor_pid = int(text[1])
+    except ValueError:
+        return False
+    if supervisor_pid <= 0 or _pid_alive(supervisor_pid) or worker_pid <= 0:
+        return False
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.kill(worker_pid, sig)
+        except ProcessLookupError:
+            return True
+        except PermissionError:
+            return False
+        time.sleep(0.05)
+    return not _pid_alive(worker_pid)
 
 
 def _bind(path: Path) -> socket.socket:
@@ -549,6 +603,69 @@ def _bind(path: Path) -> socket.socket:
     sock.listen(16)
     sock.settimeout(0.5)
     return sock
+
+
+def _connect_supervisor(path: Path, timeout: float) -> socket.socket:
+    """Connect and refuse another uid before any credential is written."""
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.settimeout(timeout)
+    try:
+        sock.connect(str(path))
+        if not same_user(sock):
+            raise IpcError("peer uid rejected")
+    except Exception:
+        sock.close()
+        raise
+    return sock
+
+
+def _arm_parent_death() -> None:
+    """Ask Linux to SIGTERM this process when its parent exits.
+
+    ``preexec_fn`` is not used: the supervisor is multithreaded. The worker
+    also watches ``PRAXIS_PRIME_SUPERVISOR_PID``, which covers a worker whose
+    parent is ``systemd-run`` rather than the supervisor.
+    """
+    if sys.platform != "linux":
+        return
+    try:
+        import ctypes
+
+        libc = ctypes.CDLL(None, use_errno=True)
+        if libc.prctl(1, signal.SIGTERM, 0, 0, 0) != 0:
+            return
+    except (AttributeError, OSError):
+        return
+    if os.getppid() == 1:
+        os.kill(os.getpid(), signal.SIGTERM)
+
+
+def _supervisor_gone() -> bool:
+    raw = os.environ.get("PRAXIS_PRIME_SUPERVISOR_PID", "").strip()
+    if not raw:
+        return False
+    try:
+        pid = int(raw)
+    except ValueError:
+        return False
+    return pid > 0 and not _pid_alive(pid)
+
+
+def _pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+        state = stat.rsplit(")", 1)[1].split()[0]
+    except (IndexError, OSError):
+        return True
+    return state != "Z"
 
 
 def _mtime(path: Path) -> int:
