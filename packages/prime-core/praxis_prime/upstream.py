@@ -60,7 +60,7 @@ def read_bounded(
 def iter_bounded(
     response: object,
     *,
-    limit: int = MAX_UPSTREAM_BYTES,
+    limit: int | None = None,
     deadline: float,
 ) -> Iterator[bytes]:
     """Yield lines from ``response``. Stop on the cap or the deadline.
@@ -70,6 +70,8 @@ def iter_bounded(
     ``readline``. Python 3.13 raises ``ConnectionResetError`` from that read
     when the peer closes a response this large.
     """
+    if limit is None:
+        limit = MAX_UPSTREAM_BYTES
     reader = getattr(response, "read", None)
     if not callable(reader):
         yield read_bounded(response, limit=limit, deadline=deadline)

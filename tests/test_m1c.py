@@ -54,7 +54,7 @@ from praxis_prime.supervisor.redact import redact
 from praxis_prime.supervisor.routing import RoutingHost, RoutingQueue
 from praxis_prime.supervisor.supervisor import Supervisor, WorkerUnavailable
 from praxis_prime.tools.registry import Risk
-from praxis_prime.upstream import MAX_UPSTREAM_BYTES, build_opener
+from praxis_prime.upstream import MAX_UPSTREAM_BYTES, build_opener, iter_bounded
 from praxis_prime.worker import WorkerApp
 
 _STUB = Path(__file__).resolve().parent / "support" / "ipc_worker.py"
@@ -656,7 +656,24 @@ def test_daemon_with_profiles_stays_on_loopback(tmp_path: Path, monkeypatch):
     assert code.get("n") == 0
 
 
-def test_upstream_refuses_redirects_oversized_bodies_and_deadlines():
+def test_upstream_cap_counts_a_body_with_no_newlines():
+    class Reader:
+        def __init__(self) -> None:
+            self.left = MAX_UPSTREAM_BYTES + 8
+
+        def read(self, n: int) -> bytes:
+            if self.left <= 0:
+                return b""
+            take = min(n, self.left)
+            self.left -= take
+            return b"a" * take
+
+    with pytest.raises(ValueError, match="4MB"):
+        list(iter_bounded(Reader(), deadline=time.monotonic() + 30))
+
+
+def test_upstream_refuses_redirects_oversized_bodies_and_deadlines(monkeypatch):
+    monkeypatch.setattr("praxis_prime.upstream.MAX_UPSTREAM_BYTES", 32)
     redirect = _serve(_Redirect)
     huge = _serve(_Huge)
     slow = _serve(_Slow)
@@ -837,19 +854,15 @@ class _Redirect(BaseHTTPRequestHandler):
 
 
 class _Huge(BaseHTTPRequestHandler):
+    """A short body. The cap test lowers the limit so this stays off the wire's 4 MiB path."""
+
     def do_POST(self) -> None:
-        chunk = b"a" * 1023 + b"\n"
-        count = (MAX_UPSTREAM_BYTES // len(chunk)) + 2
-        total = count * len(chunk)
+        body = b"a\n" * 40
         self.send_response(200)
         self.send_header("Content-Type", "text/plain")
-        self.send_header("Content-Length", str(total))
+        self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        try:
-            for _ in range(count):
-                self.wfile.write(chunk)
-        except (BrokenPipeError, ConnectionResetError):
-            return
+        self.wfile.write(body)
 
     def log_message(self, fmt: str, *args: object) -> None:
         del fmt, args
