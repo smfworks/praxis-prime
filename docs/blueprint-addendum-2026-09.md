@@ -1,7 +1,7 @@
 # Praxis Prime — Blueprint Addendum A (2026-09-30)
 
-> **Status:** owner-approved design, landed as this file on 2026-09-30. Decision C was revised on 2026-10-03: isolation is Praxis Prime's own local sandbox (§3). It stays one document (themes, onboarding, the local sandbox, remote access, Windows, and profiles together). [`ARCHITECTURE.md`](ARCHITECTURE.md) §29 follows the M0–M8 order in §8. The other stance changes in the table below stay in this addendum until those sections are revised.
-> **Requested by:** Michael (SMF Works), 2026-09-30. The sandbox revision was requested by Michael on 2026-10-03.
+> **Status:** owner-approved design, landed as this file on 2026-09-30. Decision C was revised on 2026-10-02: isolation is Praxis Prime's own local sandbox (§3). It stays one document (themes, onboarding, the local sandbox, remote access, Windows, and profiles together). [`ARCHITECTURE.md`](ARCHITECTURE.md) §29 follows the M0–M8 order in §8. The other stance changes in the table below stay in this addendum until those sections are revised.
+> **Requested by:** Michael (SMF Works), 2026-09-30. The sandbox revision was requested by Michael on 2026-10-02.
 > **Scope:** five additions (themes, no default LLM, the local sandbox, any-device + Windows, multi-user/multi-profile) and a re-ordered roadmap.
 > **Baseline:** `smfworks/praxis-prime` main @ `029b5ccc` (2026-09-30 07:44 ET). Reference clones, all read-only: NousResearch/hermes-agent @ `f42f579c`, openclaw/openclaw @ `1de9a42f`, and the six `smfworks/smf-praxis-*` pack repos (HEADs as of 2026-09-30 08:29 ET). Sandbox behavior cited in §3 was read on main after that baseline.
 
@@ -20,7 +20,7 @@
 |---|---|---|
 | A | Themes | Declarative **theme packages** (`theme.toml` tokens + local assets + optional *restricted* `theme.css` + `THEME.md`). **No JavaScript, no remote resources, no raw CSS injection.** Validated on install: schema, size caps, WCAG 2.2 AA contrast, font licence allowlist. Seven built-in themes. Per-profile selection; an admin can lock it. Omarchy `colors.toml` stays as a live "system" theme. |
 | B | No default LLM | Delete the hard-coded `ollama:qwen3:32b` defaults. On first run, chat is blocked until the user **explicitly picks** a provider in one of three lanes (this machine / my network / cloud) and it passes a **real completion test**. Nothing ever silently falls back to another provider. The web wizard and the `praxis-prime setup` CLI share one backend. |
-| C | Local sandbox | **NVIDIA OpenShell and other NVIDIA security containers are not used; isolation is Praxis Prime's own local sandbox.** Owner decision, 2026-10-03. The 2026-09-30 proposal to adopt a vendor sandbox as the regulated default is withdrawn. Tiers stay [ARCHITECTURE §13.1](ARCHITECTURE.md#131-sandbox-tiers): T1 bubblewrap (running, with the data-root mask and the shell denylist), T2 rootless Podman, T3 microVM (Firecracker or Cloud Hypervisor, optional), T4 remote. No new runtime is added. The approval spine still gates SEND/SPEND. See §3. |
+| C | Local sandbox | **NVIDIA OpenShell and other NVIDIA security containers are not used; isolation is Praxis Prime's own local sandbox.** Owner decision, 2026-10-02. The 2026-09-30 proposal to adopt a vendor sandbox as the regulated default is withdrawn. Tiers stay [ARCHITECTURE §13.1](ARCHITECTURE.md#131-sandbox-tiers): T1 bubblewrap (running, with the data-root mask and the shell denylist), T2 rootless Podman, T3 microVM (Firecracker or Cloud Hypervisor, optional), T4 remote. No new runtime is added. The approval spine still gates SEND/SPEND. See §3. |
 | D | Any device / Windows | Keep **loopback as the default**. Add opt-in `gateway.bind = tailnet | lan | proxy` modes that fail closed without account auth and TLS. Add an installable PWA. Windows = **WSL2-only** "supported beta" via a PowerShell/winget bootstrap. Difficulty: medium **[E]**. M365 (Entra OIDC, Teams connector, Intune/winget) is a separate, later milestone. |
 | E | Multi-user / profiles | Real **accounts** (local passwords + passkeys, or OIDC) with roles `owner/admin`, `operator`, `viewer`, `auditor`. **Profiles** are separate homes: memory, skills, routines, dials, theme, provider allowlist. One worker process per active profile. Hash-chained audit records `actor=user, profile=…`. There is a profile picker. We say plainly where the isolation boundary is. |
 | F | Packs | M0: ship `packs/compliance` inside the wheel, and write a **loader/port for the legacy `pack.json` + `knowledge.md` format** used by the six public MIT packs. It must ignore their `ollama-cloud/*` model pins and must not serve their dashboard JS. |
@@ -288,7 +288,7 @@ If nothing is found, show one-click-copy install instructions per distro (Ubuntu
 ---
 ## 3. Local sandbox
 
-### 3.1 Decision (2026-10-03)
+### 3.1 Decision (2026-10-02)
 
 **NVIDIA OpenShell and other NVIDIA security containers are not used; isolation is Praxis Prime's own local sandbox.**
 
@@ -633,7 +633,7 @@ The security lessons in that note are explicit requirements: a SECURITY.md respo
 | Multi-user raises the security bar | Accounts + remote exposure make Praxis an internet-facing app if misconfigured. Fail-closed defaults, a doctor red flag, and an external review before marketing M6. |
 | Teams requires a public endpoint | Conflicts with local-first. Keep it optional and clearly labelled. |
 | Legacy pack semantics | Old `enforced` vs new `enforce`, and tool names differ. The mapping report must list every gap; no silent drops. |
-| Owner decisions needed | (1) **Decided 2026-10-03** (decision C): NVIDIA OpenShell and other NVIDIA security containers are not used; isolation is Praxis Prime's own local sandbox. (2) Choose default exposure recommendation (tailnet vs proxy) for office installs. (3) Priority order for porting legacy pack modules. (4) Whether to add the 8th "High Contrast" theme. (5) Code-signing certificate for Windows. (6) Context-length floor (32K proposed vs Hermes 64K). |
+| Owner decisions needed | (1) **Decided 2026-10-02** (decision C): NVIDIA OpenShell and other NVIDIA security containers are not used; isolation is Praxis Prime's own local sandbox. (2) Choose default exposure recommendation (tailnet vs proxy) for office installs. (3) Priority order for porting legacy pack modules. (4) Whether to add the 8th "High Contrast" theme. (5) Code-signing certificate for Windows. (6) Context-length floor (32K proposed vs Hermes 64K). |
 
 ---
 

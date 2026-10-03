@@ -215,7 +215,7 @@ praxis-prime doctor
 | Document | What it is |
 |---|---|
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Source of truth for layout, names, and stack. §29 follows milestones M0–M8 |
-| [docs/blueprint-addendum-2026-09.md](docs/blueprint-addendum-2026-09.md) | Addendum A (2026-09-30; sandbox decision revised 2026-10-03): themes, no default LLM, the local sandbox, any-device access, profiles, and the M0–M8 build order |
+| [docs/blueprint-addendum-2026-09.md](docs/blueprint-addendum-2026-09.md) | Addendum A (2026-09-30; sandbox decision revised 2026-10-02): themes, no default LLM, the local sandbox, any-device access, profiles, and the M0–M8 build order |
 | [docs/CAPABILITY-MATRIX.md](docs/CAPABILITY-MATRIX.md) | Feature-by-feature plan against the source systems |
 | [docs/SOURCE-NOTES.md](docs/SOURCE-NOTES.md) | Licenses, file paths, reuse plan, unverified items |
 | [docs/architecture.html](docs/architecture.html) | Rendered blueprint (architecture, matrix, and notes) |

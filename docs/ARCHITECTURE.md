@@ -6,7 +6,7 @@
 >
 > **Status:** design blueprint only (v0.2, 2026-09-29 ET; revised with Michael's decisions on name, Decision Engine, dials and packs). No code, repos or packages exist yet.
 > **Author:** prepared for Michael / SMF Works.
-> **Companion files:** [`blueprint-addendum-2026-09.md`](blueprint-addendum-2026-09.md) (Addendum A, 2026-09-30, sandbox decision revised 2026-10-03: themes, no default LLM, the local sandbox, any-device access, profiles, and milestones M0–M8; §29 follows it), `CAPABILITY-MATRIX.md` (feature-by-feature comparison and reuse plan), `SOURCE-NOTES.md` (per-repo findings, licenses, file paths, unverified items), `ARCHITECTURE.html` (rendered version of this file).
+> **Companion files:** [`blueprint-addendum-2026-09.md`](blueprint-addendum-2026-09.md) (Addendum A, 2026-09-30, sandbox decision revised 2026-10-02: themes, no default LLM, the local sandbox, any-device access, profiles, and milestones M0–M8; §29 follows it), `CAPABILITY-MATRIX.md` (feature-by-feature comparison and reuse plan), `SOURCE-NOTES.md` (per-repo findings, licenses, file paths, unverified items), `ARCHITECTURE.html` (rendered version of this file).
 >
 > **Attribution:** Hermes Agent is by **Nous Research**. OpenClaw is by **Peter Steinberger, the OpenClaw Foundation and contributors**. Omarchy is by **David Heinemeier Hansson / Basecamp**. Jev / System One is by **TypeSafe AI** (used here only as a reference design; Praxis Prime does not use their service). SMF Works authored SMF Praxis and SMF Swarm 2.0 and does not own any of the others. Reusing their code is allowed under their licenses (§32). Nothing here implies endorsement by those authors.
 
@@ -1235,7 +1235,7 @@ praxis-prime omarchy install       # installs bar plugin, theme template, keybin
 ---
 ## 29. Roadmap
 
-The phase table below is still the long-horizon scope. The next build order inside those phases is milestones **M0–M8** from [Blueprint Addendum A (2026-09-30)](blueprint-addendum-2026-09.md). That addendum is the owner-approved design for themes, a first-run provider choice with no default LLM, Praxis Prime's own local sandbox (decision C, revised 2026-10-03), any-device access (a central server, WSL2, and Microsoft 365), and multi-user profiles. Markers in the addendum stay as written: **[V]** verified against a cited source, **[U]** unverified, **[E]** an estimate. Week-scale estimates live only in the addendum §8 and are **[E]**.
+The phase table below is still the long-horizon scope. The next build order inside those phases is milestones **M0–M8** from [Blueprint Addendum A (2026-09-30)](blueprint-addendum-2026-09.md). That addendum is the owner-approved design for themes, a first-run provider choice with no default LLM, Praxis Prime's own local sandbox (decision C, revised 2026-10-02), any-device access (a central server, WSL2, and Microsoft 365), and multi-user profiles. Markers in the addendum stay as written: **[V]** verified against a cited source, **[U]** unverified, **[E]** an estimate. Week-scale estimates live only in the addendum §8 and are **[E]**.
 
 ```
 M0 packs/packaging ─┐
