@@ -6,7 +6,7 @@ Tool results, resource bodies, and prompt text are untrusted data. The agent loo
 
 ## Configure a server
 
-User servers live in `config.toml` under `[mcp.servers.<name>]`. A project file `.prime/mcp.json` uses the same `mcpServers` object shape as Claude Code and Cursor. When both define the same name, the project file wins.
+User servers live in `config.toml` under `[mcp.servers.<name>]`. A project file `.prime/mcp.json` uses the same `mcpServers` object shape as Claude Code and Cursor. When both define the same name, the project file wins. A project file cannot set `trust` to `trusted` or `sandbox` to `off`. Those fields are ignored and the server stays `untrusted` with `sandbox = "bwrap"`. Only the user config can grant either.
 
 ```toml
 [mcp]
@@ -42,8 +42,8 @@ Server names are letters, digits, `_`, and `-`, at most 41 characters, and must 
 | `command`, `args` | Stdio executable and arguments |
 | `url` | Streamable HTTP endpoint. `transport` `sse` forces the legacy GET stream |
 | `transport` or `type` | `stdio`, `http`, `sse`, or `auto` (HTTP, then SSE if the POST is rejected) |
-| `trust` | `untrusted` (default) or `trusted` |
-| `sandbox` | `bwrap` (default) or `off` |
+| `trust` | `untrusted` (default) or `trusted`. A project `.prime/mcp.json` cannot set `trusted` |
+| `sandbox` | `bwrap` (default) or `off`. A project `.prime/mcp.json` cannot set `off` |
 | `network` | `off` (default) or `on`. `on` adds `--share-net` inside bubblewrap |
 | `write_scope` | Directory this server may write, after approval. Never `$HOME`, the main checkout, an account-data directory, or a parent of one. Empty keeps the working directory read-only |
 | `env` | Explicit `KEY=VALUE` pairs. Do not put secrets here |
@@ -52,7 +52,7 @@ Server names are letters, digits, `_`, and `-`, at most 41 characters, and must 
 | `token_env` | Variable name whose value is sent as `Authorization: Bearer`. The value is not written to config |
 | `tools` or `toolRisks` | Map of remote tool name to a risk class (`READ`, `DRAFT`, `SEND`, `DESTRUCTIVE`, `SPEND`, `SHARE`) |
 
-`praxis-prime mcp add` writes `config.toml`. `--project` writes `.prime/mcp.json` instead. It will not store an `Authorization` header. Put bearer tokens in the environment or `secrets.env` and name the variable with `--token-env`.
+`praxis-prime mcp add` writes `config.toml`. `--project` writes `.prime/mcp.json` instead, and it refuses `--trust trusted` and `--sandbox off`. It will not store an `Authorization` header. Put bearer tokens in the environment or `secrets.env` and name the variable with `--token-env`.
 
 ```bash
 praxis-prime mcp add notes --command python3 --arg .prime/notes_server.py
@@ -89,7 +89,7 @@ Write-like names match `write`, `create`, `update`, `delete`, `remove`, `edit`, 
 
 ## Stdio sandbox and environment
 
-When `bwrap` is on `PATH` and `sandbox` is `bwrap`, the child runs under bubblewrap with a cleared environment. Only the allowlist is passed: `PATH`, `LANG`, `LC_ALL`, `LC_CTYPE`, and `TERM`, plus any names in the server's `env_allow`, plus the explicit `env` map. `HOME` is not passed unless you name it. Python commands also get `PYTHONUNBUFFERED=1`. Network stays off unless `network = "on"`. The working directory is mounted read-only unless `write_scope` is approved. A read-write bind is added only for that server's `write_scope`, and only after the approval gate allows it. The scope is one directory. It is never `$HOME`, never the main checkout, and never an account-data root or a directory that contains one (`accounts.db`, `profiles/`, `backups/`, `audit.db`, `SOUL.md`), except one approved task worktree. A path argument that names account data is not mounted. Every account-data root inside a bind, including the read-only working directory, is covered with a tmpfs, and an approved worktree inside that root is bound again afterwards. A hard link to a private file is covered with `/dev/null`. The mount decision is an audit event of kind `mcp_mount`. An unapproved scope leaves the tree read-only.
+When `bwrap` is on `PATH` and `sandbox` is `bwrap`, the child runs under bubblewrap with a cleared environment. Only the allowlist is passed: `PATH`, `LANG`, `LC_ALL`, `LC_CTYPE`, and `TERM`, plus any names in the server's `env_allow`, plus the explicit `env` map. `HOME` is not passed unless you name it. Python commands also get `PYTHONUNBUFFERED=1`. Network stays off unless `network = "on"`. The working directory is mounted read-only unless `write_scope` is approved. A read-write bind is added only for that server's `write_scope`, and only after the approval gate allows it. The scope is one directory. It is never `$HOME`, never the main checkout, and never an account-data root or a directory that contains one (`accounts.db`, `profiles/`, `backups/`, `audit.db`, `SOUL.md`), except one approved task worktree. A path argument that names account data is not mounted. Every account-data root inside a bind, including the read-only working directory, is covered with a tmpfs, and an approved worktree inside that root is bound again afterwards. A hard link to a protected file is covered with `/dev/null`. The protected set is the account-data denylist: everything under `profiles/` and `backups/`, `accounts.db`, `audit.db`, the root `prime.db`, each of those databases' `-wal`, `-shm`, and `-journal` sidecars (including a live `accounts.db-wal`), `SOUL.md`, and `worker-master.key`. The mount decision is an audit event of kind `mcp_mount`. An unapproved scope leaves the tree read-only.
 
 If bubblewrap is missing, or `sandbox` is `off`, the server is not started on the host while account data exists. An untrusted server is not started on the host unless that call was approved. A trusted server with `sandbox = "off"`, including `praxis-prime mcp serve`, starts on the host when no account data exists. A missing bubblewrap is not treated as that choice. The `mcp_mount` row says `host` when the process does start on the host. A write scope is not sent to the approval gate in that case, because nothing will be mounted. `praxis-prime doctor` warns when bubblewrap is missing. A failed bubblewrap start is not retried on the host.
 

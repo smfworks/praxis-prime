@@ -818,14 +818,14 @@ def _directory_has_account_data(root: Path) -> bool:
         return False
     if kind is not StatKind.DIR:
         return True
-    for name in ("accounts.db", "profiles", "backups", "prime.db", "audit.db", "SOUL.md"):
+    for name in (*_ACCOUNT_DATABASES, "profiles", "backups", *_ACCOUNT_ROOT_FILES):
         if lstat_kind(root / name) is not StatKind.MISSING:
             return True
     try:
         children = list(root.iterdir())
     except OSError:
         return True
-    return any(child.name.startswith("accounts.db") for child in children)
+    return any(_account_database_name(child.name) for child in children)
 
 
 def _shell_tokens(command: str) -> list[str]:
@@ -1066,19 +1066,62 @@ def _extra_link(path: Path) -> bool:
     return stat.S_ISREG(st.st_mode) and st.st_nlink > 1
 
 
+# Root files the path denylist and the hard-link inode scan share.
+# Sidecars are ``<db>-wal``, ``<db>-shm``, and ``<db>-journal``.
+_ACCOUNT_DATABASES = ("accounts.db", "audit.db", "prime.db")
+_SQLITE_SIDECARS = ("-wal", "-shm", "-journal")
+_ACCOUNT_ROOT_FILES = ("SOUL.md", "worker-master.key")
+
+
+def _account_database_name(name: str) -> bool:
+    """True for a protected database or one of its SQLite sidecars."""
+    for base in _ACCOUNT_DATABASES:
+        if name == base or name.startswith(base + "-"):
+            return True
+    return False
+
+
+def _protected_root_paths(root: Path) -> list[Path]:
+    """Files at ``root`` whose inodes the hard-link cover must know.
+
+    The names are ``_ACCOUNT_DATABASES`` and ``_ACCOUNT_ROOT_FILES``, plus
+    every SQLite sidecar. ``worker-master.key`` in the runtime directory is
+    included too, so a hard link of that key is the same inode.
+    """
+    paths: list[Path] = []
+    for name in _ACCOUNT_DATABASES:
+        paths.append(root / name)
+        for suffix in _SQLITE_SIDECARS:
+            paths.append(root / f"{name}{suffix}")
+    for name in _ACCOUNT_ROOT_FILES:
+        paths.append(root / name)
+    runtime_key = _owned_runtime_key()
+    if runtime_key is not None:
+        paths.append(runtime_key)
+    return paths
+
+
+def _owned_runtime_key() -> Path | None:
+    """``worker-master.key`` when this user owns the runtime directory."""
+    try:
+        info = os.lstat(runtime_dir())
+    except OSError:
+        return runtime_dir() / "worker-master.key"
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        return None
+    if info.st_uid != os.getuid():
+        return None
+    return runtime_dir() / "worker-master.key"
+
+
 def _private_path(resolved: Path, root: Path) -> bool:
-    if resolved == root / "accounts.db":
+    if resolved.parent == root and (
+        _account_database_name(resolved.name) or resolved.name in _ACCOUNT_ROOT_FILES
+    ):
         return True
-    if resolved.parent == root and resolved.name.startswith("accounts.db-"):
-        return True
-    if _same_regular_inode(resolved, root / "accounts.db"):
-        return True
-    if resolved == root / "audit.db":
-        return True
-    if resolved.parent == root and resolved.name.startswith("audit.db-"):
-        return True
-    if _same_regular_inode(resolved, root / "audit.db"):
-        return True
+    for base in _ACCOUNT_DATABASES:
+        if _same_regular_inode(resolved, root / base):
+            return True
     for folder in ("profiles", "backups"):
         try:
             resolved.relative_to(root / folder)
@@ -1102,6 +1145,7 @@ class _InodeSnapshot:
     root: str
     stamp: tuple[tuple[str, int, int, int], ...]
     inodes: set[tuple[int, int]]
+    linked: dict[tuple[int, int], int]
     problem: str
 
 
@@ -1147,13 +1191,30 @@ _FRESH_DIR_NS = 2_000_000_000
 
 
 def _cached_private_inodes(root: Path) -> tuple[set[tuple[int, int]], str]:
-    """Inodes under profiles and backups, one slot per account-data root.
+    """Inodes the denylist treats as account data, one slot per data root.
 
-    The cache key is each directory's inode, ctime, and mtime, so restoring
-    the mtime with ``os.utime`` still misses. A directory whose mtime is
-    within two seconds of the scan is not cached. Checking the override and
-    the default XDG directory does not throw the other scan away.
+    The set is ``profiles/``, ``backups/``, and ``_protected_root_paths``.
+    The cache key is each recorded path's inode, ctime, and mtime, so a
+    hard link (which changes ctime) misses. A path touched within two
+    seconds of the scan is not cached.
     """
+    inodes, _linked, problem = _load_private_snapshot(root)
+    return inodes, problem
+
+
+def _cached_linked_inodes(root: Path) -> tuple[dict[tuple[int, int], int], str]:
+    """Protected inodes whose ``nlink`` is greater than one, and any problem.
+
+    The map value is that link count. An empty map means no extra name exists,
+    so a workspace walk is not required.
+    """
+    _inodes, linked, problem = _load_private_snapshot(root)
+    return linked, problem
+
+
+def _load_private_snapshot(
+    root: Path,
+) -> tuple[set[tuple[int, int]], dict[tuple[int, int], int], str]:
     global _data_inode_scans
     key = str(root)
     with _data_inode_lock:
@@ -1161,11 +1222,13 @@ def _cached_private_inodes(root: Path) -> tuple[set[tuple[int, int]], str]:
         if cached is not None and cached.stamp and _stamp_matches(cached.stamp):
             _data_inode_snapshots.pop(key)
             _data_inode_snapshots[key] = cached
-            return cached.inodes, cached.problem
+            return cached.inodes, cached.linked, cached.problem
         _data_inode_scans += 1
-        inodes, problem, stamp, cacheable = _scan_private_inodes(root)
+        inodes, linked, problem, stamp, cacheable = _scan_private_inodes(root)
         if cacheable:
-            _data_inode_snapshots[key] = _InodeSnapshot(key, stamp, inodes, problem)
+            _data_inode_snapshots[key] = _InodeSnapshot(
+                key, stamp, inodes, linked, problem
+            )
             while len(_data_inode_snapshots) > _INODE_CACHE_MAX:
                 oldest = next(iter(_data_inode_snapshots))
                 if oldest == key:
@@ -1173,7 +1236,7 @@ def _cached_private_inodes(root: Path) -> tuple[set[tuple[int, int]], str]:
                 del _data_inode_snapshots[oldest]
         else:
             _data_inode_snapshots.pop(key, None)
-        return inodes, problem
+        return inodes, linked, problem
 
 
 def _stamp_matches(stamp: tuple[tuple[str, int, int, int], ...]) -> bool:
@@ -1182,39 +1245,51 @@ def _stamp_matches(stamp: tuple[tuple[str, int, int, int], ...]) -> bool:
             st = os.lstat(path)
         except OSError:
             return False
-        if (
-            not stat.S_ISDIR(st.st_mode)
-            or st.st_ino != inode
-            or st.st_ctime_ns != ctime
-            or st.st_mtime_ns != mtime
-        ):
+        if not stat.S_ISDIR(st.st_mode) and not stat.S_ISREG(st.st_mode):
+            return False
+        if st.st_ino != inode or st.st_ctime_ns != ctime or st.st_mtime_ns != mtime:
             return False
     return True
 
 
 def _scan_private_inodes(
     root: Path,
-) -> tuple[set[tuple[int, int]], str, tuple[tuple[str, int, int, int], ...], bool]:
+) -> tuple[
+    set[tuple[int, int]],
+    dict[tuple[int, int], int],
+    str,
+    tuple[tuple[str, int, int, int], ...],
+    bool,
+]:
     found: set[tuple[int, int]] = set()
+    linked: dict[tuple[int, int], int] = {}
     dirs: list[tuple[str, int, int, int]] = []
+    files: list[tuple[str, int, int, int]] = []
+    watched: list[tuple[str, int, int, int]] = []
     root_stamp = _dir_stamp(root)
     if root_stamp is not None:
         dirs.append(root_stamp)
+    if _owned_runtime_key() is not None:
+        runtime_stamp = _dir_stamp(runtime_dir())
+        if runtime_stamp is not None:
+            watched.append(runtime_stamp)
     problem = ""
     for folder in (root / "profiles", root / "backups"):
-        reason = _collect_tree_inodes(folder, found, dirs)
+        reason = _collect_tree_inodes(folder, found, linked, dirs, files)
         if reason:
             problem = reason
             break
     if not problem:
-        database = root / "accounts.db"
-        kind = lstat_kind(database)
-        if kind is StatKind.UNREADABLE:
-            problem = "unreadable accounts.db"
-        elif kind is StatKind.FILE and not _add_regular_inode(database, found):
-            problem = f"more than {_PRIVATE_INODE_CAP} files under the account data directory"
-    stamp = tuple(dirs)
-    return found, problem, stamp, _stamp_is_stable(stamp, time.time_ns())
+        for path in _protected_root_paths(root):
+            reason = _record_optional_file(path, found, linked, files)
+            if reason:
+                problem = reason
+                break
+    # Directory freshness decides whether the snapshot can be reused. File
+    # ctimes stay in the stamp so a new hard link misses, without treating
+    # a just-written file as a reason to skip the cache.
+    stamp = tuple([*dirs, *watched, *files])
+    return found, linked, problem, stamp, _stamp_is_stable(tuple(dirs), time.time_ns())
 
 
 def _stamp_is_stable(stamp: tuple[tuple[str, int, int, int], ...], now: int) -> bool:
@@ -1239,14 +1314,16 @@ def _dir_stamp(path: Path) -> tuple[str, int, int, int] | None:
 def _collect_tree_inodes(
     folder: Path,
     found: set[tuple[int, int]],
+    linked: dict[tuple[int, int], int],
     dirs: list[tuple[str, int, int, int]],
+    files: list[tuple[str, int, int, int]],
 ) -> str:
     """Empty string when the walk finished. Otherwise why it stopped.
 
     Symlinks are not followed. Hard links share the inode of the original.
-    Each directory's inode, ctime, and mtime are recorded so a later check
-    can reuse ``found``. A restored mtime does not match, because ctime
-    changes. A directory modified within two seconds of the scan is not cached.
+    Each directory and file's inode, ctime, and mtime are recorded so a later
+    check can reuse ``found``. A new hard link changes ctime, so the cache
+    misses. A path modified within two seconds of the scan is not cached.
     """
     kind = lstat_kind(folder)
     if kind is StatKind.MISSING:
@@ -1254,9 +1331,7 @@ def _collect_tree_inodes(
     if kind is StatKind.UNREADABLE:
         return f"unreadable directory {folder}"
     if kind is StatKind.FILE:
-        if not _add_regular_inode(folder, found):
-            return f"more than {_PRIVATE_INODE_CAP} files under the account data directory"
-        return ""
+        return _record_optional_file(folder, found, linked, files)
     if kind is not StatKind.DIR:
         return ""
     stack = [folder]
@@ -1283,13 +1358,47 @@ def _collect_tree_inodes(
             if stat.S_ISLNK(st.st_mode):
                 continue
             if stat.S_ISREG(st.st_mode):
-                found.add((st.st_dev, st.st_ino))
+                _note_inode(st, found, linked)
+                files.append((entry.path, st.st_ino, st.st_ctime_ns, st.st_mtime_ns))
             elif stat.S_ISDIR(st.st_mode):
                 stack.append(Path(entry.path))
     return ""
 
 
-def _add_regular_inode(path: Path, found: set[tuple[int, int]]) -> bool:
+def _record_optional_file(
+    path: Path,
+    found: set[tuple[int, int]],
+    linked: dict[tuple[int, int], int],
+    files: list[tuple[str, int, int, int]],
+) -> str:
+    """Record one protected file. Missing is fine. Unreadable fails closed."""
+    kind = lstat_kind(path)
+    if kind is StatKind.MISSING or kind is not StatKind.FILE:
+        if kind is StatKind.UNREADABLE:
+            return f"unreadable {path.name}"
+        return ""
+    if not _add_regular_inode(path, found, linked, files):
+        return f"more than {_PRIVATE_INODE_CAP} files under the account data directory"
+    return ""
+
+
+def _note_inode(
+    st: os.stat_result,
+    found: set[tuple[int, int]],
+    linked: dict[tuple[int, int], int],
+) -> None:
+    key = (st.st_dev, st.st_ino)
+    found.add(key)
+    if st.st_nlink > 1:
+        linked[key] = int(st.st_nlink)
+
+
+def _add_regular_inode(
+    path: Path,
+    found: set[tuple[int, int]],
+    linked: dict[tuple[int, int], int],
+    files: list[tuple[str, int, int, int]],
+) -> bool:
     try:
         st = os.lstat(path)
     except OSError:
@@ -1298,7 +1407,8 @@ def _add_regular_inode(path: Path, found: set[tuple[int, int]]) -> bool:
         return True
     if len(found) > _PRIVATE_INODE_CAP:
         return False
-    found.add((st.st_dev, st.st_ino))
+    _note_inode(st, found, linked)
+    files.append((str(path), st.st_ino, st.st_ctime_ns, st.st_mtime_ns))
     return True
 
 

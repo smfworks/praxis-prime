@@ -1,8 +1,11 @@
 """HTTP ceremonies for passkeys and TOTP.
 
 Unauthenticated routes are login's second step and passkey sign-in.
-Enrollment requires a session (or the loopback owner bearer token) and,
-for cookie sessions, the CSRF header the rest of the gateway already checks.
+TOTP enrollment accepts a session or the loopback owner bearer token, and
+cookie sessions also send the CSRF header the rest of the gateway checks.
+Passkey registration does not accept that bearer login: the ceremony is
+bound to a session id, and a bearer token has none. A rejected Origin does
+not spend the step-up token.
 
 The bearer token and the Unix socket are not WebAuthn ceremonies. See
 docs/SECURITY.md.
@@ -16,6 +19,7 @@ import json
 
 from praxis_prime.accounts.db import AccountStore
 from praxis_prime.accounts.factors import STEP_UP_TTL_SECONDS, FactorError, Factors
+from praxis_prime.accounts.passkeys import loopback_ceremony
 from praxis_prime.audit.log import AuditLog
 from praxis_prime.gateway.authz import (
     Principal,
@@ -235,6 +239,10 @@ def _register_options(
     port: int,
 ) -> _Result:
     del audit
+    if loopback_ceremony(origin, port) is None:
+        return 400, _error("bad_request", "origin is not allowed"), []
+    if not principal.session_id:
+        return 401, _error("unauthorized", "authentication required"), []
     denied = _step_up_or_deny(store, principal, body)
     if denied is not None:
         return denied

@@ -998,9 +998,12 @@ def test_worker_spawned_from_a_short_lived_thread_stays_up(
         supervisor.close()
 
 
-def test_stale_lock_reap_checks_supervisor_start_time(tmp_path: Path):
+def test_stale_lock_reap_checks_supervisor_start_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     from praxis_prime.worker import _process_start, _reap_stale_holder
 
+    monkeypatch.setenv("PRAXIS_PRIME_SUPERVISOR_TOKEN", "token")
     lock = tmp_path / "worker.lock"
     holder_code = textwrap.dedent(
         """
@@ -1034,6 +1037,11 @@ def test_stale_lock_reap_checks_supervisor_start_time(tmp_path: Path):
     finally:
         kept.kill()
         kept.wait(timeout=5)
+
+    forged = hold(f"{os.getpid()} {started} other-token")
+    assert _reap_stale_holder(lock) is True
+    forged.wait(timeout=5)
+    assert forged.returncode is not None
 
     mismatched = hold(f"{os.getpid()} 1 token")
     assert _reap_stale_holder(lock) is True

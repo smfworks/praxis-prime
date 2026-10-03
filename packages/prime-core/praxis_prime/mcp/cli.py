@@ -154,6 +154,11 @@ def _add(args: argparse.Namespace) -> int:
         raise McpConfigError("stdio server needs --command")
     if spec.transport in {"http", "sse", "auto"} and not spec.url:
         raise McpConfigError("HTTP server needs --url")
+    if args.project and (spec.trust == "trusted" or spec.sandbox == "off"):
+        raise McpConfigError(
+            "a project .prime/mcp.json cannot set trust=trusted or sandbox=off; "
+            "put that server in the user config"
+        )
     if args.project:
         path = add_project_server(_project_root(args), spec)
     else:

@@ -177,6 +177,12 @@ def spec_from_mapping(name: str, raw: object, *, source: str) -> ServerSpec:
     sandbox = _string(raw.get("sandbox") or "bwrap").lower()
     if sandbox not in {"bwrap", "off"}:
         raise McpConfigError(f"MCP server {checked} sandbox must be bwrap or off")
+    # A repository can ship ``.prime/mcp.json``. That file cannot grant a
+    # host start. Only the user config can set trusted or sandbox=off.
+    if source == "project":
+        trust = "untrusted"
+        if sandbox == "off":
+            sandbox = "bwrap"
     network = _string(raw.get("network") or "off").lower()
     if network not in {"off", "on"}:
         raise McpConfigError(f"MCP server {checked} network must be off or on")

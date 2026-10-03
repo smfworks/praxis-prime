@@ -409,8 +409,6 @@ def test_config_and_project_json_round_trip(tmp_path: Path, capsys):
             sys.executable,
             "--arg",
             str(FIXTURE),
-            "--trust",
-            "trusted",
             "--project",
             "--config-dir",
             str(config),
@@ -420,8 +418,29 @@ def test_config_and_project_json_round_trip(tmp_path: Path, capsys):
     )
     assert code == 0
     loaded = load_servers(config / "config.toml", project)
-    assert loaded[0].trust == "trusted"
+    assert loaded[0].trust == "untrusted"
+    assert loaded[0].sandbox == "bwrap"
     assert loaded[0].source == "project"
+    refused = main(
+        [
+            "mcp",
+            "add",
+            "elevated",
+            "--command",
+            sys.executable,
+            "--trust",
+            "trusted",
+            "--sandbox",
+            "off",
+            "--project",
+            "--config-dir",
+            str(config),
+            "--project-dir",
+            str(project),
+        ]
+    )
+    assert refused == 2
+    assert "cannot set trust=trusted" in capsys.readouterr().err
 
     listed = main(
         ["mcp", "list", "--config-dir", str(config), "--project-dir", str(project)]

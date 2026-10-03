@@ -606,7 +606,8 @@ def _reap_stale_holder(path: Path) -> bool:
     except ValueError:
         return False
     started = text[2] if len(text) >= 3 and text[2] not in {"", "-"} else None
-    if worker_pid <= 1 or _same_supervisor(supervisor_pid, started):
+    token = text[3] if len(text) >= 4 else ""
+    if worker_pid <= 1 or _same_supervisor(supervisor_pid, started, token):
         return False
     for sig in (signal.SIGTERM, signal.SIGKILL):
         try:
@@ -619,8 +620,16 @@ def _reap_stale_holder(path: Path) -> bool:
     return not _pid_alive(worker_pid)
 
 
-def _same_supervisor(pid: int, started: str | None) -> bool:
-    """True only when ``pid`` is alive and its start time matches ``started``."""
+def _same_supervisor(pid: int, started: str | None, token: str) -> bool:
+    """True when this process is the supervisor named in the lock.
+
+    The pid and start time have to match, and so does
+    ``PRAXIS_PRIME_SUPERVISOR_TOKEN``. A lock stamped with another token is
+    a leftover, even when the pid has been reused with the same start time.
+    """
+    expected = os.environ.get("PRAXIS_PRIME_SUPERVISOR_TOKEN", "").strip()
+    if not expected or token != expected:
+        return False
     if pid <= 1 or not started or not _pid_alive(pid):
         return False
     current = _process_start(pid)

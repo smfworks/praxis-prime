@@ -6,8 +6,9 @@ live lease blocks a second runner. The worker renews a lease it still
 holds so a run longer than the interval is not treated as finished.
 
 ``acquire`` takes ``BEGIN IMMEDIATE`` so two runners cannot both observe
-an empty row and both insert. The token returned with ``run`` or ``retry``
-is checked on ``renew`` and ``release``.
+an empty row and both insert. The clock is read inside that transaction.
+The token returned with ``run`` or ``retry`` is checked on ``renew`` and
+``release``.
 """
 
 from __future__ import annotations
@@ -20,6 +21,18 @@ from praxis_prime.state import StateDB
 
 Clock = Callable[[], float]
 _LEASE_SECONDS = 30.0
+# Two processes can sample the clock a few milliseconds apart. That is not
+# a reboot. A backwards monotonic clock still clears this slack.
+_CLOCK_SKEW_SECONDS = 1.0
+
+
+def _lease_expired(until: float, now: float, ttl: float) -> bool:
+    """True when ``until`` has passed, or the clock jumped backwards.
+
+    The sample is taken inside ``BEGIN IMMEDIATE``. A waiter whose clock is
+    only ``_CLOCK_SKEW_SECONDS`` behind the holder still sees a live lease.
+    """
+    return until <= now or until > now + ttl + _CLOCK_SKEW_SECONDS
 
 
 def ensure_schema(db: StateDB) -> None:
@@ -64,10 +77,10 @@ class LeaseStore:
             return self._acquire(routine_id, owner)
 
     def _acquire(self, routine_id: str, owner: str) -> tuple[str, str]:
-        now = self.clock()
         token = secrets.token_hex(16)
         self.db.conn.execute("BEGIN IMMEDIATE")
         try:
+            now = self.clock()
             row = self.db.conn.execute(
                 """
                 SELECT owner, lease_until, attempts, token
@@ -81,10 +94,11 @@ class LeaseStore:
                 return "run", token
             until = float(row[1])
             attempts = int(row[2])
-            # A lease that ends further ahead than a fresh one is a clock that
-            # moved backwards (a monotonic value stored across a reboot). Treat
-            # it as expired so the one retry still happens.
-            expired = until <= now or until > now + self.ttl
+            # A lease that ends further ahead than a fresh one, past a small
+            # skew, is a clock that moved backwards (a monotonic value stored
+            # across a reboot). Treat it as expired so the one retry still
+            # happens. A waiter a millisecond behind does not.
+            expired = _lease_expired(until, now, self.ttl)
             if not expired or attempts >= 1:
                 self.db.conn.rollback()
                 return "skip", ""
@@ -106,11 +120,11 @@ class LeaseStore:
             return self._renew(routine_id, owner, token)
 
     def _renew(self, routine_id: str, owner: str, token: str) -> bool:
-        now = self.clock()
         if not token:
             return False
         self.db.conn.execute("BEGIN IMMEDIATE")
         try:
+            now = self.clock()
             row = self.db.conn.execute(
                 """
                 SELECT owner, lease_until, attempts, token
@@ -122,7 +136,7 @@ class LeaseStore:
                 self.db.conn.rollback()
                 return False
             until = float(row[1])
-            if until <= now or until > now + self.ttl:
+            if _lease_expired(until, now, self.ttl):
                 self.db.conn.rollback()
                 return False
             updated = self.db.conn.execute(

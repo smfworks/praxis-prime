@@ -261,31 +261,49 @@ def hardlink_cover_argv(
 ) -> list[str]:
     """Cover private hard links inside ``mounts`` with ``/dev/null``.
 
-    A regular file whose inode is account data and whose ``nlink`` is
-    greater than one is hidden. The read-only system binds (``/usr``,
-    ``/bin``, ``/lib``, ``/lib64``, ``/etc``) are not walked. A workspace
-    under ``/opt`` or ``/usr/local`` is. A path under a data-root tmpfs
-    is already hidden, except a worktree that was bound again on top of
-    that tmpfs (``exposed``). The walk refuses to launch when it cannot
-    finish or passes the scan cap.
+    The protected inodes are the account-data denylist: ``profiles/``,
+    ``backups/``, ``accounts.db``, ``audit.db``, the root ``prime.db``,
+    each database's ``-wal``, ``-shm``, and ``-journal`` sidecar, ``SOUL.md``,
+    and ``worker-master.key``. A regular file is hidden only when its inode
+    is one of those and ``nlink`` is greater than one. When none of them has
+    another name, the workspace is not walked. ``.git/objects`` and
+    ``node_modules`` are walked only if some extra name is still unaccounted
+    for. The read-only system binds (``/usr``, ``/bin``, ``/lib``,
+    ``/lib64``, ``/etc``) are not walked. A workspace under ``/opt`` or
+    ``/usr/local`` is. A path under a data-root tmpfs is already hidden,
+    except a worktree that was bound again on top of that tmpfs
+    (``exposed``). The walk refuses to launch when it cannot finish or
+    passes the hard-link cap.
     """
-    from praxis_prime.policy.boundary import _account_data_roots, _cached_private_inodes
+    from praxis_prime.policy.boundary import (
+        _account_data_roots,
+        _cached_linked_inodes,
+        _cached_private_inodes,
+    )
 
     roots = _account_data_roots()
     if not roots:
         raise SandboxError("refusing to launch; account data could not be classified")
-    secret: set[tuple[int, int]] = set()
+    remaining: dict[tuple[int, int], int] = {}
     for root in roots:
-        inodes, problem = _cached_private_inodes(root)
+        _inodes, problem = _cached_private_inodes(root)
         if problem:
             raise SandboxError("refusing to launch; the account-data scan did not finish")
-        secret.update(inodes)
-    if not secret:
+        linked, link_problem = _cached_linked_inodes(root)
+        if link_problem:
+            raise SandboxError("refusing to launch; the account-data scan did not finish")
+        for key, nlink in linked.items():
+            extra = nlink - 1
+            if extra > remaining.get(key, 0):
+                remaining[key] = extra
+    if not remaining:
         return []
     visible = list(exposed or [])
     argv: list[str] = []
     scanned = 0
     for src, dest in mounts:
+        if _links_found(remaining):
+            break
         if _skip_hardlink_scan(dest):
             continue
         try:
@@ -296,32 +314,11 @@ def hardlink_cover_argv(
         if kind == "missing":
             continue
         if kind == "file":
-            scanned = _note_scan(scanned)
-            covered = _cover_one(root, dest, secret, masked, visible)
-            if covered:
-                argv.extend(covered)
+            scanned = _cover_file(root, dest, remaining, masked, visible, argv, scanned)
             continue
         if kind != "dir":
             raise SandboxError("refusing to launch; a mount could not be scanned")
-        for dirpath, _dirnames, filenames in os.walk(root, followlinks=False):
-            for name in filenames:
-                scanned = _note_scan(scanned)
-                host = Path(dirpath) / name
-                try:
-                    info = os.lstat(host)
-                except OSError as exc:
-                    raise SandboxError(
-                        "refusing to launch; a mount could not be scanned"
-                    ) from exc
-                if not stat.S_ISREG(info.st_mode) or info.st_nlink <= 1:
-                    continue
-                if (info.st_dev, info.st_ino) not in secret:
-                    continue
-                relative = os.path.relpath(host, root)
-                sandbox = str(Path(dest) / relative)
-                if _under_mask(sandbox, masked, visible):
-                    continue
-                argv.extend(["--ro-bind", "/dev/null", sandbox])
+        scanned = _cover_tree(root, dest, remaining, masked, visible, argv, scanned)
     return argv
 
 
@@ -342,28 +339,168 @@ def _scan_kind(path: Path) -> str:
 def _note_scan(scanned: int) -> int:
     scanned += 1
     if scanned > _HARDLINK_SCAN_CAP:
-        raise SandboxError("refusing to launch; too many files to check for hard links")
+        raise SandboxError(
+            "refusing to launch; more than "
+            f"{_HARDLINK_SCAN_CAP} hard-linked files to check because account "
+            "data has another name on disk (accounts.db-wal, accounts.db-shm, "
+            "accounts.db-journal, and the same sidecars for audit.db and "
+            "prime.db, plus SOUL.md and worker-master.key). Remove those extra "
+            "links, or run from a smaller directory."
+        )
     return scanned
 
 
-def _cover_one(
+def _links_found(remaining: dict[tuple[int, int], int]) -> bool:
+    return all(count <= 0 for count in remaining.values())
+
+
+def _bulky_dir(parent: str, name: str) -> bool:
+    """True for trees that are large and are scanned only if a link is left.
+
+    ``node_modules`` and ``.git/objects`` are not followed as symlinks.
+    A hard link of a protected inode inside them is still covered, after
+    the rest of the mount has been checked.
+    """
+    if name == "node_modules":
+        return True
+    return name == "objects" and os.path.basename(parent) == ".git"
+
+
+def _cover_file(
     host: Path,
     dest: str,
-    secret: set[tuple[int, int]],
+    remaining: dict[tuple[int, int], int],
     masked: list[str],
     exposed: list[str],
-) -> list[str]:
+    argv: list[str],
+    scanned: int,
+) -> int:
     try:
         info = os.lstat(host)
     except OSError as exc:
         raise SandboxError("refusing to launch; a mount could not be scanned") from exc
+    return _cover_stat(host, dest, info, remaining, masked, exposed, argv, scanned)
+
+
+def _cover_stat(
+    host: Path,
+    dest: str,
+    info: os.stat_result,
+    remaining: dict[tuple[int, int], int],
+    masked: list[str],
+    exposed: list[str],
+    argv: list[str],
+    scanned: int,
+) -> int:
+    del host
     if not stat.S_ISREG(info.st_mode) or info.st_nlink <= 1:
-        return []
-    if (info.st_dev, info.st_ino) not in secret:
-        return []
+        return scanned
+    key = (info.st_dev, info.st_ino)
+    left = remaining.get(key, 0)
+    if left <= 0:
+        return scanned
+    scanned = _note_scan(scanned)
+    remaining[key] = left - 1
     if _under_mask(dest, masked, exposed):
-        return []
-    return ["--ro-bind", "/dev/null", dest]
+        return scanned
+    argv.extend(["--ro-bind", "/dev/null", dest])
+    return scanned
+
+
+def _cover_tree(
+    root: Path,
+    dest: str,
+    remaining: dict[tuple[int, int], int],
+    masked: list[str],
+    exposed: list[str],
+    argv: list[str],
+    scanned: int,
+) -> int:
+    bulky: list[tuple[Path, str]] = []
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        if _links_found(remaining):
+            return scanned
+        kept: list[str] = []
+        relative_dir = os.path.relpath(dirpath, root)
+        for name in dirnames:
+            if _bulky_dir(dirpath, name):
+                bulky.append((Path(dirpath) / name, _sandbox_join(dest, relative_dir, name)))
+            else:
+                kept.append(name)
+        dirnames[:] = kept
+        for name in filenames:
+            if _links_found(remaining):
+                return scanned
+            host = Path(dirpath) / name
+            try:
+                info = os.lstat(host)
+            except OSError as exc:
+                raise SandboxError("refusing to launch; a mount could not be scanned") from exc
+            scanned = _cover_stat(
+                host,
+                _sandbox_join(dest, relative_dir, name),
+                info,
+                remaining,
+                masked,
+                exposed,
+                argv,
+                scanned,
+            )
+    if _links_found(remaining):
+        return scanned
+    for host, sandbox in bulky:
+        if _links_found(remaining):
+            break
+        scanned = _cover_bulky(host, sandbox, remaining, masked, exposed, argv, scanned)
+    return scanned
+
+
+def _cover_bulky(
+    root: Path,
+    dest: str,
+    remaining: dict[tuple[int, int], int],
+    masked: list[str],
+    exposed: list[str],
+    argv: list[str],
+    scanned: int,
+) -> int:
+    """Walk a deferred tree. Symlinks are not followed."""
+    kind = _scan_kind(root)
+    if kind == "missing":
+        return scanned
+    if kind == "file":
+        return _cover_file(root, dest, remaining, masked, exposed, argv, scanned)
+    if kind != "dir":
+        return scanned
+    for dirpath, _dirnames, filenames in os.walk(root, followlinks=False):
+        if _links_found(remaining):
+            return scanned
+        relative_dir = os.path.relpath(dirpath, root)
+        for name in filenames:
+            if _links_found(remaining):
+                return scanned
+            host = Path(dirpath) / name
+            try:
+                info = os.lstat(host)
+            except OSError as exc:
+                raise SandboxError("refusing to launch; a mount could not be scanned") from exc
+            scanned = _cover_stat(
+                host,
+                _sandbox_join(dest, relative_dir, name),
+                info,
+                remaining,
+                masked,
+                exposed,
+                argv,
+                scanned,
+            )
+    return scanned
+
+
+def _sandbox_join(dest: str, relative_dir: str, name: str) -> str:
+    if relative_dir in {"", "."}:
+        return str(Path(dest) / name)
+    return str(Path(dest) / relative_dir / name)
 
 
 def _skip_hardlink_scan(dest: str) -> bool:

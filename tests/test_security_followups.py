@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -23,6 +24,8 @@ from praxis_prime.accounts.db import AccountStore
 from praxis_prime.accounts.factors import _SIGNIN_AAD, FactorError, Factors
 from praxis_prime.accounts.seal import challenge_key, unseal
 from praxis_prime.approvals.gate import ApprovalDecision, ApprovalRequest
+from praxis_prime.gateway.authz import Principal
+from praxis_prime.gateway.factors import authed_factor
 from praxis_prime.mcp.client import McpClient, _host_launch_approved
 from praxis_prime.mcp.config import ServerSpec
 from praxis_prime.mcp.sandbox import (
@@ -34,6 +37,7 @@ from praxis_prime.mcp.sandbox import (
 from praxis_prime.policy import boundary as inode_boundary
 from praxis_prime.policy.boundary import clear_data_inode_cache
 from praxis_prime.policy.engine import PolicyEngine
+from praxis_prime.profiles.home import create_profile
 from praxis_prime.router.settings import load_settings
 from praxis_prime.sandbox.bwrap import (
     SandboxError,
@@ -678,14 +682,16 @@ def test_session_owner_lookup_does_not_keep_a_woken_worker(tmp_path: Path) -> No
         accounts.close()
 
 
-def test_socket_sweep_skips_young_dirs_and_waits_for_the_lock(tmp_path: Path) -> None:
+def test_socket_sweep_skips_young_dirs_and_a_held_lock(tmp_path: Path) -> None:
+    runtime = tmp_path / "run"
+    runtime.mkdir()
     current = tmp_path / "current"
     current.mkdir()
     young = Path(tempfile.mkdtemp(prefix="praxis-prime-socks-"))
     os.chmod(young, 0o700)
     (young / "aaaaaaaa-supervisor.sock").write_bytes(b"")
     try:
-        _sweep_stale_socket_dirs(current, None)
+        _sweep_stale_socket_dirs(current, None, runtime=runtime)
         assert young.exists()
     finally:
         if young.exists():
@@ -697,24 +703,14 @@ def test_socket_sweep_skips_young_dirs_and_waits_for_the_lock(tmp_path: Path) ->
     (stale / "bbbbbbbb-supervisor.sock").write_bytes(b"")
     aged = time.time() - 60
     os.utime(stale, (aged, aged))
-    held = _lock_socket_sweep()
+    held = _lock_socket_sweep(runtime)
+    assert held >= 0
     try:
-        started = threading.Event()
-
-        def sweep() -> None:
-            started.set()
-            _sweep_stale_socket_dirs(current, None)
-
-        thread = threading.Thread(target=sweep)
-        thread.start()
-        assert started.wait(2)
-        time.sleep(0.3)
+        _sweep_stale_socket_dirs(current, None, runtime=runtime)
         assert stale.exists()
-        assert thread.is_alive()
     finally:
         os.close(held)
-    thread.join(5)
-    assert not thread.is_alive()
+    _sweep_stale_socket_dirs(current, None, runtime=runtime)
     assert not stale.exists()
 
 
@@ -750,7 +746,9 @@ def test_long_profile_id_fits_under_the_tmp_socket_fallback(tmp_path: Path) -> N
         tag = "abcd1234"
         assert _names_fit(directory, tag, ["supervisor", long_id])
         hashed = _socket_basename(directory, tag, long_id)
-        assert hashed != f"{tag}-{long_id}.sock"
+        digest = hashlib.sha256(long_id.encode()).hexdigest()[:16]
+        assert hashed == f"{tag}-_{digest}.sock"
+        assert hashed != f"{tag}-{digest}.sock"
         assert _encoded_len(directory / hashed) <= _SOCKET_PATH_MAX
         supervisor = _socket_basename(directory, tag, "supervisor")
         assert supervisor == f"{tag}-supervisor.sock"
@@ -799,6 +797,226 @@ def test_lease_token_is_required_and_acquire_is_serialized(tmp_path: Path) -> No
     finally:
         right.close()
         left.close()
+
+
+def test_bad_origin_does_not_spend_the_registration_step_up(tmp_path: Path) -> None:
+    store = AccountStore(tmp_path / "accounts.db")
+    try:
+        account = store.create_account(
+            username_text="ada", password=_PASSWORD, display_name="Ada"
+        )
+        factors = Factors(store)
+        token = factors.prove_password(account.id, _PASSWORD, "", session_id="sess-1")
+        principal = Principal(
+            kind="session",
+            account_id=account.id,
+            username="ada",
+            role="owner",
+            session_id="sess-1",
+        )
+        status, body, _headers = authed_factor(
+            store,
+            principal,
+            "POST",
+            "/v1/auth/passkey/register/options",
+            json.dumps({"stepUpToken": token}).encode(),
+            None,
+            origin="http://evil.example",
+            port=18790,
+        )
+        assert status == 400
+        assert body["error"]["message"] == "origin is not allowed"
+        assert factors.step_up_valid(account.id, token, "sess-1") is True
+        bearer = Principal(
+            kind="bootstrap",
+            account_id=account.id,
+            username="ada",
+            role="owner",
+        )
+        bearer_token = factors._mint_step_up(account.id, "")
+        status, body, _headers = authed_factor(
+            store,
+            bearer,
+            "POST",
+            "/v1/auth/passkey/register/options",
+            json.dumps({"stepUpToken": bearer_token}).encode(),
+            None,
+            origin="http://localhost:18790",
+            port=18790,
+        )
+        assert status == 401
+        assert factors.step_up_valid(account.id, bearer_token, "") is True
+    finally:
+        store.close()
+
+
+def test_lease_clock_skew_does_not_start_a_second_run(tmp_path: Path) -> None:
+    path = tmp_path / "prime.db"
+    winner_db = StateDB(path)
+    waiter_db = StateDB(path)
+    try:
+        winner = LeaseStore(winner_db, clock=lambda: 1000.001)
+        waiter = LeaseStore(waiter_db, clock=lambda: 1000.000)
+        assert winner.acquire("r", "B")[0] == "run"
+        assert waiter.acquire("r", "A")[0] == "skip"
+    finally:
+        waiter_db.close()
+        winner_db.close()
+
+
+def test_hashed_socket_name_cannot_match_a_profile_id(tmp_path: Path) -> None:
+    index = 0
+    long_id = ""
+    digest = ""
+    while index < 64:
+        long_id = ("p" + str(index)).ljust(64, "x")
+        digest = hashlib.sha256(long_id.encode()).hexdigest()[:16]
+        if digest[0].isalpha():
+            break
+        index += 1
+    assert digest[0].isalpha()
+    directory = Path("/tmp") / ("d" * 40)
+    tag = "abcd1234"
+    assert _socket_basename(directory, tag, long_id) == f"{tag}-_{digest}.sock"
+    assert _socket_basename(directory, tag, digest) == f"{tag}-{digest}.sock"
+    root = tmp_path / "data"
+    create_profile(root, long_id)
+    create_profile(root, digest)
+    runtime = Path("/tmp") / f"r53-{os.getpid()}-{'y' * 24}"
+    supervisor = _supervisor(tmp_path, names=(), data_root=root)
+    supervisor.runtime_dir = runtime
+    runtime.mkdir(parents=True)
+    os.chmod(runtime, 0o700)
+    try:
+        supervisor.start()
+        long_name = _socket_basename(supervisor._socket_directory(), supervisor._sock_tag, long_id)
+        short_name = _socket_basename(supervisor._socket_directory(), supervisor._sock_tag, digest)
+        assert long_name != short_name
+        supervisor.call(long_id, "memory.remember", {"content": "LONG-SECRET"})
+        assert supervisor.call(digest, "memory.list")["entries"] == []
+        remembered = supervisor.call(long_id, "memory.list")["entries"]
+        assert remembered and "LONG-SECRET" in str(remembered)
+    finally:
+        supervisor.close()
+        shutil.rmtree(runtime, ignore_errors=True)
+
+
+def test_sweep_lock_stays_out_of_the_shared_tmp_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(tempfile, "tempdir", None)
+    sticky = tmp_path / "sticky"
+    sticky.mkdir()
+    os.chmod(sticky, 0o1777)
+    monkeypatch.setenv("TMPDIR", str(sticky))
+    hostile = sticky / "praxis-prime-socks.lock"
+    hostile.write_text("owned\n", encoding="utf-8")
+    os.chmod(hostile, 0o000)
+    supervisor = _supervisor(tmp_path, names=("ada",))
+    held = _lock_socket_sweep(supervisor.runtime_dir)
+    assert held >= 0
+    try:
+        outcome: dict[str, object] = {}
+
+        def go() -> None:
+            try:
+                supervisor.start()
+                outcome["ok"] = supervisor.call("ada", "memory.list")["entries"] == []
+            except Exception as exc:
+                outcome["ok"] = exc
+
+        thread = threading.Thread(target=go)
+        thread.start()
+        thread.join(8)
+        assert not thread.is_alive()
+        assert outcome.get("ok") is True
+    finally:
+        os.close(held)
+        supervisor.close()
+    assert stat.S_IMODE(hostile.stat().st_mode) == 0
+    os.chmod(hostile, 0o600)
+    assert hostile.read_text(encoding="utf-8") == "owned\n"
+    lock = supervisor.runtime_dir / "socks.lock"
+    assert lock.is_file()
+    assert stat.S_IMODE(lock.stat().st_mode) == 0o600
+
+
+def test_sweep_lock_symlink_does_not_stop_start(tmp_path: Path) -> None:
+    supervisor = _supervisor(tmp_path, names=("ada",))
+    target = tmp_path / "elsewhere"
+    target.write_text("x", encoding="utf-8")
+    (supervisor.runtime_dir / "socks.lock").symlink_to(target)
+    try:
+        supervisor.start()
+        assert supervisor.call("ada", "memory.list")["entries"] == []
+    finally:
+        supervisor.close()
+    assert target.read_text(encoding="utf-8") == "x"
+
+
+def test_database_sidecars_and_root_files_are_hardlink_covered(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = _isolate(tmp_path, monkeypatch)
+    root = home / ".local" / "share" / "praxis-prime"
+    (root / "profiles" / "bob").mkdir(parents=True)
+    (root / "profiles" / "bob" / "SOUL.md").write_text("SECRET-PSOUL\n", encoding="utf-8")
+    bodies = {
+        "accounts.db": "SECRET-DB\n",
+        "accounts.db-wal": "SECRET-WAL-ROW\n",
+        "audit.db": "SECRET-AUDIT\n",
+        "prime.db": "SECRET-PRIMEDB\n",
+        "SOUL.md": "SECRET-RSOUL\n",
+        "worker-master.key": "SECRET-KEY\n",
+    }
+    for name, text in bodies.items():
+        (root / name).write_text(text, encoding="utf-8")
+    work = home / "proj"
+    work.mkdir()
+    for name in bodies:
+        os.link(root / name, work / name)
+    os.link(root / "profiles" / "bob" / "SOUL.md", work / "notes.txt")
+    (work / "node_modules").mkdir()
+    os.link(root / "audit.db", work / "node_modules" / "hidden")
+    objects = work / ".git" / "objects"
+    objects.mkdir(parents=True)
+    os.link(root / "prime.db", objects / "aa")
+    (work / "padding").write_text("ordinary\n", encoding="utf-8")
+    clear_data_inode_cache()
+    argv = build_bwrap_argv("true", work)
+    for name in (*bodies, "notes.txt"):
+        assert _cover(argv, f"/workspace/{name}")[:2] == ["--ro-bind", "/dev/null"]
+    assert _cover(argv, "/workspace/node_modules/hidden")[:2] == ["--ro-bind", "/dev/null"]
+    assert _cover(argv, "/workspace/.git/objects/aa")[:2] == ["--ro-bind", "/dev/null"]
+    monkeypatch.setattr("praxis_prime.sandbox.bwrap._HARDLINK_SCAN_CAP", 0)
+    clear_data_inode_cache()
+    with pytest.raises(SandboxError, match="accounts.db-wal"):
+        build_bwrap_argv("true", work)
+
+
+def test_project_mcp_json_cannot_grant_a_host_start(tmp_path: Path) -> None:
+    from praxis_prime.mcp.config import load_servers
+
+    project = tmp_path / "proj"
+    (project / ".prime").mkdir(parents=True)
+    (project / ".prime" / "mcp.json").write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "notes": {
+                        "command": "python3",
+                        "trust": "trusted",
+                        "sandbox": "off",
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    loaded = load_servers(None, project)
+    assert loaded[0].source == "project"
+    assert loaded[0].trust == "untrusted"
+    assert loaded[0].sandbox == "bwrap"
 
 
 def _opt_workspace() -> Path:

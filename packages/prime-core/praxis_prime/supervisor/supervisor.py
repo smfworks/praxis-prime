@@ -48,7 +48,9 @@ Clock = Callable[[], float]
 _SOCKET_PATH_MAX = 100
 # A directory younger than this is still starting. The sweep leaves it.
 _SOCKET_DIR_MIN_AGE = 5.0
-_SWEEP_LOCK_NAME = "praxis-prime-socks.lock"
+# Hashed socket names start with this. It is not a legal profile id
+# (ids are ``^[a-z][a-z0-9-]{0,63}$``), so a short id cannot match a digest.
+_HASHED_SOCKET_MARK = "_"
 _DROPPED_ENV = frozenset(
     {
         "PRAXIS_PRIME_WORKER_MASTER",
@@ -784,14 +786,16 @@ class Supervisor:
     def _socket_directory(self) -> Path:
         if self._socket_dir is not None:
             return self._socket_dir
-        # Hold the sweep lock until the supervisor socket is bound. Another
-        # start blocks in the sweep instead of deleting this directory.
+        # The sweep lock lives in this user's private runtime directory.
+        # A failure (foreign owner, symlink, or a lock already held) skips
+        # the sweep. Start still binds its sockets.
         if self._sweep_lock < 0:
-            self._sweep_lock = _lock_socket_sweep()
+            self._sweep_lock = _lock_socket_sweep(self.runtime_dir)
         previous = _pointer_target(self.runtime_dir)
         chosen = self._choose_socket_directory()
         self._socket_dir = chosen
-        _sweep_stale_socket_dirs(chosen, previous, holding_lock=True)
+        if self._sweep_lock >= 0:
+            _sweep_stale_socket_dirs(chosen, previous, holding_lock=True)
         _remember_socket_dir(self.runtime_dir, chosen)
         return chosen
 
@@ -915,13 +919,15 @@ def _socket_basename(directory: Path, tag: str, name: str) -> str:
     """Socket file name. A long profile id is hashed so it fits in ``sun_path``.
 
     The supervisor socket keeps the ``-supervisor.sock`` suffix. The stale
-    sweep recognizes a live directory by that name.
+    sweep recognizes a live directory by that name. A hashed profile id is
+    prefixed with ``_``, which cannot appear in a profile id, so the digest
+    cannot collide with a shorter id.
     """
     plain = f"{tag}-{name}.sock"
     if name == "supervisor" or _encoded_len(directory / plain) <= _SOCKET_PATH_MAX:
         return plain
     digest = hashlib.sha256(name.encode("utf-8")).hexdigest()[:16]
-    return f"{tag}-{digest}.sock"
+    return f"{tag}-{_HASHED_SOCKET_MARK}{digest}.sock"
 
 
 def _encoded_len(path: Path) -> int:
@@ -965,19 +971,49 @@ def _remember_socket_dir(runtime_dir: Path, chosen: Path) -> None:
     os.chmod(pointer, 0o600)
 
 
-def _lock_socket_sweep() -> int:
-    """Exclusive lock held from directory creation until the supervisor socket binds."""
-    path = Path(tempfile.gettempdir()) / _SWEEP_LOCK_NAME
+def _lock_socket_sweep(runtime: Path) -> int:
+    """Exclusive lock fd, or -1 when the sweep should be skipped.
+
+    The file is ``socks.lock`` inside the private runtime directory, opened
+    with ``O_NOFOLLOW``. Another owner, a symlink, a mode that cannot be
+    tightened, or a lock that is already held returns -1. The caller skips
+    the sweep and does not fail startup. The lock is non-blocking so a
+    holder cannot stall this process.
+    """
+    try:
+        ensure_private_dir(runtime)
+    except OSError:
+        return -1
+    path = Path(runtime) / "socks.lock"
     flags = os.O_CREAT | os.O_RDWR
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
-    fd = os.open(path, flags, 0o600)
     try:
-        os.chmod(path, 0o600)
-        fcntl.flock(fd, fcntl.LOCK_EX)
-    except Exception:
+        fd = os.open(path, flags, 0o600)
+    except OSError:
+        return -1
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+            os.close(fd)
+            return -1
+        if stat.S_IMODE(info.st_mode) != 0o600:
+            os.fchmod(fd, 0o600)
+            info = os.fstat(fd)
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or info.st_uid != os.getuid()
+                or stat.S_IMODE(info.st_mode) != 0o600
+            ):
+                os.close(fd)
+                return -1
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
         os.close(fd)
-        raise
+        return -1
+    except OSError:
+        os.close(fd)
+        return -1
     return fd
 
 
@@ -986,6 +1022,7 @@ def _sweep_stale_socket_dirs(
     previous: Path | None,
     *,
     holding_lock: bool = False,
+    runtime: Path | None = None,
 ) -> None:
     """Remove private socket directories whose supervisor socket is not listening.
 
@@ -995,9 +1032,10 @@ def _sweep_stale_socket_dirs(
     """
     fd = -1
     if not holding_lock:
-        try:
-            fd = _lock_socket_sweep()
-        except OSError:
+        if runtime is None:
+            return
+        fd = _lock_socket_sweep(runtime)
+        if fd < 0:
             return
     try:
         _sweep_locked(current, previous)
