@@ -100,6 +100,22 @@ praxis-prime account passkey list ada
 
 `account totp confirm` reads one code from stdin. `account passkey remove USER CREDENTIAL_ID` drops a credential. `account passwd` also deletes that account's passkeys. Those commands append an audit event and do not write the secret into it. Creating a passkey is the daemon's `/v1/auth/passkey/register/*` routes, because that needs a WebAuthn client. The HTTP route also needs a step-up (`POST /v1/auth/step-up` with the password, plus a TOTP or recovery code once TOTP is on, or a passkey assertion at `/v1/auth/step-up/passkey/*`). Each of those changes spends its own step-up token. Passkey enrollment spends one token when the browser requests registration options, and the verify call finishes that ceremony. Confirming TOTP also deletes outstanding step-up rows. `account totp disable` still reads only the password. Logout drops that session's step-up tokens. The loopback bearer token and Telegram Approve/Deny are unchanged: they are not passkey or TOTP checks. See [SECURITY.md](SECURITY.md).
 
+OpenID Connect sits beside those factors. Create the owner with `account create` first. The client secret is one line on stdin and is stored in `secrets.env` (or `PRAXIS_PRIME_SECRETS_FILE`). It is not a command argument. `list` prints the secret's key name, not the value.
+
+```bash
+printf '%s\n' "$OIDC_CLIENT_SECRET" | praxis-prime oidc add google \
+  --display-name "Google" --client-id "$OIDC_CLIENT_ID" \
+  --preset google --client-secret-stdin
+printf '%s\n' "$OIDC_CLIENT_SECRET" | praxis-prime oidc add work \
+  --display-name "Work" --client-id "$OIDC_CLIENT_ID" \
+  --preset entra --tenant contoso.onmicrosoft.com --client-secret-stdin
+praxis-prime oidc list
+praxis-prime oidc link ada --issuer https://accounts.google.com --subject 123456
+praxis-prime oidc remove google
+```
+
+Scopes default to `openid email profile` and must include `openid`. `--preset google` uses `https://accounts.google.com`. `--preset entra` needs `--tenant` and uses `https://login.microsoftonline.com/<tenant>/v2.0`, and it maps the `roles` claim `Praxis.Admin`, `Praxis.Operator`, `Praxis.Viewer`, and `Praxis.Auditor` unless you pass `--no-role-map`. `--preset authentik` and `--preset keycloak` need `--issuer`. A fixed preset issuer is rejected when `--issuer` names a different URL. `--dev-loopback` allows an `http://127.0.0.1` or `http://localhost` issuer for a local provider. `--allow-email user@example.com` (repeatable) is the only way a verified email can link or create an account. Omit it and sign-in requires a pre-linked `iss`+`sub`. `oidc remove` exits 2 and leaves the provider in place when a linked account would lose its last sign-in factor. The sign-in page is `http://127.0.0.1:18790` once `ui/dist` is present. See [SECURITY.md](SECURITY.md).
+
 ## Models
 
 The default spec is `ollama:qwen3:32b`. Ollama's native chat API is `http://127.0.0.1:11434`. Override it with `PRAXIS_PRIME_OLLAMA_HOST` or `OLLAMA_HOST`.
@@ -340,4 +356,4 @@ The `browser` tool can navigate, snapshot, click, type, screenshot, extract text
 
 ## Not in this milestone
 
-A coding-mode embedding index of the repo, regulatory dial enforcement beyond redaction and retention windows, the TUI, and the web UI are still stubs. ONNX classifiers, parallel jury calls, nightly recalibration, and the decision eval suites are not in this build. Per-hunk diff review, the `auto` coding classifier, background cloud coding, Ed25519 device pairing, an approval Edit button, and channels other than Telegram are not either. Natural-language cron, FTS5, sqlite-vec, skill security grading, and a skill hub lockfile are later work. Full MCP OAuth 2.1, an MCP security grade, a remote egress proxy, a browser vision loop, and driving the user's signed-in browser are later work too. See [ARCHITECTURE.md](ARCHITECTURE.md) §29 for the rest of the roadmap.
+A coding-mode embedding index of the repo, regulatory dial enforcement beyond redaction and retention windows, and the TUI are still stubs. The loopback sign-in page in `ui/dist` covers password, TOTP, and configured OIDC providers. The chat client in `ui/src` is still a stub. ONNX classifiers, parallel jury calls, nightly recalibration, and the decision eval suites are not in this build. Per-hunk diff review, the `auto` coding classifier, background cloud coding, Ed25519 device pairing, an approval Edit button, and channels other than Telegram are not either. Natural-language cron, FTS5, sqlite-vec, skill security grading, and a skill hub lockfile are later work. Full MCP OAuth 2.1, an MCP security grade, a remote egress proxy, a browser vision loop, and driving the user's signed-in browser are later work too. See [ARCHITECTURE.md](ARCHITECTURE.md) §29 for the rest of the roadmap.

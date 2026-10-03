@@ -17,8 +17,9 @@ from __future__ import annotations
 
 import json
 
-from praxis_prime.accounts.db import AccountStore
+from praxis_prime.accounts.db import AccountStore, cookie_value
 from praxis_prime.accounts.factors import STEP_UP_TTL_SECONDS, FactorError, Factors
+from praxis_prime.accounts.oidc import MFA_COOKIE, clear_mfa_cookie
 from praxis_prime.accounts.passkeys import loopback_ceremony
 from praxis_prime.audit.log import AuditLog
 from praxis_prime.gateway.authz import (
@@ -39,6 +40,7 @@ def totp_login(
     audit: AuditLog | None,
     *,
     peer: str = "",
+    cookie_header: str = "",
 ) -> _Result:
     parsed = _object(body)
     if parsed is None:
@@ -47,6 +49,11 @@ def totp_login(
     code = parsed.get("code", "")
     if not isinstance(token, str) or not isinstance(code, str):
         return 400, _error("bad_request", "mfa token and code must be strings"), []
+    # An OIDC sign-in leaves the second-factor token in pp_mfa, not in the URL.
+    from_cookie = False
+    if token == "":
+        token = cookie_value(cookie_header, MFA_COOKIE)
+        from_cookie = bool(token)
     account = Factors(store).complete_mfa(token, code)
     if account is None:
         if not _audit_or_unavailable(
@@ -57,7 +64,10 @@ def totp_login(
         ):
             return 503, _error("unavailable", "audit log is busy"), []
         return 401, _error("unauthorized", "invalid code"), []
-    return _open_session(store, account, audit, method=_method_for(code))
+    status, payload, cookies = _open_session(store, account, audit, method=_method_for(code))
+    if from_cookie and status == 200:
+        cookies = [*cookies, ("Set-Cookie", clear_mfa_cookie())]
+    return status, payload, cookies
 
 
 def passkey_options(

@@ -125,6 +125,7 @@ No TypeSafe source is vendored in `praxis_prime.decide`.
 | webauthn (`duo-labs/py_webauthn`) | BSD-3-Clause | Local WebAuthn registration and authentication. No source is copied into this repository. |
 | pyotp | MIT | Local TOTP codes (RFC 6238). No source is copied into this repository. |
 | cryptography | Apache-2.0 OR BSD-3-Clause | AES-GCM for TOTP seeds in `accounts.db`, and the signature checks `webauthn` already needs. `webauthn` 3.0.x requires `cryptography>=49`. No source is copied into this repository. |
+| joserfc | BSD-3-Clause | JWT and JWKS checks for owner-configured OpenID Connect providers. No source is copied into this repository. |
 | cbor2 | MIT | Transitive dependency of `webauthn` for CBOR. No source is copied into this repository. |
 | pyOpenSSL | Apache-2.0 | Transitive dependency of `webauthn` 3.0.x (`pyOpenSSL>=26.3`). No source is copied into this repository. |
 | pyasn1 | BSD-2-Clause | Transitive dependency of `webauthn` for attestation structures. No source is copied into this repository. |

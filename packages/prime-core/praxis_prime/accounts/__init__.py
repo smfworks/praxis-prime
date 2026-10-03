@@ -2,7 +2,8 @@
 
 Passwords are argon2id. Sessions and WebSocket tickets live in
 ``accounts.db`` (SQLite, WAL, mode 0600). Passkeys (WebAuthn) and TOTP
-are the M1b factors in this same file. OIDC is M1e.
+are the M1b factors in this same file. OIDC sign-in is
+``praxis_prime.accounts.oidc`` (M1e) and does not replace them.
 
 docs/blueprint-addendum-2026-09.md §4.3 and §6. ARCHITECTURE §22 and §25.
 """

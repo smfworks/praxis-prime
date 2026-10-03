@@ -237,6 +237,14 @@ class AccountStore:
                     "DELETE FROM webauthn_challenges WHERE account_id = ?",
                     (account_id,),
                 )
+                self.conn.execute(
+                    "DELETE FROM oidc_identities WHERE account_id = ?",
+                    (account_id,),
+                )
+                self.conn.execute(
+                    "DELETE FROM oidc_transactions WHERE account_id = ?",
+                    (account_id,),
+                )
                 deleted = self.conn.execute(
                     "DELETE FROM accounts WHERE id = ?",
                     (account_id,),
@@ -691,6 +699,10 @@ class AccountStore:
                     "DELETE FROM step_up WHERE account_id = ? AND session_id = ?",
                     (row["account_id"], row["id"]),
                 )
+                self.conn.execute(
+                    "DELETE FROM oidc_transactions WHERE session_id = ?",
+                    (row["id"],),
+                )
             self.conn.commit()
         return cursor.rowcount > 0
 
@@ -923,6 +935,55 @@ class AccountStore:
                 expires_at TEXT NOT NULL,
                 created_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS oidc_providers (
+                id TEXT PRIMARY KEY,
+                display_name TEXT NOT NULL,
+                issuer TEXT NOT NULL UNIQUE,
+                client_id TEXT NOT NULL,
+                secret_key TEXT NOT NULL,
+                scopes TEXT NOT NULL,
+                email_allowlist TEXT NOT NULL DEFAULT '[]',
+                role_claim TEXT NOT NULL DEFAULT '',
+                role_map TEXT NOT NULL DEFAULT '{}',
+                dev_loopback INTEGER NOT NULL DEFAULT 0,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                preset TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS oidc_identities (
+                issuer TEXT NOT NULL,
+                subject TEXT NOT NULL,
+                account_id TEXT NOT NULL REFERENCES accounts(id),
+                provider_id TEXT NOT NULL,
+                email TEXT NOT NULL DEFAULT '',
+                linked_at TEXT NOT NULL,
+                PRIMARY KEY (issuer, subject)
+            );
+
+            CREATE UNIQUE INDEX IF NOT EXISTS oidc_identity_account_issuer
+                ON oidc_identities(account_id, issuer);
+
+            CREATE TABLE IF NOT EXISTS oidc_transactions (
+                state_hash TEXT PRIMARY KEY,
+                binding_hash TEXT NOT NULL,
+                provider_id TEXT NOT NULL,
+                nonce_hash TEXT NOT NULL,
+                verifier TEXT NOT NULL,
+                kind TEXT NOT NULL CHECK (kind IN ('login', 'link')),
+                account_id TEXT NOT NULL DEFAULT '',
+                session_id TEXT NOT NULL DEFAULT '',
+                redirect_uri TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                used INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS oidc_spent (
+                nonce_hash TEXT PRIMARY KEY,
+                expires_at TEXT NOT NULL
+            );
             """
         )
         self._ensure_column("ws_tickets", "session_id", "session_id TEXT NOT NULL DEFAULT ''")
@@ -1092,6 +1153,10 @@ class AccountStore:
         )
         self.conn.execute(
             "UPDATE mfa_tokens SET used = 1 WHERE account_id = ? AND used = 0",
+            (account_id,),
+        )
+        self.conn.execute(
+            "DELETE FROM oidc_transactions WHERE account_id = ?",
             (account_id,),
         )
 

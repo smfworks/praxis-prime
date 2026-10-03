@@ -45,6 +45,7 @@ from praxis_prime.gateway.guard import (
     host_origin_denial,
     mutation_type_denial,
 )
+from praxis_prime.gateway.oidc import oidc_public, oidc_session
 from praxis_prime.gateway.protocol import (
     CHAT_ROLES,
     OPERATOR_ONLY,
@@ -256,6 +257,7 @@ class GatewayServer:
             buffer = ByteBuffer(conn)
             raw = buffer.read_until(b"\r\n\r\n", limit=16384)
             method, path, headers = _parse_head(raw)
+            route_only = path.split("?", 1)[0]
             denied = host_origin_denial(headers, bound_port=self.bound_port)
             if denied is not None:
                 status, code, message = denied
@@ -263,12 +265,15 @@ class GatewayServer:
                 if self.logger is not None:
                     self.logger.warning("host_rejected", code=code)
                 return
-            site = fetch_site_denial(headers)
-            if site is not None:
-                status, code, message = site
-                _write_http(conn, status, _error(code, message))
-                return
-            route_only = path.split("?", 1)[0]
+            # The provider redirect is a cross-site top-level GET. State,
+            # PKCE, the nonce, and the pp_oidc cookie are the checks. Every
+            # other route still refuses Sec-Fetch-Site: cross-site.
+            if not (method == "GET" and route_only == "/v1/auth/oidc/callback"):
+                site = fetch_site_denial(headers)
+                if site is not None:
+                    status, code, message = site
+                    _write_http(conn, status, _error(code, message))
+                    return
             if static_route(method, route_only):
                 self._static(conn, route_only)
                 return
@@ -323,6 +328,24 @@ class GatewayServer:
             if status != 200 and self.logger is not None:
                 self.logger.warning("auth_fail")
             return status, payload
+        public_oidc = oidc_public(
+            self.accounts,
+            method,
+            route,
+            headers,
+            query,
+            body,
+            self.audit,
+            self.logger,
+            port=self.bound_port,
+            peer=peer,
+        )
+        if public_oidc is not None:
+            status, payload, cookies = public_oidc
+            extras.extend(cookies)
+            if status in {401, 403} and self.logger is not None:
+                self.logger.warning("auth_fail")
+            return status, payload
         public_factor = self._public_factor(method, route, headers, body, extras, peer)
         if public_factor is not None:
             return public_factor
@@ -368,7 +391,7 @@ class GatewayServer:
         profile_token = profile_var.set(stamped or self._runtime_profile())
         try:
             return self._authed_http(
-                method, route, headers, body, extras, principal, profile_name, query
+                method, route, headers, body, extras, principal, profile_name, query, peer
             )
         finally:
             actor_account_var.reset(actor_token)
@@ -384,8 +407,25 @@ class GatewayServer:
         principal: Principal,
         profile_name: str,
         query: str = "",
+        peer: str = "",
     ) -> tuple[int, dict[str, object]]:
         if self.accounts is not None:
+            oidc_handled = oidc_session(
+                self.accounts,
+                principal,
+                method,
+                route,
+                headers,
+                body,
+                self.audit,
+                self.logger,
+                port=self.bound_port,
+                peer=peer,
+            )
+            if oidc_handled is not None:
+                status, payload, cookies = oidc_handled
+                extras.extend(cookies)
+                return status, payload
             handled = authed_factor(
                 self.accounts,
                 principal,
@@ -522,7 +562,13 @@ class GatewayServer:
             return 503, _error("unavailable", "accounts are not configured")
         origin = headers.get("origin", "")
         if route == "/v1/auth/login/totp":
-            status, payload, cookies = totp_login(self.accounts, body, self.audit, peer=peer)
+            status, payload, cookies = totp_login(
+                self.accounts,
+                body,
+                self.audit,
+                peer=peer,
+                cookie_header=headers.get("cookie", ""),
+            )
         elif route == "/v1/auth/passkey/options":
             status, payload, cookies = passkey_options(
                 self.accounts,
@@ -1411,6 +1457,7 @@ def _write_http(
 ) -> None:
     reasons = {
         200: "OK",
+        302: "Found",
         400: "Bad Request",
         401: "Unauthorized",
         403: "Forbidden",
