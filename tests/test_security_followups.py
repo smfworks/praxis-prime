@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -15,10 +17,10 @@ import pyotp
 import pytest
 from cryptography.exceptions import InvalidTag
 from tests.test_m1c import _supervisor
-from webauthn.helpers import base64url_to_bytes
+from webauthn.helpers import base64url_to_bytes, bytes_to_base64url
 
 from praxis_prime.accounts.db import AccountStore
-from praxis_prime.accounts.factors import _SIGNIN_AAD, Factors
+from praxis_prime.accounts.factors import _SIGNIN_AAD, FactorError, Factors
 from praxis_prime.accounts.seal import challenge_key, unseal
 from praxis_prime.approvals.gate import ApprovalDecision, ApprovalRequest
 from praxis_prime.mcp.client import McpClient, _host_launch_approved
@@ -35,6 +37,7 @@ from praxis_prime.policy.engine import PolicyEngine
 from praxis_prime.router.settings import load_settings
 from praxis_prime.sandbox.bwrap import (
     SandboxError,
+    _skip_hardlink_scan,
     bind_profile,
     build_bwrap_argv,
     bwrap_available,
@@ -133,28 +136,104 @@ def test_confirming_totp_deletes_pending_step_up_rows(tmp_path: Path) -> None:
         store.close()
 
 
-def test_anonymous_passkey_options_skip_the_write_lock_and_use_a_subkey(tmp_path: Path) -> None:
+def test_anonymous_passkey_options_skip_the_write_lock_and_use_a_subkey(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     store = AccountStore(tmp_path / "accounts.db")
     try:
         factors = Factors(store)
         origin = "http://127.0.0.1:18790"
         factors.begin_authentication("", origin_header=origin, port=18790)
-        seen: list[str] = []
-        store.conn.set_trace_callback(seen.append)
-        try:
-            options = factors.begin_authentication("", origin_header=origin, port=18790)
-        finally:
-            store.conn.set_trace_callback(None)
-        assert not any(item.strip().upper().startswith("BEGIN") for item in seen)
+
+        def refuse_key_insert() -> bytes:
+            raise AssertionError("anonymous options took the key insert path")
+
+        reads = {"n": 0}
+        real_read = factors._read_key
+
+        def counting_read() -> bytes | None:
+            reads["n"] += 1
+            return real_read()
+
+        class _LockSpy:
+            def __init__(self, inner: threading.Lock) -> None:
+                self.inner = inner
+                self.entered = 0
+
+            def __enter__(self) -> None:
+                self.entered += 1
+                self.inner.acquire()
+
+            def __exit__(self, *exc: object) -> None:
+                self.inner.release()
+
+        spy = _LockSpy(store._lock)
+        monkeypatch.setattr(factors, "_key", refuse_key_insert)
+        monkeypatch.setattr(factors, "_read_key", counting_read)
+        monkeypatch.setattr(store, "_lock", spy)
+        options = factors.begin_authentication("", origin_header=origin, port=18790)
+        assert reads["n"] >= 1
+        assert spy.entered >= 1
         challenge = options["challenge"]
         assert isinstance(challenge, str)
         raw = base64url_to_bytes(challenge)
-        key = factors._read_key()
+        key = real_read()
         assert key is not None
         opened = unseal(challenge_key(key), raw, aad=_SIGNIN_AAD)
         assert opened
         with pytest.raises(InvalidTag):
             unseal(key, raw, aad=_SIGNIN_AAD)
+    finally:
+        store.close()
+
+
+def test_passkey_enrollment_spends_one_step_up_on_its_ceremony(tmp_path: Path) -> None:
+    store = AccountStore(tmp_path / "accounts.db")
+    try:
+        account = store.create_account(
+            username_text="ada", password=_PASSWORD, display_name="Ada"
+        )
+        factors = Factors(store)
+        origin = "http://127.0.0.1:18790"
+        token = factors.prove_password(account.id, _PASSWORD, "", session_id="sess-1")
+        assert factors.step_up_valid(account.id, token, "sess-1") is True
+        options = factors.begin_registration(
+            account, origin_header=origin, port=18790, session_id="sess-1"
+        )
+        assert factors.step_up_valid(account.id, token, "sess-1") is False
+        challenge = options["challenge"]
+        assert isinstance(challenge, str)
+        raw = base64url_to_bytes(challenge)
+        credential = {
+            "response": {
+                "clientDataJSON": bytes_to_base64url(
+                    json.dumps(
+                        {
+                            "type": "webauthn.create",
+                            "challenge": challenge,
+                            "origin": origin,
+                        }
+                    ).encode()
+                )
+            },
+            "rawId": "AAAA",
+        }
+        with pytest.raises(FactorError):
+            factors.finish_registration(account, credential, session_id="sess-2")
+        kept = store.conn.execute(
+            "SELECT used, session_id FROM webauthn_challenges WHERE challenge = ?",
+            (raw,),
+        ).fetchone()
+        assert kept is not None
+        assert int(kept["used"]) == 0
+        assert str(kept["session_id"]) == "sess-1"
+        with pytest.raises(FactorError):
+            factors.finish_registration(account, credential, session_id="sess-1")
+        spent = store.conn.execute(
+            "SELECT used FROM webauthn_challenges WHERE challenge = ?",
+            (raw,),
+        ).fetchone()
+        assert spent is not None and int(spent["used"]) == 1
     finally:
         store.close()
 
@@ -232,7 +311,13 @@ def test_mcp_host_start_asks_when_no_account_data_exists(
             assert request.sandboxed is False
             return ApprovalDecision.ALLOW_ONCE
 
-    spec = ServerSpec(name="notes", transport="stdio", command=sys.executable, sandbox="off")
+    spec = ServerSpec(
+        name="notes",
+        transport="stdio",
+        command=sys.executable,
+        sandbox="off",
+        trust="untrusted",
+    )
     client = McpClient(spec, cwd=project, gate=_Gate())
     assert _host_launch_approved(client) is True
     proc = popen_stdio(
@@ -253,6 +338,46 @@ def test_mcp_host_start_asks_when_no_account_data_exists(
     assert isinstance(allowed, dict)
     assert allowed["mount"] == "host"
     assert allowed["decision"] == "allow"
+
+
+def test_trusted_sandbox_off_starts_without_a_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = _isolate(tmp_path, monkeypatch)
+    project = home / "proj"
+    project.mkdir()
+    spec = ServerSpec(
+        name="prime",
+        transport="stdio",
+        command=sys.executable,
+        sandbox="off",
+        trust="trusted",
+    )
+    client = McpClient(spec, cwd=project)
+    assert client.gate is None
+    assert _host_launch_approved(client) is True
+    proc = popen_stdio(
+        sys.executable,
+        ("-c", "pass"),
+        cwd=project,
+        allow=(),
+        explicit={},
+        parent={"PATH": "/usr/bin:/bin"},
+        sandbox="off",
+        network="off",
+        server="prime",
+        host_approved=True,
+    )
+    proc.wait(timeout=30)
+    monkeypatch.setattr("praxis_prime.mcp.client.bwrap_available", lambda: False)
+    asked = ServerSpec(
+        name="prime",
+        transport="stdio",
+        command=sys.executable,
+        sandbox="bwrap",
+        trust="trusted",
+    )
+    assert _host_launch_approved(McpClient(asked, cwd=project)) is False
 
 
 def test_misplaced_database_uses_the_resolved_path_and_inode(
@@ -408,6 +533,50 @@ def test_approved_worktree_is_writable_after_the_data_mask(
     assert _SECRET not in ran.stdout
     assert (worktree / "wrote.txt").read_text(encoding="utf-8") == "yes\n"
     assert secret.read_text(encoding="utf-8") == _SECRET
+
+
+def test_opt_workspace_hard_link_is_covered(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    del tmp_path
+    assert _skip_hardlink_scan("/usr") is True
+    assert _skip_hardlink_scan("/bin") is True
+    assert _skip_hardlink_scan("/opt/project") is False
+    assert _skip_hardlink_scan("/usr/local/src") is False
+    opt = _opt_workspace()
+    try:
+        home = opt / "home"
+        share = home / ".local" / "share"
+        share.mkdir(parents=True)
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv("XDG_DATA_HOME", str(share))
+        bind_profile(None)
+        clear_data_inode_cache()
+        secret = share / "praxis-prime" / "accounts.db"
+        secret.parent.mkdir(parents=True)
+        secret.write_text(_SECRET, encoding="utf-8")
+        work = opt / "work"
+        work.mkdir()
+        alias = work / "notes.txt"
+        os.link(secret, alias)
+        clear_data_inode_cache()
+        argv = build_bwrap_argv("true", work)
+        covered = ["--ro-bind", "/dev/null", "/workspace/notes.txt"]
+        assert _cover(argv, "/workspace/notes.txt") == covered
+        mcp = build_mcp_bwrap_argv(
+            sys.executable,
+            (str(alias),),
+            cwd=work,
+            env={"PATH": "/usr/bin:/bin"},
+            network="off",
+        )
+        assert _cover(mcp, str(alias.resolve())) == [
+            "--ro-bind",
+            "/dev/null",
+            str(alias.resolve()),
+        ]
+    finally:
+        shutil.rmtree(opt, ignore_errors=True)
 
 
 def test_private_hard_links_are_covered_for_shell_readers(
@@ -630,6 +799,26 @@ def test_lease_token_is_required_and_acquire_is_serialized(tmp_path: Path) -> No
     finally:
         right.close()
         left.close()
+
+
+def _opt_workspace() -> Path:
+    """A writable directory under ``/opt``.
+
+    The CI image keeps ``/opt`` root-owned. Passwordless sudo is how that
+    image installs bubblewrap, so the test uses it only when mkdir fails.
+    """
+    path = Path("/opt") / f"praxis-prime-hl-{os.getpid()}"
+    shutil.rmtree(path, ignore_errors=True)
+    try:
+        path.mkdir(mode=0o700)
+    except OSError:
+        subprocess.run(["sudo", "-n", "mkdir", "-m", "0700", str(path)], check=True)
+        subprocess.run(
+            ["sudo", "-n", "chown", f"{os.getuid()}:{os.getgid()}", str(path)],
+            check=True,
+        )
+    os.chmod(path, 0o700)
+    return path
 
 
 def _isolate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:

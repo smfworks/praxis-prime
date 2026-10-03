@@ -281,7 +281,7 @@ def _stdio_write(client: McpClient) -> tuple[Path | None, bool]:
     account-data root are not asked: they cannot be a write scope. Any other
     directory is mounted read-write only after the approval gate allows it.
     When the sandbox is off or bubblewrap is missing, nothing is mounted, so
-    a write scope is not asked. The host start is a separate approval.
+    a write scope is not asked. The host start is decided separately.
     """
     if client.spec.sandbox == "off" or not bwrap_available():
         return None, False
@@ -327,8 +327,11 @@ def _stdio_write(client: McpClient) -> tuple[Path | None, bool]:
 def _host_launch_approved(client: McpClient) -> bool:
     """True when this stdio server may start on the host.
 
-    Account data fails closed inside ``popen_stdio`` and is not asked.
-    A fresh install asks once per launch. No gate means no host start.
+    Account data fails closed and is not asked, including for a trusted
+    server. A trusted server with ``sandbox = "off"`` is an explicit host
+    choice and starts with no gate when no account data exists. That is
+    the product's own ``mcp serve`` path. An untrusted server still needs
+    an approval, and a missing bubblewrap is not treated as ``sandbox = "off"``.
     """
     if client.spec.transport != "stdio":
         return False
@@ -338,6 +341,8 @@ def _host_launch_approved(client: McpClient) -> bool:
 
     if account_data_present():
         return False
+    if client.spec.trust == "trusted" and client.spec.sandbox == "off":
+        return True
     gate = client.gate
     if gate is None or not hasattr(gate, "authorize"):
         return False

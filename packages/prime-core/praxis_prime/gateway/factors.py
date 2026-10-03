@@ -241,7 +241,12 @@ def _register_options(
     account = store.get_id(principal.account_id)
     if account is None:
         return 401, _error("unauthorized", "authentication required"), []
-    options = Factors(store).begin_registration(account, origin_header=origin, port=port)
+    options = Factors(store).begin_registration(
+        account,
+        origin_header=origin,
+        port=port,
+        session_id=principal.session_id,
+    )
     return 200, {"ok": True, "options": options}, []
 
 
@@ -255,9 +260,8 @@ def _register_verify(
     port: int,
 ) -> _Result:
     del origin, port
-    denied = _step_up_or_deny(store, principal, body)
-    if denied is not None:
-        return denied
+    # Options already spent the step-up and stored this session's ceremony.
+    # Verify consumes that ceremony. A second token is not required.
     parsed = _object(body)
     if parsed is None:
         return 400, _error("bad_request", "passkey body must be JSON"), []
@@ -268,7 +272,12 @@ def _register_verify(
     account = store.get_id(principal.account_id)
     if account is None:
         return 401, _error("unauthorized", "authentication required"), []
-    created = Factors(store).finish_registration(account, credential, name=name)
+    created = Factors(store).finish_registration(
+        account,
+        credential,
+        name=name,
+        session_id=principal.session_id,
+    )
     if not _audit_factor(audit, principal, "auth.mfa", "passkey enrolled", "passkey"):
         return 503, _error("unavailable", "audit log is busy"), []
     return 200, {"ok": True, "passkey": created}, []

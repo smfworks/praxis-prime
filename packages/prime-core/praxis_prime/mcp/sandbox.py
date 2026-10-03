@@ -14,10 +14,10 @@ A hard link to account data inside a mount is covered with ``/dev/null``.
 Path arguments that name account data are not mounted. The mount decision
 is written to the audit log.
 
-A failed bubblewrap start does not fall back to the host. When bubblewrap
-is missing or ``sandbox`` is ``off``, the server is not started on the
-host if account data exists. With no account data, the host start still
-requires an approval. ARCHITECTURE §13.
+A failed bubblewrap start does not fall back to the host. The host is
+refused while account data exists, and an untrusted server is refused
+unless this call was approved. A trusted server with ``sandbox`` ``off``
+may start on the host when no account data exists. ARCHITECTURE §13.
 """
 
 from __future__ import annotations
@@ -256,7 +256,8 @@ def popen_stdio(
     """Start the server. The returned process speaks MCP on stdin and stdout.
 
     ``host_approved`` is ignored when account data exists. The host is not
-    a fallback for that case.
+    a fallback for that case. Callers set it for an approved untrusted
+    server, and for a trusted ``sandbox = "off"`` server with no account data.
     """
     env = child_environment(command, allow, explicit, parent)
     work = cwd.resolve()

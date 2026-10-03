@@ -304,10 +304,19 @@ class Factors:
         *,
         origin_header: str,
         port: int,
+        session_id: str,
     ) -> dict[str, object]:
+        """Start a registration ceremony for the session that spent a step-up.
+
+        The caller spends the step-up token before this. Verify finishes
+        this ceremony and does not ask for a second token. Another session
+        cannot finish it.
+        """
         selected = loopback_ceremony(origin_header, port)
         if selected is None:
             raise FactorError("origin is not allowed")
+        if not isinstance(session_id, str) or not session_id or len(session_id) > 128:
+            raise FactorError("authentication required", status=401, code="unauthorized")
         rp_id, origin = selected
         with self.store._lock:
             try:
@@ -324,7 +333,14 @@ class Factors:
                     user_display_name=account.display_name,
                     exclude=[item for item in exclude if item],
                 )
-                self._store_challenge(account.id, "register", ceremony.challenge, rp_id, origin)
+                self._store_challenge(
+                    account.id,
+                    "register",
+                    ceremony.challenge,
+                    rp_id,
+                    origin,
+                    session_id=session_id,
+                )
                 self.store.conn.commit()
             except Exception:
                 self.store.conn.rollback()
@@ -337,13 +353,23 @@ class Factors:
         credential: object,
         *,
         name: str = "",
+        session_id: str,
     ) -> dict[str, object]:
+        """Finish the ceremony ``begin_registration`` stored for ``session_id``.
+
+        A different session leaves the ceremony unused. A matching session
+        spends it, including when the authenticator proof is rejected.
+        """
         challenge = client_challenge(credential)
         if challenge is None or not isinstance(credential, dict):
             raise FactorError("passkey was rejected", status=401, code="unauthorized")
+        if not isinstance(session_id, str) or not session_id or len(session_id) > 128:
+            raise FactorError("passkey was rejected", status=401, code="unauthorized")
         with self.store._account_gate(account.username):
             with self.store._lock:
-                row = self._take_challenge(challenge, "register", account.id)
+                row = self._take_challenge(
+                    challenge, "register", account.id, session_id=session_id
+                )
                 if row is None:
                     self.store._note_second_factor_failure(account.id)
                     raise FactorError("passkey was rejected", status=401, code="unauthorized")
@@ -1000,6 +1026,8 @@ class Factors:
         challenge: bytes,
         rp_id: str,
         origin: str,
+        *,
+        session_id: str = "",
     ) -> None:
         self.store.conn.execute(
             "DELETE FROM webauthn_challenges WHERE used = 1 OR expires_at <= ?",
@@ -1029,10 +1057,10 @@ class Factors:
         self.store.conn.execute(
             """
             INSERT INTO webauthn_challenges (
-                challenge, account_id, kind, rp_id, origin, expires_at, used
-            ) VALUES (?, ?, ?, ?, ?, ?, 0)
+                challenge, account_id, kind, rp_id, origin, expires_at, used, session_id
+            ) VALUES (?, ?, ?, ?, ?, ?, 0, ?)
             """,
-            (challenge, account_id, kind, rp_id, origin, expires),
+            (challenge, account_id, kind, rp_id, origin, expires, session_id),
         )
 
     def _take_challenge(
@@ -1040,10 +1068,12 @@ class Factors:
         challenge: bytes,
         kind: str,
         account_id: str,
+        *,
+        session_id: str | None = None,
     ) -> sqlite3.Row | None:
         row = self.store.conn.execute(
             """
-            SELECT account_id, kind, rp_id, origin, expires_at, used
+            SELECT account_id, kind, rp_id, origin, expires_at, used, session_id
             FROM webauthn_challenges WHERE challenge = ?
             """,
             (challenge,),
@@ -1051,6 +1081,11 @@ class Factors:
         if row is None or str(row["kind"]) != kind or int(row["used"]):
             return None
         if str(row["expires_at"]) <= _now() or str(row["account_id"]) != account_id:
+            return None
+        # A registration ceremony is bound to the session that spent the
+        # step-up. A mismatch leaves the row unused so that session can
+        # still finish it. Other ceremonies do not pass ``session_id``.
+        if session_id is not None and str(row["session_id"]) != session_id:
             return None
         cursor = self.store.conn.execute(
             "UPDATE webauthn_challenges SET used = 1 WHERE challenge = ? AND used = 0",

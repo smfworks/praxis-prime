@@ -236,7 +236,10 @@ def build_bwrap_argv(
 
 
 _HARDLINK_SCAN_CAP = 20_000
-_SYSTEM_ROOTS = ("/usr", "/bin", "/lib", "/lib64", "/etc", "/proc", "/dev", "/opt", "/sys")
+# Read-only system binds added by the launcher. A workspace that merely
+# lives under one of these trees, such as ``/opt`` or ``/usr/local``, is
+# a separate mount and is still scanned.
+_RO_SYSTEM_BINDS = frozenset({"/usr", "/bin", "/lib", "/lib64", "/etc"})
 
 
 def _tmpfs_targets(argv: list[str]) -> list[str]:
@@ -259,10 +262,12 @@ def hardlink_cover_argv(
     """Cover private hard links inside ``mounts`` with ``/dev/null``.
 
     A regular file whose inode is account data and whose ``nlink`` is
-    greater than one is hidden. System directories are not walked. A
-    path under a data-root tmpfs is already hidden, except a worktree
-    that was bound again on top of that tmpfs (``exposed``). The walk
-    refuses to launch when it cannot finish or passes the scan cap.
+    greater than one is hidden. The read-only system binds (``/usr``,
+    ``/bin``, ``/lib``, ``/lib64``, ``/etc``) are not walked. A workspace
+    under ``/opt`` or ``/usr/local`` is. A path under a data-root tmpfs
+    is already hidden, except a worktree that was bound again on top of
+    that tmpfs (``exposed``). The walk refuses to launch when it cannot
+    finish or passes the scan cap.
     """
     from praxis_prime.policy.boundary import _account_data_roots, _cached_private_inodes
 
@@ -281,7 +286,7 @@ def hardlink_cover_argv(
     argv: list[str] = []
     scanned = 0
     for src, dest in mounts:
-        if _skip_hardlink_scan(src):
+        if _skip_hardlink_scan(dest):
             continue
         try:
             root = Path(os.path.realpath(src, strict=False))
@@ -361,12 +366,9 @@ def _cover_one(
     return ["--ro-bind", "/dev/null", dest]
 
 
-def _skip_hardlink_scan(src: Path) -> bool:
-    try:
-        text = os.path.realpath(src, strict=False)
-    except OSError:
-        return True
-    return text in _SYSTEM_ROOTS or any(text.startswith(root + "/") for root in _SYSTEM_ROOTS)
+def _skip_hardlink_scan(dest: str) -> bool:
+    """True for a read-only system bind, not for a workspace under that tree."""
+    return dest in _RO_SYSTEM_BINDS
 
 
 def _under_mask(sandbox: str, masked: list[str], exposed: list[str]) -> bool:
