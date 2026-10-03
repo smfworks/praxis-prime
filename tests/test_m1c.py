@@ -838,11 +838,18 @@ class _Redirect(BaseHTTPRequestHandler):
 
 class _Huge(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
-        body = b"a" * (MAX_UPSTREAM_BYTES + 8)
+        chunk = b"a" * 1023 + b"\n"
+        count = (MAX_UPSTREAM_BYTES // len(chunk)) + 2
+        total = count * len(chunk)
         self.send_response(200)
-        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Content-Type", "text/plain")
+        self.send_header("Content-Length", str(total))
         self.end_headers()
-        self.wfile.write(body)
+        try:
+            for _ in range(count):
+                self.wfile.write(chunk)
+        except (BrokenPipeError, ConnectionResetError):
+            return
 
     def log_message(self, fmt: str, *args: object) -> None:
         del fmt, args

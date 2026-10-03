@@ -63,18 +63,47 @@ def iter_bounded(
     limit: int = MAX_UPSTREAM_BYTES,
     deadline: float,
 ) -> Iterator[bytes]:
-    """Yield chunks from ``response``. Stop on the cap or the deadline."""
-    total = 0
-    stream = getattr(response, "__iter__", None)
-    if stream is None:
+    """Yield lines from ``response``. Stop on the cap or the deadline.
+
+    Blocks come from ``read`` in 64 KiB pieces. A body with no newlines
+    still counts toward the cap, so one long line is not one multi-megabyte
+    ``readline``. Python 3.13 raises ``ConnectionResetError`` from that read
+    when the peer closes a response this large.
+    """
+    reader = getattr(response, "read", None)
+    if not callable(reader):
         yield read_bounded(response, limit=limit, deadline=deadline)
         return
-    for raw in response:  # type: ignore[operator]
+    total = 0
+    pending = b""
+    while True:
         if time.monotonic() > deadline:
             raise TimeoutError("upstream deadline exceeded")
-        if not isinstance(raw, bytes):
+        try:
+            block = reader(65536)
+        except TimeoutError as exc:
+            raise TimeoutError("upstream deadline exceeded") from exc
+        if time.monotonic() > deadline:
+            raise TimeoutError("upstream deadline exceeded")
+        if not block:
+            break
+        if not isinstance(block, bytes):
             raise TypeError("upstream body must be bytes")
-        total += len(raw)
+        pending += block
+        while True:
+            split = pending.find(b"\n")
+            if split < 0:
+                break
+            line = pending[: split + 1]
+            pending = pending[split + 1 :]
+            total += len(line)
+            if total > limit:
+                raise ValueError("upstream body exceeds 4MB")
+            yield line
+        if total + len(pending) > limit:
+            raise ValueError("upstream body exceeds 4MB")
+    if pending:
+        total += len(pending)
         if total > limit:
             raise ValueError("upstream body exceeds 4MB")
-        yield raw
+        yield pending

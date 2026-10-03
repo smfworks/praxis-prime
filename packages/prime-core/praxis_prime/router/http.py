@@ -51,8 +51,13 @@ def open_lines(
             raise ProviderUnreachable(provider, "upstream deadline exceeded") from exc
         except ValueError as exc:
             raise ProviderUnreachable(provider, "upstream body exceeds 4MB") from exc
+        except OSError as exc:
+            raise ProviderUnreachable(provider, f"upstream read failed ({exc})") from exc
         finally:
-            response.close()
+            try:
+                response.close()
+            except OSError:
+                pass
 
     return lines()
 
