@@ -2,7 +2,9 @@
 
 M1a already moved a single-user ``prime.db`` into ``profiles/default``.
 This step does not move databases again and does not copy grants into a
-worker. A second call sees the marker and returns without writing.
+worker. A second call sees the marker and returns without writing. A
+marker version from 1 through the current version counts as already
+applied. A newer version is refused.
 """
 
 from __future__ import annotations
@@ -54,10 +56,12 @@ def _already(path: Path) -> bool:
     if not isinstance(loaded, dict) or "version" not in loaded:
         raise MigrationError("m1c marker is corrupt")
     version = loaded.get("version")
-    if version == _VERSION:
-        return True
-    if isinstance(version, int) and not isinstance(version, bool) and version > _VERSION:
+    if isinstance(version, bool) or not isinstance(version, int):
+        raise MigrationError("m1c marker is corrupt")
+    if version > _VERSION:
         raise MigrationError(f"m1c marker version {version} is not supported")
+    if version >= 1:
+        return True
     raise MigrationError("m1c marker is corrupt")
 
 

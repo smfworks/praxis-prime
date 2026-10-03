@@ -466,6 +466,7 @@ def test_telegram_routes_approve_and_deny_to_the_bound_chat(tmp_path: Path):
     assert store.destination("ada", "acct-ada") == 11
     assert store.destination("bea", "acct-bea") == 22
     assert store.destination("ada", "acct-bea") is None
+    assert store.destination("ada", "") is None
     assert store.may_decide(11, "ada", "acct-ada") is True
     assert store.may_decide(22, "ada", "acct-ada") is False
     assert store.may_decide(22, "", "") is False
@@ -683,6 +684,24 @@ def test_daemon_with_profiles_stays_on_loopback(tmp_path: Path, monkeypatch):
     assert code.get("n") == 0
 
 
+def test_upstream_short_reads_do_not_rescan_the_buffer():
+    class Reader:
+        def __init__(self) -> None:
+            self.sent = 0
+
+        def read1(self, n: int) -> bytes:
+            del n
+            if self.sent >= 400_000:
+                return b""
+            self.sent += 1
+            return b"a"
+
+    started = time.monotonic()
+    with pytest.raises(ValueError, match="4MB"):
+        list(iter_bounded(Reader(), limit=200_000))
+    assert time.monotonic() - started < 1.0
+
+
 def test_upstream_cap_counts_a_body_with_no_newlines():
     class Reader:
         def __init__(self) -> None:
@@ -846,18 +865,235 @@ def test_long_runtime_path_uses_a_private_socket_directory(tmp_path: Path):
     assert not control.parent.exists()
 
 
-def test_session_owner_does_not_start_idle_profiles(tmp_path: Path):
+def test_a_long_profile_id_does_not_stop_startup(tmp_path: Path):
+    long_id = "p" + ("x" * 63)
+    root = tmp_path / "data"
+    create_profile(root, "ada")
+    create_profile(root, long_id)
+    token = os.urandom(4).hex()
+    runtime = Path("/tmp") / f"r48-{token}-{'y' * 30}"
+    assert len(str(runtime)) == 48
+    supervisor = Supervisor(
+        data_root=root,
+        runtime_dir=runtime,
+        state_dir=tmp_path / "state",
+        env=_child_env(),
+        command=[sys.executable, str(_STUB)],
+        start_timeout=30,
+    )
+    chosen = None
+    try:
+        chosen = supervisor._socket_directory()
+        assert chosen != runtime
+        pointer = runtime / "socket-dir"
+        assert pointer.is_file()
+        assert pointer.stat().st_mode & 0o777 == 0o600
+        assert Path(pointer.read_text(encoding="utf-8").strip()) == chosen
+        supervisor.start()
+        assert supervisor.call("ada", "memory.list")["entries"] == []
+    finally:
+        supervisor.close()
+        if runtime.exists():
+            for child in runtime.iterdir():
+                if child.is_file():
+                    child.unlink()
+            runtime.rmdir()
+    assert chosen is not None
+    assert not chosen.exists()
+
+
+def test_stale_socket_directory_is_removed_on_start(tmp_path: Path):
+    import tempfile
+
+    stale = Path(tempfile.mkdtemp(prefix="praxis-prime-socks-"))
+    os.chmod(stale, 0o700)
+    (stale / "deadbeef-supervisor.sock").write_bytes(b"")
+    supervisor = _supervisor(tmp_path, names=("ada",))
+    try:
+        supervisor.start()
+        assert not stale.exists()
+        assert not (supervisor.runtime_dir / "socket-dir").exists()
+    finally:
+        supervisor.close()
+
+
+def test_a_listening_socket_directory_is_kept(tmp_path: Path):
+    runtime = tmp_path / ("x" * 90) / "run"
+    first = Supervisor(
+        data_root=tmp_path / "data-a",
+        runtime_dir=runtime,
+        state_dir=tmp_path / "state-a",
+        env=_child_env(),
+        command=[sys.executable, str(_STUB)],
+    )
+    create_profile(tmp_path / "data-a", "ada")
+    second = _supervisor(tmp_path, names=("ada",))
+    try:
+        first.start()
+        live = first._socket_dir
+        assert live is not None and live != runtime
+        second.start()
+        assert live.exists()
+        probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        probe.settimeout(1)
+        probe.connect(str(first.control_path))
+        probe.close()
+    finally:
+        second.close()
+        first.close()
+
+
+def test_worker_spawned_from_a_short_lived_thread_stays_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _isolate(tmp_path, monkeypatch)
+    root = tmp_path / "data" / "praxis-prime"
+    create_profile(root, "ada")
+    create_profile(root, "bea")
+    supervisor = Supervisor(
+        data_root=root,
+        runtime_dir=tmp_path / "run",
+        state_dir=tmp_path / "state",
+        env=_child_env(),
+        start_timeout=60,
+    )
+    try:
+        supervisor.start()
+        supervisor.call("bea", "memory.list")
+        errors: list[BaseException] = []
+
+        def spawn() -> None:
+            try:
+                supervisor.call("ada", "memory.list")
+            except BaseException as exc:
+                errors.append(exc)
+
+        thread = threading.Thread(target=spawn)
+        thread.start()
+        thread.join(60)
+        assert not thread.is_alive()
+        assert errors == []
+        ada = supervisor._slots["ada"].process
+        bea = supervisor._slots["bea"].process
+        assert ada is not None and bea is not None
+        ada_pid = ada.pid
+        time.sleep(1.5)
+        assert ada.poll() is None
+        assert bea.poll() is None
+        state = Path(f"/proc/{ada_pid}/stat").read_text(encoding="utf-8")
+        assert state.rsplit(")", 1)[1].split()[0] != "Z"
+        assert supervisor.call("ada", "memory.list")["entries"] == []
+        assert supervisor._slots["ada"].failures == 0
+        assert supervisor._slots["ada"].process is not None
+        assert supervisor._slots["ada"].process.pid == ada_pid
+    finally:
+        supervisor.close()
+
+
+def test_stale_lock_reap_checks_supervisor_start_time(tmp_path: Path):
+    from praxis_prime.worker import _process_start, _reap_stale_holder
+
+    lock = tmp_path / "worker.lock"
+    holder_code = textwrap.dedent(
+        """
+        import fcntl, os, sys, time
+        fd = os.open(sys.argv[1], os.O_CREAT | os.O_RDWR, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        os.ftruncate(fd, 0)
+        os.lseek(fd, 0, os.SEEK_SET)
+        os.write(fd, f"{os.getpid()} {sys.argv[2]}\\n".encode())
+        print("held", flush=True)
+        time.sleep(30)
+        """
+    )
+
+    def hold(rest: str) -> subprocess.Popen[str]:
+        proc = subprocess.Popen(
+            [sys.executable, "-c", holder_code, str(lock), rest],
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+        assert proc.stdout is not None
+        assert proc.stdout.readline().strip() == "held"
+        return proc
+
+    started = _process_start(os.getpid())
+    assert started
+    kept = hold(f"{os.getpid()} {started} token")
+    try:
+        assert _reap_stale_holder(lock) is False
+        assert kept.poll() is None
+    finally:
+        kept.kill()
+        kept.wait(timeout=5)
+
+    mismatched = hold(f"{os.getpid()} 1 token")
+    assert _reap_stale_holder(lock) is True
+    mismatched.wait(timeout=5)
+    assert mismatched.returncode is not None
+
+    other = subprocess.Popen(["sleep", "30"])
+    try:
+        reused = hold(str(other.pid))
+        assert _reap_stale_holder(lock) is True
+        reused.wait(timeout=5)
+        assert other.poll() is None
+    finally:
+        other.kill()
+        other.wait(timeout=5)
+
+    dead = subprocess.Popen(["true"])
+    dead.wait(timeout=5)
+    stale = hold(str(dead.pid))
+    assert _reap_stale_holder(lock) is True
+    stale.wait(timeout=5)
+
+
+def test_session_owner_asks_running_workers_before_idle_ones(tmp_path: Path):
     from praxis_prime.policy.engine import PolicyEngine
     from praxis_prime.router.settings import load_settings
 
-    supervisor = _supervisor(tmp_path, names=("ada", "bea"))
+    supervisor = _supervisor(
+        tmp_path,
+        names=("ada", "bea"),
+        env_extra={
+            "STUB_SESSION_ID": "sess-ada",
+            "STUB_SESSION_PROFILE": "ada",
+            "STUB_SESSION_ACCOUNT": "acct-ada",
+        },
+    )
+    host = RoutingHost(supervisor, PolicyEngine({}), load_settings({}))
+    try:
+        supervisor.start()
+        supervisor.ensure("ada")
+        assert host.session_owner("sess-ada") == ("acct-ada", "ada")
+        assert set(supervisor.running()) == {"ada"}
+        assert host.session_owner("missing-session") is None
+    finally:
+        supervisor.close()
+
+
+def test_session_owner_wakes_an_idle_profile(tmp_path: Path):
+    from praxis_prime.policy.engine import PolicyEngine
+    from praxis_prime.router.settings import load_settings
+
+    supervisor = _supervisor(
+        tmp_path,
+        names=("ada", "bea"),
+        env_extra={
+            "STUB_SESSION_ID": "sess-bea",
+            "STUB_SESSION_PROFILE": "bea",
+            "STUB_SESSION_ACCOUNT": "acct-bea",
+        },
+    )
     host = RoutingHost(supervisor, PolicyEngine({}), load_settings({}))
     try:
         supervisor.start()
         supervisor.ensure("ada")
         assert set(supervisor.running()) == {"ada"}
-        assert host.session_owner("missing-session") is None
-        assert set(supervisor.running()) == {"ada"}
+        assert host.session_owner("sess-bea") == ("acct-bea", "bea")
+        assert "bea" in supervisor.running()
+        host.drop_session("sess-bea", account_id="acct-bea")
     finally:
         supervisor.close()
 
@@ -972,6 +1208,7 @@ def test_bad_m1c_marker_names_the_problem(tmp_path: Path):
         ("corrupt", "{oops", "corrupt"),
         ("empty", "", "empty"),
         ("future", json.dumps({"version": 2}), "not supported"),
+        ("bool", json.dumps({"version": True}), "corrupt"),
     ):
         root = tmp_path / label
         (root / "supervisor").mkdir(parents=True)
@@ -999,6 +1236,37 @@ def test_corrupt_marker_is_not_reported_as_bind_failed(
     logged = log_path().read_text(encoding="utf-8")
     assert "migration_failed" in logged
     assert "bind_failed" not in logged
+
+
+def test_older_m1c_marker_stays_applied_when_the_version_advances(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr("praxis_prime.supervisor.migrate._VERSION", 2)
+    root = tmp_path / "data"
+    (root / "supervisor").mkdir(parents=True)
+    marker_path(root).write_text(json.dumps({"version": 1}), encoding="utf-8")
+    assert migrate_install(root) is False
+
+
+def test_lease_renewal_keeps_a_long_run_from_being_retried(tmp_path: Path):
+    db = StateDB(tmp_path / "prime.db")
+    try:
+        clock = {"now": 0.0}
+        store = LeaseStore(db, clock=lambda: clock["now"], ttl=30)
+        assert store.acquire("routine", "owner-a") == "run"
+        clock["now"] = 20
+        assert store.renew("routine", "owner-a") is True
+        assert store.renew("routine", "owner-b") is False
+        assert store.renew("missing", "owner-a") is False
+        clock["now"] = 49
+        assert store.acquire("routine", "owner-b") == "skip"
+        clock["now"] = 50
+        assert store.renew("routine", "owner-a") is False
+        assert store.acquire("routine", "owner-b") == "retry"
+        clock["now"] = 81
+        assert store.acquire("routine", "owner-c") == "skip"
+    finally:
+        db.close()
 
 
 def test_reboot_clock_still_allows_one_lease_retry(tmp_path: Path):

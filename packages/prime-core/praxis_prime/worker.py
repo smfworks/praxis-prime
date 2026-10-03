@@ -14,6 +14,7 @@ import argparse
 import fcntl
 import os
 import resource
+import select
 import signal
 import socket
 import sys
@@ -56,7 +57,7 @@ _NOFILE = 256
 
 
 def main(argv: list[str] | None = None) -> int:
-    _arm_parent_death()
+    _arm_supervisor_pipe()
     parser = argparse.ArgumentParser(prog="praxis-prime-worker")
     parser.add_argument("--profile", required=True)
     parser.add_argument("--socket", required=True)
@@ -458,10 +459,26 @@ class WorkerApp:
             self._audit("access.revoked", "routine actor lost access")
             self.leases.release(routine_id)
             return _skipped(routine_id, trigger, "membership revoked")
+        stop_beat = threading.Event()
+        beat_lock = threading.Lock()
+        interval = max(1.0, self.leases.ttl / 3.0)
+
+        def beat() -> None:
+            while not stop_beat.wait(interval):
+                with beat_lock:
+                    if stop_beat.is_set():
+                        return
+                    self.leases.renew(routine_id, owner)
+
+        thread = threading.Thread(target=beat, name="praxis-lease", daemon=True)
+        thread.start()
         try:
             run = inner(routine, trigger)  # type: ignore[operator]
         finally:
-            self.leases.release(routine_id)
+            stop_beat.set()
+            with beat_lock:
+                self.leases.release(routine_id)
+            thread.join(timeout=2)
         return run
 
     def _watch_loop(self) -> None:
@@ -562,13 +579,20 @@ def _lock_once(path: Path) -> int:
 
 def _stamp_lock(fd: int) -> None:
     supervisor = os.environ.get("PRAXIS_PRIME_SUPERVISOR_PID", "0").strip() or "0"
+    started = os.environ.get("PRAXIS_PRIME_SUPERVISOR_START", "").strip() or "-"
+    token = os.environ.get("PRAXIS_PRIME_SUPERVISOR_TOKEN", "").strip() or "-"
     os.ftruncate(fd, 0)
     os.lseek(fd, 0, os.SEEK_SET)
-    os.write(fd, f"{os.getpid()} {supervisor}\n".encode())
+    os.write(fd, f"{os.getpid()} {supervisor} {started} {token}\n".encode())
 
 
 def _reap_stale_holder(path: Path) -> bool:
-    """Stop a worker whose supervisor is already gone, then let the caller retry."""
+    """Stop a holder whose supervisor cannot be shown to still be that process.
+
+    A live pid is not enough: the pid may have been reused. The stamp has to
+    carry the same start time. A stamp with no start time is reaped, and the
+    signal goes to the holder recorded in the lock, not to the supervisor pid.
+    """
     try:
         text = path.read_text(encoding="utf-8").split()
     except OSError:
@@ -580,7 +604,8 @@ def _reap_stale_holder(path: Path) -> bool:
         supervisor_pid = int(text[1])
     except ValueError:
         return False
-    if supervisor_pid <= 0 or _pid_alive(supervisor_pid) or worker_pid <= 0:
+    started = text[2] if len(text) >= 3 and text[2] not in {"", "-"} else None
+    if worker_pid <= 1 or _same_supervisor(supervisor_pid, started):
         return False
     for sig in (signal.SIGTERM, signal.SIGKILL):
         try:
@@ -591,6 +616,16 @@ def _reap_stale_holder(path: Path) -> bool:
             return False
         time.sleep(0.05)
     return not _pid_alive(worker_pid)
+
+
+def _same_supervisor(pid: int, started: str | None) -> bool:
+    """True only when ``pid`` is alive and its start time matches ``started``."""
+    if pid <= 1 or not started or not _pid_alive(pid):
+        return False
+    current = _process_start(pid)
+    if current is None:
+        return False
+    return current == started
 
 
 def _bind(path: Path) -> socket.socket:
@@ -619,25 +654,57 @@ def _connect_supervisor(path: Path, timeout: float) -> socket.socket:
     return sock
 
 
-def _arm_parent_death() -> None:
-    """Ask Linux to SIGTERM this process when its parent exits.
+def _arm_supervisor_pipe() -> None:
+    """Exit when the supervisor process closes its end of the pipe.
 
-    ``preexec_fn`` is not used: the supervisor is multithreaded. The worker
-    also watches ``PRAXIS_PRIME_SUPERVISOR_PID``, which covers a worker whose
-    parent is ``systemd-run`` rather than the supervisor.
+    The write end is held by the supervisor process, so a request thread
+    returning does not close it. ``PR_SET_PDEATHSIG`` is not used: that
+    signal is delivered when the thread that forked this process exits.
+    A worker started under ``systemd-run`` does not receive the pipe and
+    uses the supervisor-pid watch instead.
     """
-    if sys.platform != "linux":
+    raw = os.environ.get("PRAXIS_PRIME_SUPERVISOR_PIPE", "").strip()
+    if not raw:
         return
     try:
-        import ctypes
-
-        libc = ctypes.CDLL(None, use_errno=True)
-        if libc.prctl(1, signal.SIGTERM, 0, 0, 0) != 0:
-            return
-    except (AttributeError, OSError):
+        fd = int(raw)
+    except ValueError:
         return
-    if os.getppid() == 1:
-        os.kill(os.getpid(), signal.SIGTERM)
+    # select leaves O_NONBLOCK alone. That flag is shared with the supervisor
+    # and with every other worker that inherited this pipe.
+    state = _pipe_signaled(fd, wait=0)
+    if state is None:
+        return
+    if state:
+        _exit_with_supervisor()
+        return
+
+    def watch() -> None:
+        if _pipe_signaled(fd, wait=None):
+            _exit_with_supervisor()
+
+    threading.Thread(target=watch, name="praxis-supervisor-pipe", daemon=True).start()
+
+
+def _pipe_signaled(fd: int, *, wait: float | None) -> bool | None:
+    """True when the pipe is closed, False while it is open, None if ``fd`` is bad."""
+    try:
+        readable, _, _ = select.select([fd], [], [], wait)
+    except (OSError, ValueError):
+        return None
+    if not readable:
+        return False
+    try:
+        os.read(fd, 1)
+    except OSError:
+        return None
+    return True
+
+
+def _exit_with_supervisor() -> None:
+    os.kill(os.getpid(), signal.SIGTERM)
+    if threading.current_thread() is threading.main_thread():
+        raise SystemExit(128 + signal.SIGTERM)
 
 
 def _supervisor_gone() -> bool:
@@ -649,6 +716,18 @@ def _supervisor_gone() -> bool:
     except ValueError:
         return False
     return pid > 0 and not _pid_alive(pid)
+
+
+def _process_start(pid: int) -> str | None:
+    """``/proc/<pid>/stat`` field 22 (starttime), or None when it cannot be read."""
+    if pid <= 0:
+        return None
+    try:
+        text = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+        fields = text.rsplit(")", 1)[1].split()
+        return fields[19]
+    except (IndexError, OSError):
+        return None
 
 
 def _pid_alive(pid: int) -> bool:

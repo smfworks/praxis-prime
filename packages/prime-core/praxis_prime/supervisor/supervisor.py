@@ -11,8 +11,10 @@ through exponential backoff before the next start.
 from __future__ import annotations
 
 import os
+import secrets
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -39,6 +41,8 @@ from praxis_prime.supervisor.ipc import (
 from praxis_prime.supervisor.redact import redact_value
 
 Clock = Callable[[], float]
+# Linux sun_path is 108 bytes including the NUL. Stay under that.
+_SOCKET_PATH_MAX = 100
 _DROPPED_ENV = frozenset(
     {
         "PRAXIS_PRIME_WORKER_MASTER",
@@ -97,6 +101,10 @@ class Supervisor:
     _migrated: bool = False
     _sock_tag: str = ""
     _socket_dir: Path | None = None
+    _pipe_read: int = field(default=-1, repr=False)
+    _pipe_write: int = field(default=-1, repr=False)
+    _supervisor_token: str = field(default="", repr=False)
+    _supervisor_start: str = field(default="", repr=False)
 
     def __post_init__(self) -> None:
         self.data_root = Path(self.data_root)
@@ -107,6 +115,13 @@ class Supervisor:
         os.chmod(self.runtime_dir, 0o700)
         self._sock_tag = uuid.uuid4().hex[:8]
         self._master = credentials.load_or_create_master(self.master_path)
+        read_fd, write_fd = os.pipe()
+        os.set_inheritable(read_fd, False)
+        os.set_inheritable(write_fd, False)
+        self._pipe_read = read_fd
+        self._pipe_write = write_fd
+        self._supervisor_token = secrets.token_hex(16)
+        self._supervisor_start = _process_start(os.getpid()) or ""
 
     @property
     def master_path(self) -> Path:
@@ -124,8 +139,12 @@ class Supervisor:
         """Listen for worker calls and watch process health."""
         with self._lock:
             self._migrated = migrate.migrate_install(self.data_root) or self._migrated
+            self._socket_directory()
             for name in self.profiles():
-                self._reserve_socket(name)
+                try:
+                    self._reserve_socket(name)
+                except OSError:
+                    continue
             if self._control is None:
                 self._control = _bind_unix(self.control_path)
                 self._control_thread = threading.Thread(
@@ -149,6 +168,7 @@ class Supervisor:
             names = list(self._slots)
         for name in names:
             self.stop(name, reason="shutdown")
+        self._close_supervisor_pipe()
         control = self._control
         self._control = None
         if control is not None:
@@ -164,6 +184,10 @@ class Supervisor:
         elif directory is not None:
             for name in self.profiles():
                 (directory / f"{self._sock_tag}-{name}.sock").unlink(missing_ok=True)
+        try:
+            (self.runtime_dir / "socket-dir").unlink(missing_ok=True)
+        except OSError:
+            pass
 
     def profiles(self) -> list[str]:
         return list_profiles(self.data_root)
@@ -398,6 +422,8 @@ class Supervisor:
         env["PRAXIS_PRIME_WORKER_PROFILE"] = profile
         env["PRAXIS_PRIME_WORKER_DATA"] = str(self.data_root)
         env["PRAXIS_PRIME_SUPERVISOR_PID"] = str(os.getpid())
+        env["PRAXIS_PRIME_SUPERVISOR_START"] = self._supervisor_start
+        env["PRAXIS_PRIME_SUPERVISOR_TOKEN"] = self._supervisor_token
         env.pop("PRAXIS_PRIME_WORKER_MASTER", None)
         return env
 
@@ -433,14 +459,21 @@ class Supervisor:
         log_path = self.state_dir / f"worker-{profile}.log"
         slot.log_path = log_path
         handle = _open_log(log_path)
+        env = self.worker_env(profile)
+        pass_fds: tuple[int, ...] = ()
+        # systemd-run does not forward an extra fd. The pid watch covers that path.
+        if not self.use_slice and self._pipe_read >= 0:
+            env["PRAXIS_PRIME_SUPERVISOR_PIPE"] = str(self._pipe_read)
+            pass_fds = (self._pipe_read,)
         try:
             proc = subprocess.Popen(
                 self._argv(profile, generation),
                 stdin=subprocess.PIPE,
                 stdout=handle,
                 stderr=handle,
-                env=self.worker_env(profile),
+                env=env,
                 start_new_session=True,
+                pass_fds=pass_fds,
             )
         finally:
             handle.close()
@@ -737,14 +770,51 @@ class Supervisor:
     def _socket_directory(self) -> Path:
         if self._socket_dir is not None:
             return self._socket_dir
-        sample = self.runtime_dir / f"{self._sock_tag}-supervisor.sock"
-        if len(os.fsencode(sample)) <= 100:
-            self._socket_dir = self.runtime_dir
+        previous = _pointer_target(self.runtime_dir)
+        chosen = self._choose_socket_directory()
+        self._socket_dir = chosen
+        _sweep_stale_socket_dirs(chosen, previous)
+        _remember_socket_dir(self.runtime_dir, chosen)
+        return chosen
+
+    def _choose_socket_directory(self) -> Path:
+        """Pick a directory where the sockets we will bind actually fit.
+
+        The choice includes every current profile and a maximum-length
+        profile id, not only the supervisor socket. When neither directory
+        can hold a maximum-length id, a directory that holds the profiles
+        that exist is kept. One profile that still does not fit is skipped
+        by ``start`` and does not stop the others.
+        """
+        tag = self._sock_tag
+        required = ["supervisor", *self.profiles()]
+        longest = "p" + ("x" * 63)
+        considered = list(dict.fromkeys([*required, longest]))
+        if _names_fit(self.runtime_dir, tag, considered):
             return self.runtime_dir
-        directory = Path(tempfile.mkdtemp(prefix="praxis-prime-socks-"))
-        os.chmod(directory, 0o700)
-        self._socket_dir = directory
-        return directory
+        fallback = Path(tempfile.mkdtemp(prefix="praxis-prime-socks-"))
+        os.chmod(fallback, 0o700)
+        if _names_fit(fallback, tag, considered):
+            return fallback
+        if _names_fit(self.runtime_dir, tag, required):
+            shutil.rmtree(fallback, ignore_errors=True)
+            return self.runtime_dir
+        if len(os.fsencode(fallback)) <= len(os.fsencode(self.runtime_dir)):
+            return fallback
+        shutil.rmtree(fallback, ignore_errors=True)
+        return self.runtime_dir
+
+    def _close_supervisor_pipe(self) -> None:
+        """Close the process-lifetime pipe after workers have been stopped."""
+        for name in ("_pipe_write", "_pipe_read"):
+            fd = getattr(self, name, -1)
+            if not isinstance(fd, int) or fd < 0:
+                continue
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            setattr(self, name, -1)
 
     def _socket_file(self, name: str) -> Path:
         return self._socket_directory() / f"{self._sock_tag}-{name}.sock"
@@ -797,3 +867,136 @@ def _bind_unix(path: Path) -> socket.socket:
     sock.listen(16)
     sock.settimeout(0.5)
     return sock
+
+
+def _process_start(pid: int) -> str | None:
+    """``/proc/<pid>/stat`` field 22 (starttime), or None when it cannot be read."""
+    if pid <= 0:
+        return None
+    try:
+        text = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+        fields = text.rsplit(")", 1)[1].split()
+        return fields[19]
+    except (IndexError, OSError):
+        return None
+
+
+def _names_fit(directory: Path, tag: str, names: list[str]) -> bool:
+    for name in names:
+        path = directory / f"{tag}-{name}.sock"
+        try:
+            encoded = os.fsencode(path)
+        except OSError:
+            return False
+        if len(encoded) > _SOCKET_PATH_MAX:
+            return False
+    return True
+
+
+def _pointer_target(runtime_dir: Path) -> Path | None:
+    pointer = runtime_dir / "socket-dir"
+    try:
+        text = pointer.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    if not text:
+        return None
+    return Path(text)
+
+
+def _remember_socket_dir(runtime_dir: Path, chosen: Path) -> None:
+    pointer = runtime_dir / "socket-dir"
+    if chosen == runtime_dir:
+        pointer.unlink(missing_ok=True)
+        return
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(pointer, flags, 0o600)
+    try:
+        os.write(fd, (str(chosen) + "\n").encode())
+    finally:
+        os.close(fd)
+    os.chmod(pointer, 0o600)
+
+
+def _sweep_stale_socket_dirs(current: Path, previous: Path | None) -> None:
+    """Remove private socket directories whose supervisor socket is not listening."""
+    temp = Path(tempfile.gettempdir())
+    candidates: list[Path] = []
+    try:
+        for name in os.listdir(temp):
+            if name.startswith("praxis-prime-socks-"):
+                candidates.append(temp / name)
+    except OSError:
+        return
+    if previous is not None:
+        candidates.append(previous)
+    seen: set[str] = set()
+    for entry in candidates:
+        try:
+            key = str(entry.resolve())
+        except OSError:
+            key = str(entry)
+        if key in seen:
+            continue
+        seen.add(key)
+        if _same_dir(entry, current):
+            continue
+        if not _owned_private_dir(entry, temp):
+            continue
+        if _supervisor_socket_accepts(entry):
+            continue
+        shutil.rmtree(entry, ignore_errors=True)
+
+
+def _same_dir(left: Path, right: Path) -> bool:
+    try:
+        return left.resolve() == right.resolve()
+    except OSError:
+        return False
+
+
+def _owned_private_dir(entry: Path, temp: Path) -> bool:
+    try:
+        info = entry.lstat()
+    except OSError:
+        return False
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        return False
+    if info.st_uid != os.getuid():
+        return False
+    try:
+        resolved = entry.resolve()
+        root = temp.resolve()
+    except OSError:
+        return False
+    if resolved == root or not resolved.is_relative_to(root):
+        return False
+    return resolved.name.startswith("praxis-prime-socks-")
+
+
+def _supervisor_socket_accepts(directory: Path) -> bool:
+    try:
+        socks = [path for path in directory.iterdir() if path.name.endswith("-supervisor.sock")]
+    except OSError:
+        return True
+    return any(_unix_accepts(path) for path in socks)
+
+
+def _unix_accepts(path: Path) -> bool:
+    try:
+        if path.lstat() and stat.S_ISLNK(path.lstat().st_mode):
+            return True
+    except OSError:
+        return True
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.settimeout(0.2)
+    try:
+        sock.connect(str(path))
+    except OSError:
+        return False
+    else:
+        return True
+    finally:
+        sock.close()

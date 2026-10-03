@@ -162,6 +162,18 @@ def _handle(
         return {"model": "stub", "profile": profile}
     if method == "model.set":
         return {"model": str(params.get("spec", ""))}
+    if method == "session.owner":
+        wanted = os.environ.get("STUB_SESSION_ID", "")
+        session_id = str(params.get("sessionId", ""))
+        owner_profile = os.environ.get("STUB_SESSION_PROFILE", "")
+        if wanted and session_id == wanted and (not owner_profile or owner_profile == profile):
+            return {
+                "owner": {
+                    "account": os.environ.get("STUB_SESSION_ACCOUNT", "acct"),
+                    "profile": profile,
+                }
+            }
+        return {"owner": None}
     return {}
 
 

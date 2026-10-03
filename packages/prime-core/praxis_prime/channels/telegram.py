@@ -195,6 +195,8 @@ class PairingStore:
         """
         rows = self.bindings()
         if rows:
+            if not requester:
+                return None
             matches = []
             for row in rows:
                 if profile and row.get("profile") != profile:

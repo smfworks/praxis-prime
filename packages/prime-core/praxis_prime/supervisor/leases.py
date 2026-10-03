@@ -2,7 +2,8 @@
 
 A crashed worker leaves the lease in place. After it expires the next
 start may retry once. A second expiry does not start another run, and a
-live lease blocks a second runner.
+live lease blocks a second runner. The worker renews a lease it still
+holds so a run longer than the interval is not treated as finished.
 """
 
 from __future__ import annotations
@@ -64,6 +65,27 @@ class LeaseStore:
             return "skip"
         self._write(routine_id, owner, now + self.ttl, 1)
         return "retry"
+
+    def renew(self, routine_id: str, owner: str) -> bool:
+        """Extend a lease this owner still holds. Return False when it was lost.
+
+        ``attempts`` is left as it is. A missing row, a different owner, an
+        expiry, or a lease that ends further ahead than a fresh one is not
+        extended.
+        """
+        now = self.clock()
+        row = self.db.conn.execute(
+            "SELECT owner, lease_until, attempts FROM routine_leases WHERE routine_id = ?",
+            (routine_id,),
+        ).fetchone()
+        if row is None or str(row[0]) != owner:
+            return False
+        until = float(row[1])
+        attempts = int(row[2])
+        if until <= now or until > now + self.ttl:
+            return False
+        self._write(routine_id, owner, now + self.ttl, attempts)
+        return True
 
     def release(self, routine_id: str) -> None:
         """Drop the lease after a clean finish so the next schedule is fresh."""

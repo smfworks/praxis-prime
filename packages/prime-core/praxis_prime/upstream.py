@@ -99,7 +99,9 @@ def iter_bounded(
     if limit is None:
         limit = MAX_UPSTREAM_BYTES
     total = 0
-    pending = b""
+    pending = bytearray()
+    newline = b"\n"
+    overlap = len(newline) - 1
     while True:
         try:
             block = _read_some(response)
@@ -107,13 +109,17 @@ def iter_bounded(
             raise TimeoutError("upstream deadline exceeded") from exc
         if not block:
             break
+        # Search the new bytes plus a delimiter-sized overlap. A short read
+        # must not walk the prefix that was already scanned.
+        start = max(0, len(pending) - overlap)
         pending += block
         while True:
-            split = pending.find(b"\n")
+            split = pending.find(newline, start)
             if split < 0:
                 break
-            line = pending[: split + 1]
-            pending = pending[split + 1 :]
+            line = bytes(pending[: split + 1])
+            del pending[: split + 1]
+            start = 0
             total += len(line)
             if total > limit:
                 raise ValueError("upstream body exceeds 4MB")
@@ -124,4 +130,4 @@ def iter_bounded(
         total += len(pending)
         if total > limit:
             raise ValueError("upstream body exceeds 4MB")
-        yield pending
+        yield bytes(pending)

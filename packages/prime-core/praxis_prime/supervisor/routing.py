@@ -104,19 +104,38 @@ class RoutingHost:
         )
 
     def session_owner(self, session_id: str) -> tuple[str, str] | None:
+        """Account and profile for ``session_id``.
+
+        Running workers are asked first. Idle profiles are started only
+        when none of those workers has the session.
+        """
+        asked: set[str] = set()
         for profile in self.supervisor.running():
-            try:
-                result = self.supervisor.call(
-                    profile,
-                    "session.owner",
-                    {"sessionId": session_id},
-                    timeout=5,
-                )
-            except (IpcError, WorkerUnavailable, OSError):
+            asked.add(profile)
+            found = self._owner_on(profile, session_id)
+            if found is not None:
+                return found
+        for profile in self.supervisor.profiles():
+            if profile in asked:
                 continue
-            owner = result.get("owner")
-            if isinstance(owner, dict) and owner.get("account"):
-                return str(owner.get("account", "")), str(owner.get("profile", "") or profile)
+            found = self._owner_on(profile, session_id)
+            if found is not None:
+                return found
+        return None
+
+    def _owner_on(self, profile: str, session_id: str) -> tuple[str, str] | None:
+        try:
+            result = self.supervisor.call(
+                profile,
+                "session.owner",
+                {"sessionId": session_id},
+                timeout=5,
+            )
+        except (IpcError, WorkerUnavailable, OSError):
+            return None
+        owner = result.get("owner")
+        if isinstance(owner, dict) and owner.get("account"):
+            return str(owner.get("account", "")), str(owner.get("profile", "") or profile)
         return None
 
     def status(self) -> dict[str, object]:
