@@ -11,8 +11,10 @@ The client secret is read from the secrets file. It is not stored in
 ``config.toml`` and it is not written to the audit log.
 
 An OIDC sign-in is one factor. It does not mint a step-up token. When TOTP
-is confirmed, the session still waits for that second factor. Step-up
-remains a password plus TOTP, or a passkey.
+is confirmed, the session still waits for that second factor, and a role
+mapped from the provider is applied only after that code succeeds. Step-up
+remains a password plus TOTP, or a passkey. The PKCE verifier stays in
+process memory and is dropped when the callback uses it or it expires.
 
 docs/blueprint-addendum-2026-09.md §4.3 and §5.4. M1e.
 """
@@ -23,9 +25,11 @@ import base64
 import hashlib
 import hmac
 import http.client
+import ipaddress
 import json
 import re
 import secrets
+import socket
 import sqlite3
 import ssl
 import threading
@@ -63,17 +67,61 @@ ALLOWED_ALGS = (
     "PS512",
 )
 CLOCK_SKEW_SECONDS = 60
-TXN_TTL_SECONDS = 10 * 60
+# A pending sign-in occupies a slot only briefly. Spent nonces are remembered
+# longer so a captured nonce cannot be replayed inside the old window.
+TXN_TTL_SECONDS = 2 * 60
+NONCE_TTL_SECONDS = 10 * 60
 MFA_TTL_SECONDS = 5 * 60
 _PENDING_CAP = 100
+_PENDING_PER_CLIENT = 8
 _HTTP_TIMEOUT = 5
+_JWKS_REFRESH_SECONDS = 30.0
+_DISCOVERY_LIMIT = 65_536
+_TOKEN_LIMIT = 65_536
+_JWKS_LIMIT = 262_144
 OIDC_COOKIE = "pp_oidc"
 MFA_COOKIE = "pp_mfa"
+CLIENT_COOKIE = "pp_client"
+CLIENT_COOKIE_TTL = 30 * 24 * 60 * 60
 UNUSABLE_PASSWORD = "!"
 _PROVIDER_ID = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 _LOOPBACK = frozenset({"127.0.0.1", "localhost"})
 _RANK = {"viewer": 1, "auditor": 2, "operator": 3, "admin": 4}
 _ROLES = frozenset(_RANK)
+_PRIVILEGED = frozenset({"owner", "admin"})
+# Fail closed on anything that is not a global unicast address. The explicit
+# networks cover the ranges named in the review even if a Python release
+# classifies one of them differently. IPv4-mapped IPv6 is checked as IPv4.
+_BLOCKED_V4 = tuple(
+    ipaddress.ip_network(item)
+    for item in (
+        "0.0.0.0/8",
+        "10.0.0.0/8",
+        "100.64.0.0/10",
+        "127.0.0.0/8",
+        "169.254.0.0/16",
+        "172.16.0.0/12",
+        "192.0.0.0/24",
+        "192.0.2.0/24",
+        "192.168.0.0/16",
+        "198.18.0.0/15",
+        "198.51.100.0/24",
+        "203.0.113.0/24",
+        "224.0.0.0/4",
+        "240.0.0.0/4",
+    )
+)
+_BLOCKED_V6 = tuple(
+    ipaddress.ip_network(item)
+    for item in (
+        "::/128",
+        "::1/128",
+        "2001:db8::/32",
+        "fc00::/7",
+        "fe80::/10",
+        "ff00::/8",
+    )
+)
 
 ENTRA_ROLE_CLAIM = "roles"
 ENTRA_ROLE_MAP = {
@@ -132,6 +180,7 @@ class Completed:
     kind: str
     account: Account
     provider_id: str
+    mapped_role: str = ""
 
 
 class _Cache:
@@ -159,12 +208,61 @@ class _Cache:
 
 _DISCOVERY = _Cache(600)
 _JWKS = _Cache(3600)
+_jwks_lock = threading.Lock()
+_jwks_forced: dict[str, float] = {}
+# state hash -> (unix expiry, verifier). Not written to accounts.db, so a
+# checkpoint or a WAL frame cannot keep the verifier after it is forgotten.
+_verifiers: dict[str, tuple[float, str]] = {}
+_verifier_lock = threading.Lock()
 
 
 def clear_caches() -> None:
-    """Drop cached discovery documents and key sets."""
+    """Drop cached discovery documents, key sets, and in-memory verifiers."""
     _DISCOVERY.clear()
     _JWKS.clear()
+    with _jwks_lock:
+        _jwks_forced.clear()
+    with _verifier_lock:
+        _verifiers.clear()
+
+
+def forget_pending_verifier(state: str) -> None:
+    """Drop one PKCE verifier. A missing verifier cannot be exchanged."""
+    if not isinstance(state, str) or not state:
+        return
+    with _verifier_lock:
+        _verifiers.pop(_hash(state), None)
+
+
+def _remember_verifier(state_hash: str, verifier: str, expires_at: float) -> None:
+    with _verifier_lock:
+        _drop_expired_verifiers()
+        _verifiers[state_hash] = (expires_at, verifier)
+
+
+def _pop_verifier(state_hash: str) -> str:
+    with _verifier_lock:
+        _drop_expired_verifiers()
+        item = _verifiers.pop(state_hash, None)
+    if item is None:
+        return ""
+    return item[1]
+
+
+def _forget_verifier_hashes(hashes: list[str]) -> None:
+    if not hashes:
+        return
+    with _verifier_lock:
+        for item in hashes:
+            _verifiers.pop(item, None)
+
+
+def _drop_expired_verifiers(now: float | None = None) -> None:
+    """Caller holds ``_verifier_lock``."""
+    moment = time.time() if now is None else now
+    stale = [key for key, (expires, _value) in _verifiers.items() if expires <= moment]
+    for key in stale:
+        _verifiers.pop(key, None)
 
 
 def binding_cookie(token: str, *, max_age: int) -> str:
@@ -196,6 +294,18 @@ def mfa_cookie(token: str, *, max_age: int = MFA_TTL_SECONDS) -> str:
 
 def clear_mfa_cookie() -> str:
     return f"{MFA_COOKIE}=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0"
+
+
+def client_cookie(token: str, *, max_age: int = CLIENT_COOKIE_TTL) -> str:
+    """Stable browser key for the pending-sign-in cap. Not a session."""
+    if max_age <= 0 or not token:
+        return (
+            f"{CLIENT_COOKIE}=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0"
+        )
+    return (
+        f"{CLIENT_COOKIE}={token}; HttpOnly; Secure; SameSite=Lax; "
+        f"Path=/; Max-Age={max_age}"
+    )
 
 
 def loopback_redirect(host_header: str, port: int) -> str:
@@ -459,8 +569,14 @@ def begin(
     kind: str,
     account_id: str = "",
     session_id: str = "",
+    client_key: str = "",
 ) -> tuple[str, str]:
-    """Start a transaction. Returns the authorization URL and the binding token."""
+    """Start a transaction. Returns the authorization URL and the binding token.
+
+    ``client_key`` is the browser session id or the ``pp_client`` cookie.
+    One client can hold only a few unused sign-ins, so it cannot fill the
+    global pool. The PKCE verifier is kept in memory, not in the database.
+    """
     if kind not in {"login", "link"}:
         raise OidcError("bad_request")
     if not redirect_uri.startswith("http://127.0.0.1:") and not redirect_uri.startswith(
@@ -481,13 +597,21 @@ def begin(
     binding = secrets.token_urlsafe(32)
     expires = (datetime.now(UTC).timestamp()) + TXN_TTL_SECONDS
     expires_at = datetime.fromtimestamp(expires, UTC).isoformat(timespec="seconds")
+    client = _client_key(client_key)
+    state_hash = _hash(state)
     with store._lock:
         store.conn.execute("BEGIN IMMEDIATE")
         try:
-            store.conn.execute(
-                "DELETE FROM oidc_transactions WHERE expires_at <= ?",
-                (_now(),),
-            )
+            _sweep_pending(store)
+            mine = store.conn.execute(
+                """
+                SELECT COUNT(*) AS n FROM oidc_transactions
+                WHERE used = 0 AND client_key = ?
+                """,
+                (client,),
+            ).fetchone()
+            if mine is not None and int(mine["n"]) >= _PENDING_PER_CLIENT:
+                raise OidcError("busy", status=429)
             pending = store.conn.execute(
                 "SELECT COUNT(*) AS n FROM oidc_transactions WHERE used = 0"
             ).fetchone()
@@ -498,27 +622,28 @@ def begin(
                 INSERT INTO oidc_transactions (
                     state_hash, binding_hash, provider_id, nonce_hash, verifier,
                     kind, account_id, session_id, redirect_uri, expires_at,
-                    used, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
+                    used, created_at, client_key
+                ) VALUES (?, ?, ?, ?, '', ?, ?, ?, ?, ?, 0, ?, ?)
                 """,
                 (
-                    _hash(state),
+                    state_hash,
                     _hash(binding),
                     provider.id,
                     _hash(nonce),
-                    verifier,
                     kind,
                     account_id,
                     session_id,
                     redirect_uri,
                     expires_at,
                     _now(),
+                    client,
                 ),
             )
             store.conn.commit()
         except Exception:
             store.conn.rollback()
             raise
+    _remember_verifier(state_hash, verifier, expires)
     query = urlencode(
         {
             "response_type": "code",
@@ -539,6 +664,7 @@ def abandon(store: AccountStore, state: str) -> None:
     """Close a transaction when the provider returned an error."""
     if not isinstance(state, str) or not state or len(state) > 256:
         return
+    digest = _hash(state)
     with store._lock:
         store.conn.execute(
             """
@@ -546,9 +672,10 @@ def abandon(store: AccountStore, state: str) -> None:
             SET used = 1, verifier = ''
             WHERE state_hash = ? AND used = 0
             """,
-            (_hash(state),),
+            (digest,),
         )
         store.conn.commit()
+    _forget_verifier_hashes([digest])
 
 
 def transaction_kind(store: AccountStore, state: str) -> tuple[str, str]:
@@ -595,7 +722,13 @@ def complete(
         account = _link_callback(store, provider, claims, transaction)
         return Completed(kind="link", account=account, provider_id=provider.id)
     account = _login_account(store, provider, claims)
-    return Completed(kind="login", account=account, provider_id=provider.id)
+    mapped = _mapped_role(provider, claims) or ""
+    return Completed(
+        kind="login",
+        account=account,
+        provider_id=provider.id,
+        mapped_role=mapped,
+    )
 
 
 def discover(issuer: str, *, dev_loopback: bool, force: bool = False) -> _Discovery:
@@ -607,7 +740,7 @@ def discover(issuer: str, *, dev_loopback: bool, force: bool = False) -> _Discov
         if isinstance(cached, _Discovery):
             return cached
     url = normalized + "/.well-known/openid-configuration"
-    document = _get_json(url, allow_http=dev_loopback, limit=65_536)
+    document = _get_json(url, allow_http=dev_loopback, limit=_DISCOVERY_LIMIT)
     parsed = _parse_discovery(document, normalized, allow_http=dev_loopback)
     _DISCOVERY.put(normalized, parsed)
     return parsed
@@ -620,7 +753,6 @@ def _take(store: AccountStore, state: str, binding: str) -> _Transaction:
         raise OidcError("bad_binding")
     state_hash = _hash(state)
     binding_hash = _hash(binding)
-    verifier = ""
     taken: sqlite3.Row | None = None
     with store._lock:
         store.conn.execute("BEGIN IMMEDIATE")
@@ -645,13 +777,13 @@ def _take(store: AccountStore, state: str, binding: str) -> _Transaction:
                 )
                 store.conn.commit()
                 committed = True
+                _forget_verifier_hashes([state_hash])
                 raise OidcError("bad_state")
             if not hmac.compare_digest(str(row["binding_hash"]), binding_hash):
                 # A wrong cookie must not burn the victim's transaction.
                 store.conn.commit()
                 committed = True
                 raise OidcError("bad_binding")
-            verifier = str(row["verifier"])
             cursor = store.conn.execute(
                 """
                 UPDATE oidc_transactions
@@ -672,6 +804,7 @@ def _take(store: AccountStore, state: str, binding: str) -> _Transaction:
         except Exception:
             store.conn.rollback()
             raise
+    verifier = _pop_verifier(state_hash)
     if taken is None or not verifier:
         raise OidcError("missing_pkce")
     return _Transaction(
@@ -720,7 +853,7 @@ def _exchange(
             "Accept": "application/json",
         },
         allow_http=provider.dev_loopback,
-        limit=65_536,
+        limit=_TOKEN_LIMIT,
     )
     try:
         payload = json.loads(raw)
@@ -779,7 +912,12 @@ def _jwks(provider: Provider, document: _Discovery, *, force: bool) -> KeySet:
         cached = _JWKS.get(document.jwks)
         if isinstance(cached, KeySet):
             return cached
-    payload = _get_json(document.jwks, allow_http=provider.dev_loopback, limit=262_144)
+    elif not _jwks_refresh_allowed(provider.id):
+        cached = _JWKS.get(document.jwks)
+        if isinstance(cached, KeySet):
+            return cached
+        raise OidcError("bad_signature")
+    payload = _get_json(document.jwks, allow_http=provider.dev_loopback, limit=_JWKS_LIMIT)
     if not isinstance(payload, dict) or not isinstance(payload.get("keys"), list):
         raise OidcError("bad_signature")
     try:
@@ -792,7 +930,7 @@ def _jwks(provider: Provider, document: _Discovery, *, force: bool) -> KeySet:
 
 def _check_claims(claims: Mapping[str, object], provider: Provider, *, nonce_hash: str) -> None:
     iss = claims.get("iss")
-    if not isinstance(iss, str) or normalize_issuer(iss) != provider.issuer:
+    if not isinstance(iss, str) or iss != provider.issuer:
         raise OidcError("bad_issuer")
     _check_audience(claims, provider.client_id)
     _check_time(claims)
@@ -840,7 +978,7 @@ def _check_time(claims: Mapping[str, object]) -> None:
 def _spend_nonce(store: AccountStore, nonce: str) -> None:
     digest = _hash(nonce)
     expires = datetime.fromtimestamp(
-        datetime.now(UTC).timestamp() + TXN_TTL_SECONDS,
+        datetime.now(UTC).timestamp() + NONCE_TTL_SECONDS,
         UTC,
     ).isoformat(timespec="seconds")
     with store._lock:
@@ -886,7 +1024,21 @@ def _login_account(
         except Exception:
             store.conn.rollback()
             raise
-    return _apply_role(store, account, provider, claims)
+    return account
+
+
+def apply_mapped_role(store: AccountStore, account: Account, role: str) -> Account:
+    """Apply a provider role after sign-in has finished.
+
+    An account that still needs TOTP keeps its current role. The owner role
+    is never granted or changed.
+    """
+    if not role or role == account.role or account.role == "owner" or role not in _ROLES:
+        return account
+    try:
+        return store.set_server_role(account.username, role)
+    except AccountError:
+        return account
 
 
 def _allowlist_account(
@@ -900,21 +1052,24 @@ def _allowlist_account(
         raise OidcError("not_linked")
     if claims.get("email_verified") is not True:
         raise OidcError("email_unverified")
-    mail = _email(claims.get("email"))
-    if not mail or mail.casefold() not in provider.email_allowlist:
+    raw_mail = claims.get("email")
+    mail = _ascii_email(raw_mail)
+    if not mail or mail not in provider.email_allowlist:
         raise OidcError("email_not_allowed")
     rows = store.conn.execute(
-        "SELECT id, email, status FROM accounts WHERE email != ''"
+        "SELECT id, email, status, role FROM accounts WHERE email != ''"
     ).fetchall()
     matches = [
         row
         for row in rows
-        if str(row["email"]).casefold() == mail.casefold() and str(row["status"]) == "active"
+        if _ascii_email(row["email"]) == mail and str(row["status"]) == "active"
     ]
     if len(matches) > 1:
         raise OidcError("email_ambiguous")
     if len(matches) == 1:
         account = _active_account(store.conn, str(matches[0]["id"]))
+        if account.role in _PRIVILEGED:
+            raise OidcError("privileged_link")
         _insert_identity(
             store.conn,
             issuer=provider.issuer,
@@ -960,28 +1115,13 @@ def _link_callback(
                 subject=subject,
                 account_id=account.id,
                 provider_id=provider.id,
-                email=_email(claims.get("email")),
+                email=_ascii_email(claims.get("email")),
             )
             store.conn.commit()
         except Exception:
             store.conn.rollback()
             raise
     return account
-
-
-def _apply_role(
-    store: AccountStore,
-    account: Account,
-    provider: Provider,
-    claims: Mapping[str, object],
-) -> Account:
-    chosen = _mapped_role(provider, claims)
-    if chosen is None or chosen == account.role or account.role == "owner":
-        return account
-    try:
-        return store.set_server_role(account.username, chosen)
-    except AccountError:
-        return account
 
 
 def _mapped_role(provider: Provider, claims: Mapping[str, object]) -> str | None:
@@ -1056,7 +1196,7 @@ def _insert_external_account(conn: sqlite3.Connection, mail: str) -> Account:
 
 
 def _username_for(conn: sqlite3.Connection, mail: str) -> str:
-    local = mail.split("@", 1)[0].casefold()
+    local = mail.split("@", 1)[0].lower()
     cleaned = "".join(char if char.isalnum() or char in "._-" else "-" for char in local)
     cleaned = cleaned.strip("._-")
     if not cleaned or not cleaned[0].isalpha():
@@ -1179,7 +1319,7 @@ def _parse_discovery(document: object, issuer: str, *, allow_http: bool) -> _Dis
     if not isinstance(document, dict):
         raise OidcError("discovery_endpoint")
     got = document.get("issuer")
-    if not isinstance(got, str) or normalize_issuer(got) != issuer:
+    if not isinstance(got, str) or got != issuer:
         raise OidcError("discovery_issuer")
     authorization = document.get("authorization_endpoint")
     token = document.get("token_endpoint")
@@ -1218,25 +1358,35 @@ def _request(
     if parts is None:
         raise OidcError("url_rejected")
     scheme, host, port, path = parts
+    # Resolve before connecting. Any blocked address refuses the whole set,
+    # and the socket uses the address that was checked so a later DNS answer
+    # cannot point the same name at a private host.
+    addresses = _resolve(host, port)
+    if scheme == "http":
+        if any(not _is_loopback(item) for item in addresses):
+            raise OidcError("url_rejected")
+    elif any(_address_blocked(item) for item in addresses):
+        raise OidcError("url_rejected")
+    pinned = addresses[0]
+    deadline = time.monotonic() + _HTTP_TIMEOUT
     connection: http.client.HTTPConnection | None = None
     response: http.client.HTTPResponse | None = None
     payload = b""
     try:
-        if scheme == "https":
-            connection = http.client.HTTPSConnection(
-                host,
-                port,
-                timeout=_HTTP_TIMEOUT,
-                context=ssl.create_default_context(),
-            )
-        else:
-            connection = http.client.HTTPConnection(host, port, timeout=_HTTP_TIMEOUT)
+        tls = ssl.create_default_context() if scheme == "https" else None
+        connection = _BoundConnection(
+            host,
+            port,
+            timeout=_remaining(deadline),
+            pinned=pinned,
+            tls=tls,
+        )
         connection.request(method, path, body=body, headers=headers)
         response = connection.getresponse()
         if response.status in {301, 302, 303, 307, 308}:
-            response.read(1024)
+            _read_bounded(response, connection, 1024, deadline)
             raise OidcError("redirect_refused")
-        payload = response.read(limit + 1)
+        payload = _read_bounded(response, connection, limit + 1, deadline)
     except OidcError:
         raise
     except (OSError, http.client.HTTPException, TimeoutError) as exc:
@@ -1249,6 +1399,88 @@ def _request(
     if response is None or response.status != 200:
         raise OidcError("provider_http")
     return payload
+
+
+def _remaining(deadline: float) -> float:
+    left = deadline - time.monotonic()
+    if left <= 0:
+        raise OidcError("provider_unreachable")
+    return left
+
+
+def _read_bounded(
+    response: http.client.HTTPResponse,
+    connection: http.client.HTTPConnection,
+    limit: int,
+    deadline: float,
+) -> bytes:
+    """Read at most ``limit`` bytes, and stop when the overall deadline passes.
+
+    A per-read socket timeout resets every time a byte arrives, so a slow
+    trickle can hold the caller for much longer than ``_HTTP_TIMEOUT``.
+    """
+    payload = bytearray()
+    while len(payload) < limit:
+        # HTTP/1.0 responses clear HTTPConnection.sock after the headers, so
+        # the timeout has to be set on the socket the body is still reading.
+        # read1 returns one recv. A large read() would keep going while bytes
+        # trickle in and ignore this deadline.
+        sock = _body_socket(response, connection)
+        if sock is not None:
+            sock.settimeout(_remaining(deadline))
+        else:
+            _remaining(deadline)
+        try:
+            chunk = response.read1(min(8192, limit - len(payload)))
+        except TimeoutError as exc:
+            raise OidcError("provider_unreachable") from exc
+        if not chunk:
+            break
+        payload.extend(chunk)
+    return bytes(payload)
+
+
+def _body_socket(
+    response: http.client.HTTPResponse,
+    connection: http.client.HTTPConnection,
+) -> socket.socket | None:
+    if connection.sock is not None:
+        return connection.sock
+    raw: object = getattr(response, "fp", None)
+    while raw is not None:
+        sock = getattr(raw, "_sock", None)
+        if isinstance(sock, socket.socket):
+            return sock
+        raw = getattr(raw, "raw", None)
+    return None
+
+
+class _BoundConnection(http.client.HTTPConnection):
+    """Connect to the address that was checked, and keep the URL host for TLS."""
+
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        *,
+        timeout: float,
+        pinned: str,
+        tls: ssl.SSLContext | None,
+    ) -> None:
+        super().__init__(host, port, timeout=timeout)
+        self._pinned = pinned
+        self._tls = tls
+
+    def connect(self) -> None:
+        raw = socket.create_connection((self._pinned, self.port), self.timeout)
+        if self._tls is None:
+            self.sock = raw
+            return
+        try:
+            self.sock = self._tls.wrap_socket(raw, server_hostname=self.host)
+        except Exception:
+            raw.close()
+            raise
 
 
 def _url_allowed(url: str, *, allow_http: bool) -> tuple[str, str, int, str] | None:
@@ -1315,6 +1547,96 @@ def _hash(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
+def _client_key(value: str) -> str:
+    """Hash the browser key. An empty key shares one anonymous bucket."""
+    if not isinstance(value, str) or not value or len(value) > 256:
+        value = "\0anonymous"
+    return _hash("oidc-client:" + value)
+
+
+def _sweep_pending(store: AccountStore) -> None:
+    """Delete expired pending rows and their in-memory verifiers.
+
+    The caller holds the account lock and an open write transaction.
+    """
+    rows = store.conn.execute(
+        "SELECT state_hash FROM oidc_transactions WHERE expires_at <= ?",
+        (_now(),),
+    ).fetchall()
+    store.conn.execute(
+        "DELETE FROM oidc_transactions WHERE expires_at <= ?",
+        (_now(),),
+    )
+    _forget_verifier_hashes([str(row["state_hash"]) for row in rows])
+
+
+def _jwks_refresh_allowed(provider_id: str) -> bool:
+    """True when a forced JWKS refetch may run. At most once per interval."""
+    now = time.monotonic()
+    with _jwks_lock:
+        last = _jwks_forced.get(provider_id, 0.0)
+        if now - last < _JWKS_REFRESH_SECONDS:
+            return False
+        _jwks_forced[provider_id] = now
+    return True
+
+
+def _resolve(host: str, port: int) -> list[str]:
+    """Addresses for ``host``. Tests replace this to avoid real DNS."""
+    try:
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except OSError as exc:
+        raise OidcError("provider_unreachable") from exc
+    found: list[str] = []
+    for info in infos:
+        sockaddr = info[4]
+        if not sockaddr:
+            continue
+        address = str(sockaddr[0]).split("%", 1)[0]
+        if address and address not in found:
+            found.append(address)
+    if not found:
+        raise OidcError("provider_unreachable")
+    return found
+
+
+def _is_loopback(ip: str) -> bool:
+    parsed = _parse_ip(ip)
+    if parsed is None:
+        return False
+    if isinstance(parsed, ipaddress.IPv6Address) and parsed.ipv4_mapped is not None:
+        return _is_loopback(str(parsed.ipv4_mapped))
+    return bool(parsed.is_loopback)
+
+
+def _address_blocked(ip: str) -> bool:
+    """True for private, loopback, link-local, multicast, unspecified, or reserved."""
+    parsed = _parse_ip(ip)
+    if parsed is None:
+        return True
+    if isinstance(parsed, ipaddress.IPv6Address) and parsed.ipv4_mapped is not None:
+        return _address_blocked(str(parsed.ipv4_mapped))
+    if (
+        parsed.is_unspecified
+        or parsed.is_loopback
+        or parsed.is_link_local
+        or parsed.is_multicast
+        or parsed.is_reserved
+        or parsed.is_private
+    ):
+        return True
+    nets = _BLOCKED_V6 if parsed.version == 6 else _BLOCKED_V4
+    return any(parsed in net for net in nets)
+
+
+def _parse_ip(ip: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    text = ip.split("%", 1)[0].strip()
+    try:
+        return ipaddress.ip_address(text)
+    except ValueError:
+        return None
+
+
 def _epoch(value: object) -> int | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
@@ -1362,12 +1684,11 @@ def _allowlist(values: tuple[str, ...]) -> tuple[str, ...]:
         raise OidcError("bad_request")
     cleaned: list[str] = []
     for value in values:
-        mail = _email(value)
+        mail = _ascii_email(value)
         if not mail:
             raise OidcError("bad_request")
-        folded = mail.casefold()
-        if folded not in cleaned:
-            cleaned.append(folded)
+        if mail not in cleaned:
+            cleaned.append(mail)
     return tuple(cleaned)
 
 
@@ -1405,3 +1726,16 @@ def _email(value: object) -> str:
     if not text or len(text) > 254 or any(char.isspace() for char in text) or text.count("@") != 1:
         return ""
     return text
+
+
+def _ascii_email(value: object) -> str:
+    """ASCII lowercasing only. Unicode casefold is not used.
+
+    ``straße``.casefold() is ``strasse``, which would let a verified address
+    match a different allowlist entry. A non-ASCII address does not match
+    and cannot be stored on an allowlist.
+    """
+    mail = _email(value)
+    if not mail or not mail.isascii():
+        return ""
+    return mail.lower()

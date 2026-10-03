@@ -925,7 +925,8 @@ class AccountStore:
                 account_id TEXT NOT NULL REFERENCES accounts(id),
                 expires_at TEXT NOT NULL,
                 used INTEGER NOT NULL DEFAULT 0,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                pending_role TEXT NOT NULL DEFAULT ''
             );
 
             CREATE TABLE IF NOT EXISTS step_up (
@@ -977,7 +978,8 @@ class AccountStore:
                 redirect_uri TEXT NOT NULL,
                 expires_at TEXT NOT NULL,
                 used INTEGER NOT NULL DEFAULT 0,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                client_key TEXT NOT NULL DEFAULT ''
             );
 
             CREATE TABLE IF NOT EXISTS oidc_spent (
@@ -996,6 +998,16 @@ class AccountStore:
             "accounts",
             "second_factor_failures",
             "second_factor_failures INTEGER NOT NULL DEFAULT 0",
+        )
+        self._ensure_column(
+            "mfa_tokens",
+            "pending_role",
+            "pending_role TEXT NOT NULL DEFAULT ''",
+        )
+        self._ensure_column(
+            "oidc_transactions",
+            "client_key",
+            "client_key TEXT NOT NULL DEFAULT ''",
         )
         self.conn.commit()
         tighten_file(self.path)

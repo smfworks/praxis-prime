@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
+import hmac
 import io
 import json
+import secrets as secrets_mod
 import socket
 import sqlite3
 import sys
@@ -18,13 +21,18 @@ import pyotp
 import pytest
 
 from oidc_fake import FakeOidc, _s256
+from praxis_prime.accounts import oidc as oidc_mod
 from praxis_prime.accounts.db import AccountStore, cookie_value
 from praxis_prime.accounts.factors import Factors
 from praxis_prime.accounts.oidc import (
+    _PENDING_PER_CLIENT,
     ENTRA_ROLE_MAP,
+    NONCE_TTL_SECONDS,
+    TXN_TTL_SECONDS,
     OidcError,
     add_provider,
     clear_caches,
+    forget_pending_verifier,
     list_identities,
     prelink,
 )
@@ -413,9 +421,9 @@ def test_missing_pkce_does_not_call_the_token_endpoint(
     with world(tmp_path, monkeypatch) as ctx:
         prelink(ctx.store, username_text="ada", issuer=ctx.fake.issuer, subject="subject-1")
         url, binding = _begin(ctx)
+        state = parse_qs(urlsplit(url).query)["state"][0]
+        forget_pending_verifier(state)
         location = _authorize(ctx, url)
-        ctx.store.conn.execute("UPDATE oidc_transactions SET verifier = '' WHERE used = 0")
-        ctx.store.conn.commit()
         status, _cookies, headers, _body = _finish(ctx, location, binding)
         assert status == 302 and headers["location"] == "/?oidc=error"
         assert ctx.fake.token_hits == 0
@@ -435,6 +443,14 @@ def test_hs_signed_with_a_public_key_is_rejected(
     with world(tmp_path, monkeypatch) as ctx:
         prelink(ctx.store, username_text="ada", issuer=ctx.fake.issuer, subject="subject-1")
         ctx.fake.sign = "hs"
+        pem = ctx.fake.rsa.as_pem(private=False)
+        if isinstance(pem, str):
+            pem = pem.encode("utf-8")
+        token = ctx.fake._issue("nonce-check", _CLIENT)
+        header, payload, signature = token.split(".")
+        digest = hmac.new(pem, f"{header}.{payload}".encode("ascii"), hashlib.sha256).digest()
+        expected = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+        assert signature == expected
         _nav_error(ctx, "alg_rejected")
 
 
@@ -484,13 +500,24 @@ def test_allowlist_rejects_a_string_verified_flag(
 def test_allowlist_links_when_the_flag_is_boolean_true(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    with world(tmp_path, monkeypatch, allow=("ada@example.com",)) as ctx:
+    with world(tmp_path, monkeypatch, allow=("bea@example.com",)) as ctx:
+        ctx.store.create_account(
+            username_text="bea",
+            password=_PASSWORD,
+            display_name="Bea",
+            role="viewer",
+            email="bea@example.com",
+        )
+        ctx.fake.email = "bea@example.com"
+        ctx.fake.subject = "bea-sub"
         ctx.fake.email_verified = True
         status, _cookies, headers, body = _sign_in(ctx)
         assert status == 302 and headers["location"] == "/?oidc=ok"
-        assert body["account"]["username"] == "ada"
-        assert len(list_identities(ctx.store, ctx.store.get_username("ada").id)) == 1  # type: ignore[union-attr]
-        assert len(ctx.store.list_accounts()) == 1
+        assert body["account"]["username"] == "bea"
+        bea = ctx.store.get_username("bea")
+        assert bea is not None
+        assert len(list_identities(ctx.store, bea.id)) == 1
+        assert len(ctx.store.list_accounts()) == 2
 
 
 def test_ec_token_and_clock_skew_are_accepted(
@@ -584,7 +611,8 @@ def test_linking_and_unlinking_need_step_up(
         )
         assert status == 200, body
         url = str(body["authorizationUrl"])
-        binding, _line = _cookie(cookies, "pp_oidc")
+        binding, line = _cookie(cookies, "pp_oidc")
+        assert f"Max-Age={TXN_TTL_SECONDS}" in line
         status, _cookies, headers, body = _finish(
             ctx, _authorize(ctx, url), binding, session=session
         )
@@ -933,3 +961,541 @@ def test_spa_has_oidc_sign_in_and_no_inline_handlers() -> None:
     assert "/v1/auth/oidc/login" in app
     assert "/v1/auth/oidc/link" in views
     assert "/v1/auth/oidc/unlink" in views
+    # The code form must open for ?oidc=mfa even when mfaToken is still empty.
+    assert "oidcNeedsCode" in app
+    assert "codeStep || mfaToken" in app
+    assert "{mfaToken ? (" not in app
+
+
+def test_allowlist_is_ascii_and_refuses_privileged_accounts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = AccountStore(tmp_path / "plain.db")
+    with pytest.raises(OidcError) as caught:
+        add_provider(
+            store,
+            provider_id="local",
+            display_name="Local",
+            issuer="https://idp.example",
+            client_id=_CLIENT,
+            secret_key="PRAXIS_PRIME_OIDC_SECRET_LOCAL",
+            email_allowlist=("straße@example.com",),
+        )
+    assert caught.value.reason == "bad_request"
+    store.close()
+    # The audit log keeps one auth.fail per name per minute, so each refusal
+    # needs its own daemon or the later reason is hidden.
+    owner_dir = tmp_path / "owner"
+    admin_dir = tmp_path / "admin"
+    ascii_dir = tmp_path / "ascii"
+    owner_dir.mkdir()
+    admin_dir.mkdir()
+    ascii_dir.mkdir()
+    with world(owner_dir, monkeypatch, allow=("ada@example.com",)) as ctx:
+        ctx.fake.subject = "ada-oidc"
+        _nav_error(ctx, "privileged_link")
+        ada = ctx.store.get_username("ada")
+        assert ada is not None and list_identities(ctx.store, ada.id) == []
+        status, cookies, _headers, body = _http(
+            ctx.port,
+            "POST",
+            "/v1/auth/login",
+            body={"username": "ada", "password": _PASSWORD},
+        )
+        assert status == 200
+        session, _line = _cookie(cookies, "pp_session")
+        csrf = str(body["csrfToken"])
+        live = ctx.store.session_from_token(session)
+        assert live is not None
+        step = Factors(ctx.store).prove_password(ada.id, _PASSWORD, "", session_id=live.id)
+        ctx.fake.email = "straße@example.com"
+        ctx.fake.subject = "unicode-sub"
+        status, cookies, _headers, body = _http(
+            ctx.port,
+            "POST",
+            "/v1/auth/oidc/link",
+            body={"provider": "local", "stepUpToken": step},
+            cookie=f"pp_session={session}",
+            csrf=csrf,
+        )
+        assert status == 200, body
+        binding, _line = _cookie(cookies, "pp_oidc")
+        status, _cookies, headers, _body = _finish(
+            ctx,
+            _authorize(ctx, str(body["authorizationUrl"])),
+            binding,
+            session=session,
+        )
+        assert status == 302 and headers["location"] == "/?oidc=linked"
+        linked = [
+            row
+            for row in list_identities(ctx.store, ada.id)
+            if row["subject"] == "unicode-sub"
+        ]
+        assert linked and linked[0]["email"] == ""
+    with world(admin_dir, monkeypatch, allow=("cam@example.com",)) as ctx:
+        ctx.store.create_account(
+            username_text="cam",
+            password=_PASSWORD,
+            display_name="Cam",
+            role="admin",
+            email="cam@example.com",
+        )
+        ctx.fake.subject = "cam-oidc"
+        ctx.fake.email = "cam@example.com"
+        _nav_error(ctx, "privileged_link")
+        cam = ctx.store.get_username("cam")
+        assert cam is not None and cam.role == "admin"
+        assert list_identities(ctx.store, cam.id) == []
+    with world(ascii_dir, monkeypatch, allow=("strasse@example.com",)) as ctx:
+        ctx.store.create_account(
+            username_text="dio",
+            password=_PASSWORD,
+            display_name="Dio",
+            role="viewer",
+            email="strasse@example.com",
+        )
+        ctx.fake.subject = "dio-sub"
+        ctx.fake.email = "straße@example.com"
+        _nav_error(ctx, "email_not_allowed")
+        dio = ctx.store.get_username("dio")
+        assert dio is not None and list_identities(ctx.store, dio.id) == []
+        ctx.fake.email = "STRASSE@example.com"
+        status, _cookies, headers, body = _sign_in(ctx)
+        assert status == 302 and headers["location"] == "/?oidc=ok"
+        assert body["account"]["username"] == "dio"
+
+
+def test_oidc_add_again_keeps_the_stored_secret(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    data = tmp_path / "data"
+    config = tmp_path / "config"
+    data.mkdir()
+    config.mkdir()
+    secret_path = config / "secrets.env"
+    monkeypatch.setenv("PRAXIS_PRIME_SECRETS_FILE", str(secret_path))
+    store = AccountStore(data / "accounts.db")
+    store.create_account(username_text="ada", password=_PASSWORD, display_name="Ada")
+    fake = FakeOidc(client_id=_CLIENT, secret=_SECRET)
+    replacement = "replacement-secret-value"
+    try:
+        monkeypatch.setattr(sys, "stdin", io.StringIO(_SECRET + "\n"))
+        code = main(
+            [
+                "oidc",
+                "add",
+                "local",
+                "--display-name",
+                "Local",
+                "--issuer",
+                fake.issuer,
+                "--client-id",
+                _CLIENT,
+                "--dev-loopback",
+                "--client-secret-stdin",
+                "--data-dir",
+                str(data),
+                "--config-dir",
+                str(config),
+            ]
+        )
+        assert code == 0, capsys.readouterr().err
+        monkeypatch.setattr(sys, "stdin", io.StringIO(replacement + "\n"))
+        code = main(
+            [
+                "oidc",
+                "add",
+                "local",
+                "--display-name",
+                "Local again",
+                "--issuer",
+                fake.issuer,
+                "--client-id",
+                _CLIENT,
+                "--dev-loopback",
+                "--client-secret-stdin",
+                "--data-dir",
+                str(data),
+                "--config-dir",
+                str(config),
+            ]
+        )
+        printed = capsys.readouterr()
+        assert code == 2
+        assert "remove" in printed.err
+        assert replacement not in printed.out
+        assert replacement not in printed.err
+        stored = secret_path.read_text(encoding="utf-8")
+        assert stored.count(_SECRET) == 1
+        assert replacement not in stored
+        monkeypatch.setattr(sys, "stdin", io.StringIO(replacement + "\n"))
+        code = main(
+            [
+                "oidc",
+                "add",
+                "NOT-AN-ID",
+                "--display-name",
+                "Local",
+                "--issuer",
+                fake.issuer,
+                "--client-id",
+                _CLIENT,
+                "--dev-loopback",
+                "--client-secret-stdin",
+                "--data-dir",
+                str(data),
+                "--config-dir",
+                str(config),
+            ]
+        )
+        assert code == 2
+        assert replacement not in secret_path.read_text(encoding="utf-8")
+    finally:
+        fake.close()
+        clear_caches()
+        store.close()
+
+
+def test_one_client_cannot_exhaust_pending_sign_ins(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert NONCE_TTL_SECONDS == 10 * 60
+    with world(tmp_path, monkeypatch) as ctx:
+        status, cookies, _headers, body = _http(
+            ctx.port,
+            "POST",
+            "/v1/auth/oidc/login",
+            body={"provider": "local"},
+        )
+        assert status == 200, body
+        client, client_line = _cookie(cookies, "pp_client")
+        assert client
+        assert "HttpOnly" in client_line and "Secure" in client_line
+        _binding, binding_line = _cookie(cookies, "pp_oidc")
+        assert f"Max-Age={TXN_TTL_SECONDS}" in binding_line
+        row = ctx.store.conn.execute(
+            "SELECT expires_at, created_at FROM oidc_transactions WHERE used = 0"
+        ).fetchone()
+        assert row is not None
+        from datetime import datetime
+
+        lifetime = (
+            datetime.fromisoformat(str(row["expires_at"]))
+            - datetime.fromisoformat(str(row["created_at"]))
+        ).total_seconds()
+        assert 60 <= lifetime <= 150
+        cookie = f"pp_client={client}"
+        for _ in range(_PENDING_PER_CLIENT - 1):
+            status, _cookies, _headers, body = _http(
+                ctx.port,
+                "POST",
+                "/v1/auth/oidc/login",
+                body={"provider": "local"},
+                cookie=cookie,
+            )
+            assert status == 200, body
+        status, _cookies, _headers, body = _http(
+            ctx.port,
+            "POST",
+            "/v1/auth/oidc/login",
+            body={"provider": "local"},
+            cookie=cookie,
+        )
+        assert status == 429
+        assert body["error"]["message"] == SIGN_IN
+        status, other_cookies, _headers, body = _http(
+            ctx.port,
+            "POST",
+            "/v1/auth/oidc/login",
+            body={"provider": "local"},
+        )
+        assert status == 200, body
+        other, _line = _cookie(other_cookies, "pp_client")
+        assert other and other != client
+        from datetime import UTC, timedelta
+
+        stale = (datetime.now(UTC) - timedelta(seconds=5)).isoformat(timespec="seconds")
+        ctx.store.conn.execute("UPDATE oidc_transactions SET expires_at = ?", (stale,))
+        ctx.store.conn.commit()
+        status, _cookies, _headers, body = _http(
+            ctx.port,
+            "POST",
+            "/v1/auth/oidc/login",
+            body={"provider": "local"},
+            cookie=cookie,
+        )
+        assert status == 200, body
+
+
+def test_pkce_verifier_is_not_written_to_the_database(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with world(tmp_path, monkeypatch) as ctx:
+        prelink(ctx.store, username_text="ada", issuer=ctx.fake.issuer, subject="subject-1")
+        seen: list[tuple[int, str]] = []
+        real = secrets_mod.token_urlsafe
+
+        def spy(nbytes: int = 32) -> str:
+            value = real(nbytes)
+            seen.append((nbytes, value))
+            return value
+
+        monkeypatch.setattr(secrets_mod, "token_urlsafe", spy)
+        url, binding = _begin(ctx)
+        verifiers = [value for size, value in seen if size == 48]
+        assert len(verifiers) == 1
+        verifier = verifiers[0]
+        ctx.store.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        ctx.store.conn.commit()
+        blob = ctx.store.path.read_bytes()
+        assert verifier.encode("ascii") not in blob
+        wal = Path(str(ctx.store.path) + "-wal")
+        if wal.is_file():
+            assert verifier.encode("ascii") not in wal.read_bytes()
+        row = ctx.store.conn.execute(
+            "SELECT verifier FROM oidc_transactions WHERE used = 0"
+        ).fetchone()
+        assert row is not None and str(row["verifier"]) == ""
+        status, _cookies, headers, _body = _finish(ctx, _authorize(ctx, url), binding)
+        assert status == 302 and headers["location"] == "/?oidc=ok"
+        ctx.store.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        assert verifier.encode("ascii") not in ctx.store.path.read_bytes()
+
+
+def test_private_resolved_addresses_are_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    refused = (
+        "10.1.2.3",
+        "127.0.0.1",
+        "169.254.1.1",
+        "192.168.1.1",
+        "172.16.5.5",
+        "::1",
+        "fc00::1",
+        "fe80::1",
+        "::ffff:10.0.0.1",
+        "0.0.0.0",
+        "224.0.0.1",
+        "240.0.0.1",
+        "::",
+    )
+    for item in refused:
+        assert oidc_mod._address_blocked(item) is True, item
+    assert oidc_mod._address_blocked("8.8.8.8") is False
+    assert oidc_mod._address_blocked("172.15.0.1") is False
+    assert oidc_mod._address_blocked("172.32.0.1") is False
+    assert oidc_mod._address_blocked("2001:4860:4860::8888") is False
+    assert oidc_mod._address_blocked("::ffff:8.8.8.8") is False
+
+    def refuse_connect(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("connected to an unchecked address")
+
+    monkeypatch.setattr(socket, "create_connection", refuse_connect)
+    for url in (
+        "https://10.0.0.1/jwks",
+        "https://127.0.0.1/jwks",
+        "https://169.254.1.1/jwks",
+        "https://192.168.1.1/jwks",
+        "https://172.16.0.1/jwks",
+        "https://[::1]/jwks",
+        "https://[fc00::1]/jwks",
+        "https://[fe80::1]/jwks",
+        "https://[::ffff:10.0.0.1]/jwks",
+    ):
+        with pytest.raises(OidcError) as caught:
+            oidc_mod._request(
+                url,
+                method="GET",
+                body=None,
+                headers={},
+                allow_http=False,
+                limit=128,
+            )
+        assert caught.value.reason == "url_rejected", url
+    monkeypatch.setattr(oidc_mod, "_resolve", lambda _host, _port: ["10.1.2.3"])
+    with pytest.raises(OidcError) as caught:
+        oidc_mod._request(
+            "https://idp.example/jwks",
+            method="GET",
+            body=None,
+            headers={},
+            allow_http=False,
+            limit=128,
+        )
+    assert caught.value.reason == "url_rejected"
+    monkeypatch.setattr(oidc_mod, "_resolve", lambda _host, _port: ["8.8.8.8", "10.0.0.1"])
+    with pytest.raises(OidcError) as caught:
+        oidc_mod._request(
+            "https://idp.example/token",
+            method="POST",
+            body=b"grant_type=authorization_code",
+            headers={},
+            allow_http=False,
+            limit=128,
+        )
+    assert caught.value.reason == "url_rejected"
+    monkeypatch.setattr(oidc_mod, "_resolve", lambda _host, _port: ["10.0.0.1"])
+    with pytest.raises(OidcError) as caught:
+        oidc_mod._request(
+            "http://127.0.0.1:9/token",
+            method="GET",
+            body=None,
+            headers={},
+            allow_http=True,
+            limit=128,
+        )
+    assert caught.value.reason == "url_rejected"
+    seen: list[tuple[str, int]] = []
+
+    def record(address: tuple[str, int], timeout: float | None = None) -> None:
+        del timeout
+        seen.append(address)
+        raise TimeoutError("stopped")
+
+    monkeypatch.setattr(socket, "create_connection", record)
+    monkeypatch.setattr(oidc_mod, "_resolve", lambda _host, _port: ["8.8.8.8"])
+    with pytest.raises(OidcError) as caught:
+        oidc_mod._request(
+            "https://idp.example/.well-known/openid-configuration",
+            method="GET",
+            body=None,
+            headers={},
+            allow_http=False,
+            limit=128,
+        )
+    assert caught.value.reason == "provider_unreachable"
+    assert seen == [("8.8.8.8", 443)]
+
+
+def test_jwks_refetch_is_rate_limited(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with world(tmp_path, monkeypatch) as ctx:
+        prelink(ctx.store, username_text="ada", issuer=ctx.fake.issuer, subject="subject-1")
+        status, _cookies, headers, _body = _sign_in(ctx)
+        assert status == 302 and headers["location"] == "/?oidc=ok"
+        assert ctx.fake.jwks_hits == 1
+        ctx.fake.rotate()
+        status, _cookies, headers, _body = _sign_in(ctx)
+        assert status == 302 and headers["location"] == "/?oidc=ok"
+        assert ctx.fake.jwks_hits == 2
+        ctx.fake.rotate()
+        _nav_error(ctx, "bad_signature")
+        assert ctx.fake.jwks_hits == 2
+        oidc_mod._jwks_forced["local"] = 0
+        status, _cookies, headers, _body = _sign_in(ctx)
+        assert status == 302 and headers["location"] == "/?oidc=ok"
+        assert ctx.fake.jwks_hits == 3
+
+
+def test_role_map_waits_until_totp_succeeds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with world(tmp_path, monkeypatch, role_claim="roles", role_map=dict(ENTRA_ROLE_MAP)) as ctx:
+        bea = ctx.store.create_account(
+            username_text="bea",
+            password=_PASSWORD,
+            display_name="Bea",
+            role="operator",
+        )
+        enrolled = Factors(ctx.store).begin_totp(bea.id)
+        totp = pyotp.TOTP(enrolled.secret)
+        step = int(time.time()) // 30
+        Factors(ctx.store).confirm_totp(bea.id, totp.at(step * 30))
+        prelink(ctx.store, username_text="bea", issuer=ctx.fake.issuer, subject="bea-sub")
+        ctx.fake.subject = "bea-sub"
+        ctx.fake.roles = ["Praxis.Admin"]
+        status, cookies, headers, body = _sign_in(ctx)
+        assert status == 302 and headers["location"] == "/?oidc=mfa"
+        assert "mfaToken" not in body
+        assert ctx.store.get_username("bea").role == "operator"  # type: ignore[union-attr]
+        mfa, _line = _cookie(cookies, "pp_mfa")
+        status, _cookies, _headers, body = _http(
+            ctx.port,
+            "POST",
+            "/v1/auth/login/totp",
+            body={"mfaToken": "", "code": "abcdef"},
+            cookie=f"pp_mfa={mfa}",
+        )
+        assert status == 401
+        assert ctx.store.get_username("bea").role == "operator"  # type: ignore[union-attr]
+        status, _cookies, _headers, body = _http(
+            ctx.port,
+            "POST",
+            "/v1/auth/login/totp",
+            body={"mfaToken": "", "code": totp.at((step + 1) * 30)},
+            cookie=f"pp_mfa={mfa}",
+        )
+        assert status == 200, body
+        assert ctx.store.get_username("bea").role == "admin"  # type: ignore[union-attr]
+
+
+def test_trailing_slash_issuer_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with world(tmp_path, monkeypatch) as ctx:
+        prelink(ctx.store, username_text="ada", issuer=ctx.fake.issuer, subject="subject-1")
+        ctx.fake.iss = ctx.fake.issuer + "/"
+        _nav_error(ctx, "bad_issuer")
+    issuer = "https://idp.example"
+    document = {
+        "issuer": issuer + "/",
+        "authorization_endpoint": issuer + "/authorize",
+        "token_endpoint": issuer + "/token",
+        "jwks_uri": issuer + "/jwks",
+    }
+    with pytest.raises(OidcError) as caught:
+        oidc_mod._parse_discovery(document, issuer, allow_http=False)
+    assert caught.value.reason == "discovery_issuer"
+    document["issuer"] = issuer
+    parsed = oidc_mod._parse_discovery(document, issuer, allow_http=False)
+    assert parsed.authorization == issuer + "/authorize"
+
+
+def test_provider_responses_are_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = FakeOidc(client_id=_CLIENT, secret=_SECRET)
+    paths = ("/.well-known/openid-configuration", "/token", "/jwks")
+    try:
+        fake.mode = "redirect"
+        fake.mode_paths = set(paths)
+        for path in paths:
+            with pytest.raises(OidcError) as caught:
+                oidc_mod._request(
+                    fake.issuer + path,
+                    method="POST" if path == "/token" else "GET",
+                    body=b"grant_type=authorization_code" if path == "/token" else None,
+                    headers={},
+                    allow_http=True,
+                    limit=oidc_mod._DISCOVERY_LIMIT,
+                )
+            assert caught.value.reason == "redirect_refused", path
+        assert fake.follow_hits == 0
+        fake.mode = "huge"
+        for path in paths:
+            with pytest.raises(OidcError) as caught:
+                oidc_mod._request(
+                    fake.issuer + path,
+                    method="POST" if path == "/token" else "GET",
+                    body=b"grant_type=authorization_code" if path == "/token" else None,
+                    headers={},
+                    allow_http=True,
+                    limit=oidc_mod._JWKS_LIMIT if path == "/jwks" else oidc_mod._TOKEN_LIMIT,
+                )
+            assert caught.value.reason == "response_too_large", path
+        fake.mode = "trickle"
+        monkeypatch.setattr(oidc_mod, "_HTTP_TIMEOUT", 1.0)
+        for path in paths:
+            started = time.monotonic()
+            with pytest.raises(OidcError) as caught:
+                oidc_mod._request(
+                    fake.issuer + path,
+                    method="POST" if path == "/token" else "GET",
+                    body=b"grant_type=authorization_code" if path == "/token" else None,
+                    headers={},
+                    allow_http=True,
+                    limit=oidc_mod._DISCOVERY_LIMIT,
+                )
+            assert caught.value.reason == "provider_unreachable", path
+            assert time.monotonic() - started < 2.5
+    finally:
+        fake.close()

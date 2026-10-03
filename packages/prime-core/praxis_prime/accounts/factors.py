@@ -224,7 +224,7 @@ class Factors:
                 raise
         return tuple(codes)
 
-    def issue_mfa(self, account_id: str) -> str:
+    def issue_mfa(self, account_id: str, *, pending_role: str = "") -> str:
         account = self._active(account_id)
         if not self.totp_active(account.id):
             raise FactorError("totp is not enrolled")
@@ -232,6 +232,9 @@ class Factors:
         expires = (datetime.now(UTC) + timedelta(seconds=MFA_TTL_SECONDS)).isoformat(
             timespec="seconds"
         )
+        # A role from a half-finished OIDC sign-in waits on this token.
+        # Password sign-in passes an empty role. Owner is never stored.
+        role = pending_role if pending_role in {"admin", "operator", "viewer", "auditor"} else ""
         with self.store._lock:
             self.store.conn.execute(
                 "DELETE FROM mfa_tokens WHERE account_id = ? AND (used = 1 OR expires_at <= ?)",
@@ -239,13 +242,44 @@ class Factors:
             )
             self.store.conn.execute(
                 """
-                INSERT INTO mfa_tokens (token_hash, account_id, expires_at, used, created_at)
-                VALUES (?, ?, ?, 0, ?)
+                INSERT INTO mfa_tokens (
+                    token_hash, account_id, expires_at, used, created_at, pending_role
+                ) VALUES (?, ?, ?, 0, ?, ?)
                 """,
-                (_hash(raw), account.id, expires, _now()),
+                (_hash(raw), account.id, expires, _now(), role),
             )
             self.store.conn.commit()
         return raw
+
+    def take_pending_role(self, token: str) -> str:
+        """Read and clear a role stored on a token that TOTP already accepted.
+
+        A wrong code leaves the token unused, so this returns nothing and the
+        role stays put for the retry.
+        """
+        if not isinstance(token, str) or not token or len(token) > 256:
+            return ""
+        digest = _hash(token)
+        with self.store._lock:
+            self.store.conn.execute("BEGIN IMMEDIATE")
+            try:
+                row = self.store.conn.execute(
+                    "SELECT pending_role, used FROM mfa_tokens WHERE token_hash = ?",
+                    (digest,),
+                ).fetchone()
+                if row is None or int(row["used"]) != 1:
+                    self.store.conn.rollback()
+                    return ""
+                role = str(row["pending_role"])
+                self.store.conn.execute(
+                    "UPDATE mfa_tokens SET pending_role = '' WHERE token_hash = ?",
+                    (digest,),
+                )
+                self.store.conn.commit()
+            except Exception:
+                self.store.conn.rollback()
+                raise
+        return role
 
     def complete_mfa(self, token: str, code: str, *, now: float | None = None) -> Account | None:
         if not isinstance(token, str) or not token or len(token) > 256:

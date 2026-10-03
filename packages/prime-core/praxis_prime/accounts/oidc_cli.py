@@ -24,6 +24,7 @@ from praxis_prime.accounts.oidc import (
     ENTRA_ROLE_MAP,
     OidcError,
     add_provider,
+    get_provider,
     list_providers,
     normalize_issuer,
     prelink,
@@ -52,6 +53,7 @@ _TEXT = {
     "issuer_taken": "this account already has an identity from that issuer",
     "bad_request": "the provider settings were rejected",
     "malformed": "the subject was rejected",
+    "privileged_link": "an owner or admin account must link while signed in",
 }
 
 
@@ -194,6 +196,20 @@ def _add(args: argparse.Namespace) -> int:
         return 2
     path = secret_file(_config(args))
     key = secret_name(args.provider_id)
+    try:
+        existing = get_provider(store, args.provider_id)
+    except OidcError as exc:
+        print(f"praxis-prime oidc: {_explain(exc)}", file=sys.stderr)
+        return 2
+    if existing is not None:
+        print(
+            "praxis-prime oidc: that provider already exists. "
+            f"Remove it with `praxis-prime oidc remove {args.provider_id}` "
+            "and add it again to replace it. "
+            "The stored client secret was left unchanged.",
+            file=sys.stderr,
+        )
+        return 2
     try:
         write_secret(path, key, secret)
         add_provider(

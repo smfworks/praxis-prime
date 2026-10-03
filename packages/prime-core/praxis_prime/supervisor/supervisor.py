@@ -59,6 +59,12 @@ _DROPPED_ENV = frozenset(
         "PRAXIS_PRIME_SECRETS_FILE",
     }
 )
+_OIDC_SECRET_PREFIX = "PRAXIS_PRIME_OIDC_SECRET_"
+
+
+def _worker_env_dropped(key: str) -> bool:
+    """True for supervisor secrets that must not reach a profile worker."""
+    return key in _DROPPED_ENV or key.startswith(_OIDC_SECRET_PREFIX)
 
 
 class WorkerUnavailable(RuntimeError):
@@ -417,7 +423,7 @@ class Supervisor:
 
     def worker_env(self, profile: str) -> dict[str, str]:
         """Environment passed to a worker. The master key is not in it."""
-        env = {key: value for key, value in self.env.items() if key not in _DROPPED_ENV}
+        env = {key: value for key, value in self.env.items() if not _worker_env_dropped(key)}
         env["PRAXIS_PRIME_WORKER_PROFILE"] = profile
         env["PRAXIS_PRIME_WORKER_DATA"] = str(self.data_root)
         env["PRAXIS_PRIME_SUPERVISOR_PID"] = str(os.getpid())

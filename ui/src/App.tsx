@@ -186,11 +186,18 @@ function Shell({ account, route }: { account: Account; route: string }) {
   );
 }
 
+function oidcNeedsCode(): boolean {
+  return new URLSearchParams(window.location.search).get("oidc") === "mfa";
+}
+
 function Login({ onSignedIn }: { onSignedIn: () => void }) {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [code, setCode] = useState("");
   const [mfaToken, setMfaToken] = useState("");
+  // OIDC leaves the second-factor token in the pp_mfa cookie. The code form
+  // must show even though mfaToken stays empty; the server reads the cookie.
+  const [codeStep, setCodeStep] = useState(oidcNeedsCode);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
@@ -200,8 +207,10 @@ function Login({ onSignedIn }: { onSignedIn: () => void }) {
     const flag = new URLSearchParams(window.location.search).get("oidc");
     if (flag === "ok") setNotice("Signed in.");
     else if (flag === "linked") setNotice("Identity linked.");
-    else if (flag === "mfa") setNotice("Enter your authenticator code to finish sign-in.");
-    else if (flag === "error") setError("Sign-in could not be completed.");
+    else if (flag === "mfa") {
+      setNotice("Enter your authenticator code to finish sign-in.");
+      setCodeStep(true);
+    } else if (flag === "error") setError("Sign-in could not be completed.");
     if (flag) {
       const url = new URL(window.location.href);
       url.searchParams.delete("oidc");
@@ -293,7 +302,7 @@ function Login({ onSignedIn }: { onSignedIn: () => void }) {
     <main className="mx-auto max-w-md px-4 py-12">
       <h1 className="mb-2 text-2xl font-semibold">Praxis Prime</h1>
       <p className="mb-6 text-muted">Sign in on this machine. The app does not call out.</p>
-      {mfaToken ? (
+      {codeStep || mfaToken ? (
         <form className="grid gap-3" onSubmit={(event) => void submitCode(event)}>
           <label className="grid gap-1">
             Authenticator code

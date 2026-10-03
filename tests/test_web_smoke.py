@@ -145,7 +145,12 @@ def _browser(playwright_sync: object, port: int, secret: str) -> None:
 
 
 @contextmanager
-def _daemon(tmp_path: Path, replies: list[dict[str, object]]) -> Iterator[int]:
+def _daemon(
+    tmp_path: Path,
+    replies: list[dict[str, object]],
+    *,
+    extra_env: dict[str, str] | None = None,
+) -> Iterator[int]:
     """A supervisor daemon with the scripted model. The caller creates profiles."""
     ui = Path(__file__).resolve().parents[1] / "ui" / "dist"
     assert (ui / "index.html").is_file()
@@ -178,6 +183,8 @@ def _daemon(tmp_path: Path, replies: list[dict[str, object]]) -> Iterator[int]:
             "PRAXIS_PRIME_UI_DIR": str(ui),
         }
     )
+    if extra_env:
+        env.update(extra_env)
     (tmp_path / "runtime").mkdir()
     output = tmp_path / "daemon.out"
     handle = output.open("w", encoding="utf-8")

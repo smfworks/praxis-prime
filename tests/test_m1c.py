@@ -326,6 +326,8 @@ def test_worker_environment_has_no_master_key_or_bot_token(tmp_path: Path):
             "PRAXIS_PRIME_TELEGRAM_BOT_TOKEN": "telegram-token",
             "PRAXIS_PRIME_WORKER_MASTER": "should-not-pass",
             "PRAXIS_PRIME_SECRETS_FILE": str(tmp_path / "secrets.env"),
+            "PRAXIS_PRIME_OIDC_SECRET_LOCAL": "oidc-secret-value",
+            "PRAXIS_PRIME_OIDC_SECRET_WORK_TENANT": "oidc-secret-other",
         },
     )
     try:
@@ -333,11 +335,16 @@ def test_worker_environment_has_no_master_key_or_bot_token(tmp_path: Path):
         assert "PRAXIS_PRIME_TELEGRAM_BOT_TOKEN" not in stripped
         assert "PRAXIS_PRIME_WORKER_MASTER" not in stripped
         assert "PRAXIS_PRIME_SECRETS_FILE" not in stripped
+        assert "PRAXIS_PRIME_OIDC_SECRET_LOCAL" not in stripped
+        assert "PRAXIS_PRIME_OIDC_SECRET_WORK_TENANT" not in stripped
         assert stripped["PRAXIS_PRIME_WORKER_PROFILE"] == "ada"
         supervisor.ensure("ada")
         child = json.loads(env_path.read_text(encoding="utf-8"))
-        assert "telegram-token" not in json.dumps(child)
-        assert "should-not-pass" not in json.dumps(child)
+        dumped = json.dumps(child)
+        assert "telegram-token" not in dumped
+        assert "should-not-pass" not in dumped
+        assert "oidc-secret-value" not in dumped
+        assert "oidc-secret-other" not in dumped
         assert child["PRAXIS_PRIME_WORKER_PROFILE"] == "ada"
     finally:
         supervisor.close()

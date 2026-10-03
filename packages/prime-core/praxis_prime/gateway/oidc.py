@@ -13,17 +13,22 @@ TOTP is confirmed, the callback sets ``pp_mfa`` and waits for
 from __future__ import annotations
 
 import json
+import secrets
 from collections.abc import Callable
 from urllib.parse import parse_qs
 
 from praxis_prime.accounts.db import AccountStore, cookie_value
 from praxis_prime.accounts.factors import Factors
 from praxis_prime.accounts.oidc import (
+    CLIENT_COOKIE,
     OIDC_COOKIE,
+    TXN_TTL_SECONDS,
     OidcError,
     abandon,
+    apply_mapped_role,
     begin,
     binding_cookie,
+    client_cookie,
     complete,
     get_provider,
     list_identities,
@@ -73,6 +78,7 @@ _REASONS = frozenset(
         "email_unverified",
         "email_not_allowed",
         "email_ambiguous",
+        "privileged_link",
         "issuer_taken",
         "identity_taken",
         "last_factor",
@@ -191,6 +197,7 @@ def _start_login(
     provider_id = parsed.get("provider", "")
     if not isinstance(provider_id, str):
         return 400, _error("bad_request", "provider must be a string"), []
+    client, client_cookies = _browser_key(headers)
     try:
         redirect = loopback_redirect(headers.get("host", ""), port)
         url, binding = begin(
@@ -198,18 +205,21 @@ def _start_login(
             provider_id=provider_id,
             redirect_uri=redirect,
             kind="login",
+            client_key=client,
         )
     except OidcError as exc:
-        return _posted_error(
+        status, payload, cookies = _posted_error(
             audit,
             exc,
             provider_id=_safe_provider(provider_id),
             peer=peer,
             message=SIGN_IN,
         )
+        return status, payload, [*cookies, *client_cookies]
     del logger
     return 200, {"ok": True, "authorizationUrl": url}, [
-        ("Set-Cookie", binding_cookie(binding, max_age=600)),
+        ("Set-Cookie", binding_cookie(binding, max_age=TXN_TTL_SECONDS)),
+        *client_cookies,
     ]
 
 
@@ -307,7 +317,7 @@ def _callback(
             },
         ):
             return 503, _error("unavailable", "audit log is busy; login was not completed"), []
-        token = Factors(store).issue_mfa(done.account.id)
+        token = Factors(store).issue_mfa(done.account.id, pending_role=done.mapped_role)
         return 302, {
             "ok": True,
             "mfaRequired": True,
@@ -317,7 +327,8 @@ def _callback(
             *_clear_binding(),
             ("Location", "/?oidc=mfa"),
         ]
-    status, payload, cookies = _open_session(store, done.account, audit, method="oidc")
+    account = apply_mapped_role(store, done.account, done.mapped_role)
+    status, payload, cookies = _open_session(store, account, audit, method="oidc")
     if status != 200:
         return status, payload, cookies
     if "stepUpToken" in payload:
@@ -361,6 +372,7 @@ def _link(
             kind="link",
             account_id=principal.account_id,
             session_id=principal.session_id,
+            client_key=principal.session_id,
         )
     except OidcError as exc:
         return _change_error(audit, principal, exc.reason, safe, peer)
@@ -368,7 +380,7 @@ def _link(
         return 503, _error("unavailable", "audit log is busy"), []
     del logger
     return 200, {"ok": True, "authorizationUrl": url}, [
-        ("Set-Cookie", binding_cookie(binding, max_age=600)),
+        ("Set-Cookie", binding_cookie(binding, max_age=TXN_TTL_SECONDS)),
     ]
 
 
@@ -547,6 +559,15 @@ def _safe_provider(value: str) -> str:
 
 def _clear_binding() -> list[tuple[str, str]]:
     return [("Set-Cookie", binding_cookie("", max_age=0))]
+
+
+def _browser_key(headers: dict[str, str]) -> tuple[str, list[tuple[str, str]]]:
+    """The pp_client cookie, minted when this browser does not have one yet."""
+    current = cookie_value(headers.get("cookie", ""), CLIENT_COOKIE)
+    if current and len(current) <= 256:
+        return current, []
+    token = secrets.token_urlsafe(32)
+    return token, [("Set-Cookie", client_cookie(token))]
 
 
 def _object(body: bytes) -> dict[str, object] | None:

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import hmac
 import json
 import secrets
 import threading
@@ -59,6 +60,10 @@ class FakeOidc:
         self.nbf: int | None = None
         self.nonce: str | None = None
         self.roles: list[str] | None = None
+        # ``redirect``, ``huge``, or ``trickle`` on ``mode_paths``. Empty is normal.
+        self.mode = ""
+        self.mode_paths: set[str] = set()
+        self.follow_hits = 0
         self._httpd = _Server(self)
         self.port = int(self._httpd.server_address[1])
         self.issuer = f"http://127.0.0.1:{self.port}"
@@ -101,7 +106,15 @@ class FakeOidc:
         if self.sign == "none":
             return _b64({"alg": "none", "typ": "JWT"}) + "." + _b64(claims) + "."
         if self.sign == "hs":
-            return _b64({"alg": "HS256", "typ": "JWT"}) + "." + _b64(claims) + ".sig"
+            # Classic alg-confusion: HMAC keyed with the RSA public key's PEM.
+            pem = self.rsa.as_pem(private=False)
+            if isinstance(pem, str):
+                pem = pem.encode("utf-8")
+            header = _b64({"alg": "HS256", "kid": self.rsa.kid, "typ": "JWT"})
+            payload = _b64(claims)
+            digest = hmac.new(pem, f"{header}.{payload}".encode("ascii"), hashlib.sha256).digest()
+            signature = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+            return f"{header}.{payload}.{signature}"
         with self._lock:
             if self.sign == "ec":
                 key = self.ec
@@ -134,6 +147,8 @@ class _Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         fake = self.server.fake
         parts = urlsplit(self.path)
+        if self._special(parts.path):
+            return
         if parts.path == "/.well-known/openid-configuration":
             body = {
                 "issuer": fake.issuer,
@@ -155,11 +170,14 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         fake = self.server.fake
-        if urlsplit(self.path).path != "/token":
+        path = urlsplit(self.path).path
+        length = int(self.headers.get("Content-Length", "0") or "0")
+        raw = self.rfile.read(length).decode("utf-8", errors="replace") if length else ""
+        if self._special(path):
+            return
+        if path != "/token":
             self._json({"error": "not_found"}, status=404)
             return
-        length = int(self.headers.get("Content-Length", "0") or "0")
-        raw = self.rfile.read(length).decode("utf-8", errors="replace")
         form = {key: values[0] for key, values in parse_qs(raw).items() if len(values) == 1}
         with fake._lock:
             fake.token_hits += 1
@@ -178,6 +196,51 @@ class _Handler(BaseHTTPRequestHandler):
             return
         token = fake._issue(record["nonce"], form.get("client_id", ""))
         self._json({"token_type": "Bearer", "id_token": token})
+
+    def _special(self, path: str) -> bool:
+        """Serve a refused redirect, an oversized body, or a slow trickle."""
+        fake = self.server.fake
+        if path == "/followed":
+            with fake._lock:
+                fake.follow_hits += 1
+            self._json({"followed": True})
+            return True
+        if not fake.mode or path not in fake.mode_paths:
+            return False
+        if fake.mode == "redirect":
+            self.send_response(302)
+            self.send_header("Location", f"{fake.issuer}/followed")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return True
+        if fake.mode == "huge":
+            body = b"x" * 300_000
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            try:
+                self.wfile.write(body)
+            except (BrokenPipeError, ConnectionResetError):
+                return True
+            return True
+        if fake.mode == "trickle":
+            # A byte at a time, slower than one socket read, so only an
+            # overall deadline stops the client before the body finishes.
+            body = b"{" + (b" " * 48) + b"}"
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            for piece in body:
+                time.sleep(0.25)
+                try:
+                    self.wfile.write(bytes((piece,)))
+                    self.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError):
+                    return True
+            return True
+        return False
 
     def _authorize(self, fake: FakeOidc, query: str) -> None:
         params = {key: values[0] for key, values in parse_qs(query).items() if len(values) == 1}
