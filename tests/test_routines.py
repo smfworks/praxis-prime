@@ -468,6 +468,7 @@ def _http(
     headers = [
         f"{method} {path} HTTP/1.1",
         "Host: 127.0.0.1",
+        "Content-Type: application/json",
         "Content-Length: 2",
         "Connection: close",
     ]

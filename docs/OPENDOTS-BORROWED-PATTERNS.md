@@ -87,6 +87,7 @@ A2UI, OpenGenerativeUI, and MCP Apps iframes are listed under [Not adopting](#no
   - The loop's `LoopEvent` types (`loop/events.py`) are mapped onto these events.
   - The Python SDK `ag-ui-protocol` (MIT) may be used for the models. UI types come from `@ag-ui/core`, kept consistent with that schema. `@copilotkit/*` and the `copilotkit` PyPI package are not dependencies. See [Frontend decision](#frontend-decision).
 - **Milestone:** M1d. M6 (PWA) and M7 (Tauri) reuse it.
+- **Landed in M1d:** a chat turn's gateway event frames include an `agui` object (`RUN_*`, `TEXT_MESSAGE_*`, `TOOL_CALL_*`) beside the existing `kind` payload. `protocol/agui.schema.json` lists those types. The optional SSE endpoint is not in this build.
 - **Effort [E]:** 1–2 weeks.
 - **Acceptance criteria:**
   - A chat turn with one tool call streams, in order: run start, text deltas, tool-call start, args, end, result, then run finished. Tests check this.
@@ -107,6 +108,7 @@ A2UI, OpenGenerativeUI, and MCP Apps iframes are listed under [Not adopting](#no
   - An Edit re-runs pre-tool policy on the edited arguments.
   - `queue.decide` is already exactly-once (`packages/prime-core/praxis_prime/approvals/queue.py:150-171`). If the user double-clicks, reloads, or reconnects, the card looks up that decision and result.
 - **Milestone:** M1d (web card). M6 (mobile approval sheets).
+- **Landed in M1d:** `POST /v1/approvals/<id>` records `allow_once`, `allow_session`, or `deny` once. A second decide for that id fails, and the turn's audit row is the same one a Telegram decision produces. An edited approval that re-runs pre-tool policy is not on the web card yet.
 - **Effort [E]:** 2–4 days.
 - **Acceptance criteria:**
   - Approving twice, or approving after a reload, runs the action once. The audit log shows one decision. A second `queue.decide` for the same id fails.
@@ -199,6 +201,7 @@ A2UI, OpenGenerativeUI, and MCP Apps iframes are listed under [Not adopting](#no
     - enforce a request body size limit.
   - Before adding each one, check it does not already exist elsewhere in the gateway.
 - **Milestone:** M1d (when the SPA talks to the gateway). Re-checked in M6 for remote exposure.
+- **Landed in M1d:** `Sec-Fetch-Site: cross-site` is 403, a mutating request that is not JSON is 415, and a body over 1 MiB is 413. The CLI and Telegram are unchanged.
 - **Effort [E]:** about 1 day.
 - **Acceptance criteria:**
   - A cross-site request gets 403, a non-JSON mutation gets 415, and an oversized body gets 413. Tests cover all three.

@@ -24,6 +24,7 @@ from praxis_prime.approvals.queue import ApprovalQueue, parse_decision
 from praxis_prime.audit.log import AuditLog, actor_account_var, profile_var
 from praxis_prime.decide.engine import DecisionEngine
 from praxis_prime.decide.schema import DecideError
+from praxis_prime.gateway.agui import TurnStream
 from praxis_prime.gateway.auth import bearer_token, token_ok
 from praxis_prime.gateway.authz import (
     Denial,
@@ -38,7 +39,12 @@ from praxis_prime.gateway.authz import (
     principal_from_ticket,
 )
 from praxis_prime.gateway.factors import authed_factor, passkey_options, passkey_verify, totp_login
-from praxis_prime.gateway.guard import host_origin_denial
+from praxis_prime.gateway.guard import (
+    body_size_denial,
+    fetch_site_denial,
+    host_origin_denial,
+    mutation_type_denial,
+)
 from praxis_prime.gateway.protocol import (
     CHAT_ROLES,
     OPERATOR_ONLY,
@@ -51,6 +57,7 @@ from praxis_prime.gateway.routes import (
     ids_agree,
     route_allowed,
 )
+from praxis_prime.gateway.web import CSP, load_asset, static_route
 from praxis_prime.gateway.ws import (
     ByteBuffer,
     WebSocketConnection,
@@ -256,8 +263,27 @@ class GatewayServer:
                 if self.logger is not None:
                     self.logger.warning("host_rejected", code=code)
                 return
+            site = fetch_site_denial(headers)
+            if site is not None:
+                status, code, message = site
+                _write_http(conn, status, _error(code, message))
+                return
+            route_only = path.split("?", 1)[0]
+            if static_route(method, route_only):
+                self._static(conn, route_only)
+                return
             if headers.get("upgrade", "").lower() == "websocket":
                 self._handle_ws(conn, buffer, headers, path)
+                return
+            sized = body_size_denial(headers)
+            if sized is not None:
+                status, code, message = sized
+                _write_http(conn, status, _error(code, message))
+                return
+            typed = mutation_type_denial(method, headers)
+            if typed is not None:
+                status, code, message = typed
+                _write_http(conn, status, _error(code, message))
                 return
             length = _content_length(headers)
             body = buffer.read_exact(length) if length else b""
@@ -377,7 +403,20 @@ class GatewayServer:
             extras.extend(cookies)
             return status, payload
         if method == "GET" and route == "/v1/auth/session":
-            return 200, {"ok": True, "account": _principal_public(principal)}
+            body_out: dict[str, object] = {"ok": True, "account": _principal_public(principal)}
+            if principal.kind == "session" and self.accounts is not None:
+                session = self.accounts.session_from_token(principal.session_token)
+                if session is not None:
+                    body_out["csrfToken"] = session.csrf_token
+            return 200, body_out
+        if method == "GET" and route == "/v1/memory":
+            return self._profile_catalog("list_memory", "entries", profile_name)
+        if method == "GET" and route == "/v1/skills":
+            return self._profile_catalog("list_skills", "skills", profile_name)
+        if method == "GET" and route == "/v1/routines":
+            return self._profile_catalog("list_routines", "routines", profile_name)
+        if method == "GET" and route == "/v1/admin/directory":
+            return self._admin_directory()
         if method == "POST" and route == "/v1/auth/ws-ticket":
             if self.accounts is None:
                 return 404, _error("not_found", "no such route")
@@ -480,6 +519,70 @@ class GatewayServer:
         if status == 401 and self.logger is not None:
             self.logger.warning("auth_fail")
         return status, payload
+
+    def _static(self, conn: socket.socket, route: str) -> None:
+        loaded = load_asset(route)
+        if loaded is None:
+            _write_http(conn, 404, _error("not_found", "web app is not installed"))
+            return
+        status, body, content_type = loaded
+        if status != 200:
+            _write_http(conn, 404, _error("not_found", "web app is not installed"))
+            return
+        cache = "no-store" if route in {"/", "/index.html"} else "public, max-age=3600"
+        _write_bytes(
+            conn,
+            200,
+            body,
+            content_type,
+            [
+                ("Content-Security-Policy", CSP),
+                ("X-Content-Type-Options", "nosniff"),
+                ("Referrer-Policy", "no-referrer"),
+                ("Cache-Control", cache),
+            ],
+        )
+
+    def _profile_catalog(
+        self,
+        method: str,
+        key: str,
+        profile: str,
+    ) -> tuple[int, dict[str, object]]:
+        if self.multi_profile and not profile:
+            return 403, _error("forbidden", "a profile is required")
+        fn = getattr(self.agent, method, None)
+        if not callable(fn):
+            return 404, _error("not_found", "no such route")
+        from praxis_prime.supervisor.ipc import IpcError
+        from praxis_prime.supervisor.supervisor import WorkerUnavailable
+
+        try:
+            rows = fn(profile)
+        except (WorkerUnavailable, IpcError, OSError):
+            return 503, _error("unavailable", "profile worker is unavailable")
+        if not isinstance(rows, list):
+            rows = []
+        return 200, {"ok": True, "profile": profile, key: rows}
+
+    def _admin_directory(self) -> tuple[int, dict[str, object]]:
+        if self.accounts is None:
+            return 404, _error("not_found", "accounts are not configured")
+        accounts = [
+            {
+                "id": account.id,
+                "username": account.username,
+                "displayName": account.display_name,
+                "role": account.role,
+                "status": account.status,
+            }
+            for account in self.accounts.list_accounts()
+        ]
+        return 200, {
+            "ok": True,
+            "accounts": accounts,
+            "memberships": self.accounts.list_memberships(),
+        }
 
     def _http_routine(self, routine_id: str) -> tuple[int, dict[str, object]]:
         if self.routine_fire is None:
@@ -758,6 +861,9 @@ class GatewayServer:
         account_id = principal.account_id
         routed = profile_name if self.multi_profile else ""
         runtime_profile = routed or self._runtime_profile()
+        stream = TurnStream(thread_id=session_id or frame_id, run_id=frame_id)
+        for agui in stream.start():
+            outgoing.put(_agui_frame(frame_id, agui))
 
         def work() -> None:
             token = request_id_var.set(frame_id)
@@ -766,6 +872,8 @@ class GatewayServer:
 
             def on_event(event: dict[str, object]) -> None:
                 outgoing.put({"type": "event", "id": frame_id, "payload": event})
+                for agui in stream.feed(event):
+                    outgoing.put(_agui_frame(frame_id, agui))
 
             try:
                 result = self.agent.chat(
@@ -775,6 +883,8 @@ class GatewayServer:
                     owner_account=account_id,
                     owner_profile=runtime_profile,
                 )
+                for agui in stream.finish(error=result.error):
+                    outgoing.put(_agui_frame(frame_id, agui))
                 body = _turn_payload(result)
                 done: dict[str, object] = {
                     "type": "result",
@@ -785,12 +895,18 @@ class GatewayServer:
                 self._remember(account_id, idem, done)
                 outgoing.put(done)
             except PermissionError:
+                for agui in stream.finish(error="session belongs to another account"):
+                    outgoing.put(_agui_frame(frame_id, agui))
                 outgoing.put(
                     _frame_error(frame_id, "forbidden", "session belongs to another account")
                 )
             except LookupError:
+                for agui in stream.finish(error="no such session"):
+                    outgoing.put(_agui_frame(frame_id, agui))
                 outgoing.put(_frame_error(frame_id, "not_found", "no such session"))
             except Exception as exc:
+                for agui in stream.finish(error=type(exc).__name__):
+                    outgoing.put(_agui_frame(frame_id, agui))
                 outgoing.put(_frame_error(frame_id, "turn_failed", type(exc).__name__))
             finally:
                 profile_var.reset(profile_token)
@@ -1198,6 +1314,8 @@ def _write_http(
         403: "Forbidden",
         404: "Not Found",
         409: "Conflict",
+        413: "Payload Too Large",
+        415: "Unsupported Media Type",
         429: "Too Many Requests",
         500: "Error",
         503: "Unavailable",
@@ -1251,7 +1369,39 @@ def _turn_payload(result: TurnResult) -> dict[str, object]:
     }
 
 
+def _agui_frame(frame_id: str, event: dict[str, object]) -> dict[str, object]:
+    return {"type": "event", "id": frame_id, "payload": {"kind": "agui", "agui": event}}
+
+
+def _write_bytes(
+    conn: socket.socket,
+    status: int,
+    body: bytes,
+    content_type: str,
+    extras: list[tuple[str, str]],
+) -> None:
+    lines = [
+        f"HTTP/1.1 {status} OK",
+        f"Content-Type: {content_type}",
+        f"Content-Length: {len(body)}",
+        "Connection: close",
+    ]
+    for name, value in extras:
+        if "\r" in value or "\n" in value:
+            continue
+        lines.append(f"{name}: {value}")
+    head = "\r\n".join(lines) + "\r\n\r\n"
+    try:
+        conn.sendall(head.encode("ascii") + body)
+    except OSError:
+        return
+
+
 def _http_action(method: str, route: str) -> str:
+    if method == "GET" and route in {"/v1/memory", "/v1/skills", "/v1/routines"}:
+        return "content"
+    if method == "GET" and route == "/v1/admin/directory":
+        return "admin"
     if method == "POST" and (_APPROVAL_PATH.fullmatch(route) or route == "/v1/approvals"):
         return "approve"
     if method == "GET" and route == "/v1/approvals":

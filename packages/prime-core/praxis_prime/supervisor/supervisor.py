@@ -34,6 +34,7 @@ from praxis_prime.profiles.ids import profile_id
 from praxis_prime.supervisor import credentials, migrate
 from praxis_prime.supervisor.ipc import (
     EVENT_KINDS,
+    SUPERVISOR_METHODS,
     WORKER_METHODS,
     IpcError,
     recv_message,
@@ -301,24 +302,7 @@ class Supervisor:
         *,
         timeout: float = 30.0,
     ) -> dict[str, object]:
-        if method not in {
-            "health",
-            "shutdown",
-            "status",
-            "chat",
-            "approvals.list",
-            "approvals.get",
-            "approvals.decide",
-            "approvals.deny_all",
-            "session.drop",
-            "session.owner",
-            "model.set",
-            "routine.fire",
-            "revoke",
-            "memory.remember",
-            "memory.list",
-            "events.pull",
-        }:
+        if method not in SUPERVISOR_METHODS:
             raise IpcError("method is not allowed")
         counts = method not in {"health", "session.owner"}
         slot = self.ensure(profile, activity=counts)

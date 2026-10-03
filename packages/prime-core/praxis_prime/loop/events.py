@@ -22,4 +22,14 @@ class TurnEnded:
     error: str | None = None
 
 
-LoopEvent = TextDelta | StatusEvent | TurnEnded
+@dataclass(frozen=True, slots=True)
+class ToolSpan:
+    """One step of a tool call, in AG-UI order: start, args, end, result."""
+
+    phase: str
+    tool_call_id: str
+    name: str
+    detail: str = ""
+
+
+LoopEvent = TextDelta | StatusEvent | TurnEnded | ToolSpan

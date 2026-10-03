@@ -36,7 +36,13 @@ _EXACT = frozenset(
         ("POST", "/v1/auth/passkey/register/options"),
         ("POST", "/v1/auth/passkey/register/verify"),
         ("POST", "/v1/auth/passkey/remove"),
+        ("GET", "/"),
+        ("GET", "/index.html"),
         ("GET", "/v1/profiles"),
+        ("GET", "/v1/memory"),
+        ("GET", "/v1/skills"),
+        ("GET", "/v1/routines"),
+        ("GET", "/v1/admin/directory"),
         ("GET", "/v1/approvals"),
         ("GET", "/v1/approvals/meta"),
         ("POST", "/v1/approvals"),
@@ -64,6 +70,8 @@ def route_allowed(method: str, route: str) -> bool:
     """True when the SPA or a channel may call this route."""
     if (method, route) in _EXACT:
         return True
+    if method == "GET" and route.startswith("/assets/") and _asset_name(route):
+        return True
     if method == "POST" and _APPROVAL.fullmatch(route):
         return True
     if method == "POST" and _ROUTINE.fullmatch(route):
@@ -71,6 +79,13 @@ def route_allowed(method: str, route: str) -> bool:
     if method == "GET" and _PROFILE.fullmatch(route):
         return True
     return False
+
+
+def _asset_name(route: str) -> bool:
+    name = route.removeprefix("/assets/")
+    if not name or "/" in name or name.startswith("."):
+        return False
+    return all(char.isalnum() or char in "._-" for char in name) and len(name) <= 128
 
 
 def frame_allowed(kind: str) -> bool:

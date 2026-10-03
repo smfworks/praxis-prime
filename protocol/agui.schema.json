@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/smfworks/praxis-prime/protocol/agui.schema.json",
+  "title": "Praxis Prime AG-UI event",
+  "description": "Streaming event carried on a gateway event frame as payload.agui. Local only. The vocabulary matches the AG-UI event names used by the SPA. No CopilotKit types.",
+  "type": "object",
+  "required": ["type"],
+  "properties": {
+    "type": {
+      "type": "string",
+      "enum": [
+        "RUN_STARTED",
+        "RUN_FINISHED",
+        "RUN_ERROR",
+        "TEXT_MESSAGE_START",
+        "TEXT_MESSAGE_CONTENT",
+        "TEXT_MESSAGE_END",
+        "TOOL_CALL_START",
+        "TOOL_CALL_ARGS",
+        "TOOL_CALL_END",
+        "TOOL_CALL_RESULT"
+      ]
+    },
+    "threadId": { "type": "string" },
+    "runId": { "type": "string" },
+    "messageId": { "type": "string" },
+    "role": { "type": "string" },
+    "delta": { "type": "string" },
+    "toolCallId": { "type": "string" },
+    "toolCallName": { "type": "string" },
+    "parentMessageId": { "type": "string" },
+    "content": { "type": "string" },
+    "message": { "type": "string" }
+  },
+  "additionalProperties": false
+}

@@ -6,8 +6,9 @@ and session calls go to the worker for that profile.
 
 from __future__ import annotations
 
+import threading
 import time
-from collections.abc import Collection
+from collections.abc import Callable, Collection
 
 from praxis_prime import __version__
 from praxis_prime.accounts.roles import sees_all_profiles
@@ -57,24 +58,43 @@ class RoutingHost:
         owner_account: str = "",
         owner_profile: str = "",
     ) -> TurnResult:
-        del on_event
         if self._closed:
             raise RuntimeError("daemon is shut down")
         if not owner_profile:
             raise WorkerUnavailable("a profile is required")
-        result = self.supervisor.call(
-            owner_profile,
-            "chat",
-            {
-                "text": text,
-                "sessionId": session_id or "",
-                "untrusted": untrusted,
-                "source": source,
-                "channel": channel,
-                "account": owner_account,
-            },
-            timeout=3600,
-        )
+        box: dict[str, object] = {}
+
+        def run() -> None:
+            try:
+                box["result"] = self.supervisor.call(
+                    owner_profile,
+                    "chat",
+                    {
+                        "text": text,
+                        "sessionId": session_id or "",
+                        "untrusted": untrusted,
+                        "source": source,
+                        "channel": channel,
+                        "account": owner_account,
+                    },
+                    timeout=3600,
+                )
+            except Exception as exc:
+                box["error"] = exc
+
+        thread = threading.Thread(target=run, name="praxis-profile-chat", daemon=True)
+        thread.start()
+        while thread.is_alive():
+            if on_event is not None:
+                self._drain_chat(owner_profile, on_event)
+            thread.join(0.05)
+        self._drain_chat(owner_profile, on_event)
+        failure = box.get("error")
+        if isinstance(failure, Exception):
+            raise failure
+        result = box.get("result")
+        if not isinstance(result, dict):
+            raise WorkerUnavailable("profile worker returned no chat result")
         error = result.get("error")
         return TurnResult(
             session_id=str(result.get("sessionId", "")),
@@ -82,6 +102,29 @@ class RoutingHost:
             error=error if isinstance(error, str) else None,
             cancelled=bool(result.get("cancelled")),
         )
+
+    def _drain_chat(self, profile: str, on_event: object | None) -> None:
+        """Forward text and tool events buffered while ``chat`` is running."""
+        try:
+            pulled = self.supervisor.call(profile, "chat.events", {}, timeout=2)
+        except (IpcError, WorkerUnavailable, OSError):
+            return
+        events = pulled.get("events")
+        if not isinstance(events, list) or not callable(on_event):
+            return
+        callback: Callable[[dict[str, object]], None] = on_event
+        for event in events:
+            if isinstance(event, dict):
+                callback(event)
+
+    def list_memory(self, profile: str = "") -> list[dict[str, object]]:
+        return _rows(self.supervisor.call(profile, "memory.catalog", {}, timeout=5), "entries")
+
+    def list_skills(self, profile: str = "") -> list[dict[str, object]]:
+        return _rows(self.supervisor.call(profile, "skills.list", {}, timeout=5), "skills")
+
+    def list_routines(self, profile: str = "") -> list[dict[str, object]]:
+        return _rows(self.supervisor.call(profile, "routines.list", {}, timeout=5), "routines")
 
     def set_model(self, spec: str, *, profile: str = "") -> str:
         if not profile:
@@ -193,6 +236,13 @@ class RoutingHost:
         if len(names) == 1:
             return names[0]
         raise WorkerUnavailable("a profile is required")
+
+
+def _rows(result: dict[str, object], key: str) -> list[dict[str, object]]:
+    rows = result.get(key)
+    if not isinstance(rows, list):
+        return []
+    return [item for item in rows if isinstance(item, dict)]
 
 
 class RoutingQueue:

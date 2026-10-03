@@ -135,6 +135,8 @@ class WorkerApp:
         self._stop = threading.Event()
         self._events: list[dict[str, object]] = []
         self._event_lock = threading.Lock()
+        self._stream: list[dict[str, object]] = []
+        self._stream_lock = threading.Lock()
         self._listen: socket.socket | None = None
         self._lock_fd = _lock_profile(data_root / "profiles" / profile)
         self._data_token = bind_data_root(data_root)
@@ -329,6 +331,23 @@ class WorkerApp:
         if method == "memory.list":
             rows = self.runtime.memory.list_entries()
             return {"entries": [item.content for item in rows]}
+        if method == "memory.catalog":
+            from praxis_prime.catalog import memory_rows
+
+            return {"entries": memory_rows(self.runtime.memory)}
+        if method == "skills.list":
+            from praxis_prime.catalog import skill_rows
+
+            return {"skills": skill_rows(self.runtime.skills)}
+        if method == "routines.list":
+            from praxis_prime.catalog import routine_rows
+
+            return {"routines": routine_rows(self.scheduler.store)}
+        if method == "chat.events":
+            with self._stream_lock:
+                events = list(self._stream)
+                self._stream.clear()
+            return {"events": events}
         if method == "events.pull":
             with self._event_lock:
                 events = list(self._events)
@@ -342,6 +361,12 @@ class WorkerApp:
             raise LookupError("chat text is empty")
         session = params.get("sessionId")
         session_id = session if isinstance(session, str) and session else None
+        def on_event(payload: dict[str, object]) -> None:
+            with self._stream_lock:
+                self._stream.append(payload)
+                if len(self._stream) > 500:
+                    del self._stream[: len(self._stream) - 500]
+
         result = self.host.chat(
             text,
             session_id=session_id,
@@ -350,6 +375,7 @@ class WorkerApp:
             channel=str(params.get("channel", "")),
             owner_account=str(params.get("account", "")),
             owner_profile=self.profile,
+            on_event=on_event,
         )
         return {
             "sessionId": result.session_id,

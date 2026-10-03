@@ -102,6 +102,10 @@ SUPERVISOR_METHODS = frozenset(
         "revoke",
         "memory.remember",
         "memory.list",
+        "memory.catalog",
+        "skills.list",
+        "routines.list",
+        "chat.events",
         "events.pull",
     }
 )
