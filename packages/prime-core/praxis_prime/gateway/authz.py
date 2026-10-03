@@ -113,10 +113,11 @@ def authenticate_http(
     return Denial(401, "unauthorized", "authentication required")
 
 
-# Chat, approval, routine fire, model.set, and session.drop. With one
-# in-process runtime, these run only on the profile that process opened.
-# The supervisor sets multi_profile so each call names its own worker.
-_SCOPED_ACTIONS = frozenset({"chat", "approve"})
+# Chat, approval, catalog reads, routine fire, model.set, and session.drop.
+# With one in-process runtime, these run only on the profile that process
+# opened. An omitted profile is that runtime, and it still needs a
+# membership. The supervisor sets multi_profile so each call names its worker.
+_SCOPED_ACTIONS = frozenset({"chat", "approve", "content"})
 
 
 def authorize_action(

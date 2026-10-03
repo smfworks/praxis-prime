@@ -433,10 +433,23 @@ class GatewayServer:
         if method == "GET" and route == "/status":
             return 200, {"ok": True, "status": self._status()}
         if method == "GET" and route == "/v1/approvals/meta":
-            rows = self._visible_meta(principal)
+            # The header the client sent. An omitted header is not the
+            # implicit profile, or an owner would lose every other card.
+            explicit = headers.get("x-praxis-profile", "").strip()
+            foreign = self._foreign_runtime(explicit)
+            if foreign is not None:
+                return foreign.status, _error(foreign.code, foreign.message)
+            rows = self._visible_meta(principal, profile=explicit)
             return 200, {"ok": True, "count": len(rows), "approvals": rows}
         if method == "GET" and route == "/v1/approvals":
-            return 200, {"ok": True, "approvals": self._visible_approvals(principal)}
+            explicit = headers.get("x-praxis-profile", "").strip()
+            foreign = self._foreign_runtime(explicit)
+            if foreign is not None:
+                return foreign.status, _error(foreign.code, foreign.message)
+            return 200, {
+                "ok": True,
+                "approvals": self._visible_approvals(principal, profile=explicit),
+            }
         match = _APPROVAL_PATH.fullmatch(route)
         if method == "POST" and match is not None:
             try:
@@ -559,6 +572,8 @@ class GatewayServer:
 
         try:
             rows = fn(profile)
+        except PermissionError as exc:
+            return 403, _error("forbidden", str(exc) or "this daemon runs a different profile")
         except (WorkerUnavailable, IpcError, OSError):
             return 503, _error("unavailable", "profile worker is unavailable")
         if not isinstance(rows, list):
@@ -727,7 +742,8 @@ class GatewayServer:
         if not frame_session_ids_agree(frame):
             outgoing.put(_frame_error(frame_id, "bad_request", "session id does not match"))
             return
-        profile_name = str(_payload(frame).get("profile", "") or "")
+        explicit_profile = str(_payload(frame).get("profile", "") or "")
+        profile_name = explicit_profile
         if self.multi_profile and not profile_name:
             profile_name = self._implicit_profile()
         denial = authorize_action(
@@ -767,11 +783,19 @@ class GatewayServer:
                 self._remember(principal.account_id, key, result)
                 outgoing.put(result)
             elif kind == "approvals.list":
+                foreign = self._foreign_runtime(explicit_profile)
+                if foreign is not None:
+                    outgoing.put(_frame_error(frame_id, foreign.code, foreign.message))
+                    return
                 result = {
                     "type": "result",
                     "id": frame_id,
                     "ok": True,
-                    "payload": {"approvals": self._visible_approvals(principal)},
+                    "payload": {
+                        "approvals": self._visible_approvals(
+                            principal, profile=explicit_profile
+                        )
+                    },
                 }
                 outgoing.put(result)
             elif kind == "approvals.decide":
@@ -926,6 +950,9 @@ class GatewayServer:
         spec = str(_payload(frame).get("spec", "")).strip()
         try:
             chosen = self.agent.set_model(spec, profile=profile_name)
+        except PermissionError as exc:
+            outgoing.put(_frame_error(frame_id, "forbidden", str(exc)))
+            return
         except ValueError as exc:
             outgoing.put(_frame_error(frame_id, "bad_request", str(exc)))
             return
@@ -1105,8 +1132,37 @@ class GatewayServer:
             return None
         return frame
 
-    def _visible_approvals(self, principal: Principal) -> list[dict[str, object]]:
-        items = self.approvals.list_pending()
+    def _process_profile(self) -> str:
+        stamped = getattr(self.approvals, "profile_id", "")
+        return self._runtime_profile() or (stamped if isinstance(stamped, str) else "")
+
+    def _foreign_runtime(self, profile: str) -> Denial | None:
+        """A named profile that this process did not open.
+
+        The supervisor has no single runtime, so a named profile is a worker.
+        An empty name is the profile authorize_action already bound.
+        """
+        if self.multi_profile:
+            return None
+        requested = profile.strip()
+        if not requested:
+            return None
+        from praxis_prime.profiles.ids import profile_id
+
+        named = profile_id(requested)
+        runtime = self._process_profile()
+        bound = profile_id(runtime) if runtime else None
+        if named is None or bound is None or named != bound:
+            return Denial(403, "forbidden", "this daemon runs a different profile")
+        return None
+
+    def _visible_approvals(
+        self,
+        principal: Principal,
+        *,
+        profile: str = "",
+    ) -> list[dict[str, object]]:
+        items = self._approvals_for_profile(self.approvals.list_pending(), profile)
         if (
             accounts_enforced(self.accounts)
             and not sees_all_profiles(principal.role)
@@ -1116,23 +1172,63 @@ class GatewayServer:
             allowed = set(self.accounts.profile_ids_for(principal.account_id))
             kept: list[dict[str, object]] = []
             for item in items:
-                profile = item.get("profileId")
-                if isinstance(profile, str) and profile in allowed:
+                card_profile = item.get("profileId")
+                if isinstance(card_profile, str) and card_profile in allowed:
                     kept.append(item)
             items = kept
         return [self._hide_foreign_session(principal, item) for item in items]
 
-    def _visible_meta(self, principal: Principal) -> list[dict[str, object]]:
+    def _visible_meta(
+        self,
+        principal: Principal,
+        *,
+        profile: str = "",
+    ) -> list[dict[str, object]]:
         """Metadata for the caller's profiles. Auditors, owners, and admins see all."""
+        named = profile.strip()
         if (
             not accounts_enforced(self.accounts)
             or principal.role in {"owner", "admin", "auditor"}
             or self.accounts is None
             or not principal.account_id
         ):
+            if named:
+                return self.approvals.list_meta(profiles=frozenset({named}))
+            runtime = "" if self.multi_profile else self._process_profile()
+            if runtime:
+                return self.approvals.list_meta(profiles=frozenset({runtime, ""}))
             return self.approvals.list_meta()
-        allowed = frozenset(self.accounts.profile_ids_for(principal.account_id))
-        return self.approvals.list_meta(profiles=allowed)
+        allowed = set(self.accounts.profile_ids_for(principal.account_id))
+        if named:
+            allowed &= {named}
+        elif not self.multi_profile:
+            runtime = self._process_profile()
+            if runtime:
+                allowed &= {runtime}
+        return self.approvals.list_meta(profiles=frozenset(allowed))
+
+    def _approvals_for_profile(
+        self,
+        items: list[dict[str, object]],
+        profile: str,
+    ) -> list[dict[str, object]]:
+        """Keep cards for the profile this read was authorized to see.
+
+        A named supervisor request is one worker. With no name, owners and
+        members keep the cards their role already allows. A single-process
+        daemon drops a card stamped for some other profile.
+        """
+        named = profile.strip()
+        if named:
+            return [item for item in items if item.get("profileId") == named]
+        if self.multi_profile:
+            return items
+        runtime = self._process_profile()
+        if not runtime:
+            return items
+        return [
+            item for item in items if not item.get("profileId") or item.get("profileId") == runtime
+        ]
 
     def _hide_foreign_session(
         self,

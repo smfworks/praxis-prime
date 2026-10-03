@@ -55,6 +55,45 @@ from praxis_prime.supervisor.redact import redact_value
 from praxis_prime.supervisor.socketdir import ensure_private_dir
 
 _NOFILE = 256
+# Events waiting for the supervisor to poll chat.events. The cap keeps one
+# turn from holding an unbounded list. A drain past the cap tells the client.
+_STREAM_LIMIT = 500
+
+
+def remember_stream_event(
+    buffer: list[dict[str, object]],
+    dropped: int,
+    payload: dict[str, object],
+    *,
+    limit: int = _STREAM_LIMIT,
+) -> int:
+    """Append one event and return how many have been dropped."""
+    buffer.append(payload)
+    extra = len(buffer) - limit
+    if extra <= 0:
+        return dropped
+    del buffer[:extra]
+    return dropped + extra
+
+
+def drain_stream(
+    buffer: list[dict[str, object]],
+    dropped: int,
+) -> tuple[list[dict[str, object]], int]:
+    """Take the buffer. A drop count becomes the first event the client sees."""
+    events = list(buffer)
+    buffer.clear()
+    if dropped:
+        events.insert(
+            0,
+            {
+                "kind": "status",
+                "phase": "truncated",
+                "detail": "earlier stream events were dropped",
+                "dropped": dropped,
+            },
+        )
+    return events, 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -136,6 +175,7 @@ class WorkerApp:
         self._events: list[dict[str, object]] = []
         self._event_lock = threading.Lock()
         self._stream: list[dict[str, object]] = []
+        self._stream_dropped = 0
         self._stream_lock = threading.Lock()
         self._listen: socket.socket | None = None
         self._lock_fd = _lock_profile(data_root / "profiles" / profile)
@@ -244,6 +284,12 @@ class WorkerApp:
                 body = params if isinstance(params, dict) else {}
                 try:
                     result = self.handle(method, body)
+                except PermissionError as exc:
+                    send_message(
+                        conn,
+                        {"id": message.get("id", ""), "ok": False, "error": str(exc)},
+                    )
+                    continue
                 except LookupError as exc:
                     send_message(
                         conn,
@@ -281,6 +327,9 @@ class WorkerApp:
         return credential_matches(str(message.get("token", "")), self.credential)
 
     def handle(self, method: str, params: Mapping[str, object]) -> dict[str, object]:
+        claimed = params.get("profile")
+        if isinstance(claimed, str) and claimed.strip() and claimed.strip() != self.profile:
+            raise PermissionError("this daemon runs a different profile")
         if method == "health":
             return {"ready": True, "profile": self.profile, "pid": os.getpid()}
         if method == "shutdown":
@@ -345,9 +394,12 @@ class WorkerApp:
             return {"routines": routine_rows(self.scheduler.store)}
         if method == "chat.events":
             with self._stream_lock:
-                events = list(self._stream)
-                self._stream.clear()
-            return {"events": events}
+                events, self._stream_dropped = drain_stream(self._stream, self._stream_dropped)
+            body: dict[str, object] = {"events": events}
+            if events and events[0].get("phase") == "truncated":
+                body["truncated"] = True
+                body["dropped"] = events[0].get("dropped", 0)
+            return body
         if method == "events.pull":
             with self._event_lock:
                 events = list(self._events)
@@ -361,11 +413,9 @@ class WorkerApp:
             raise LookupError("chat text is empty")
         session = params.get("sessionId")
         session_id = session if isinstance(session, str) and session else None
+
         def on_event(payload: dict[str, object]) -> None:
-            with self._stream_lock:
-                self._stream.append(payload)
-                if len(self._stream) > 500:
-                    del self._stream[: len(self._stream) - 500]
+            self._note_stream(payload)
 
         result = self.host.chat(
             text,
@@ -383,6 +433,14 @@ class WorkerApp:
             "error": result.error,
             "cancelled": result.cancelled,
         }
+
+    def _note_stream(self, payload: dict[str, object]) -> None:
+        with self._stream_lock:
+            self._stream_dropped = remember_stream_event(
+                self._stream,
+                self._stream_dropped,
+                payload,
+            )
 
     def _install_grants(self) -> None:
         legacy = self.runtime_home() / "grants-legacy.json"

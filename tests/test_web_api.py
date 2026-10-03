@@ -9,8 +9,10 @@ import threading
 import time
 from pathlib import Path
 
+import pytest
 from tests.fakes import ScriptedProvider
 from tests.test_accounts import _login, _request
+from tests.test_review_fixes import _ticket_client
 
 from praxis_prime.accounts.db import AccountStore
 from praxis_prime.approvals.queue import ApprovalQueue
@@ -199,7 +201,7 @@ def test_catalog_is_limited_to_the_granted_profile(tmp_path: Path):
 
 
 def test_in_process_catalog_reads_that_runtime(tmp_path: Path):
-    server, host, runtime = _accounts(tmp_path, owner_only=True)
+    server, host, runtime = _accounts(tmp_path, owner_only=True, profile="default")
     try:
         runtime.memory.remember("the kettle is blue")
         cookie, csrf, _body = _login(server.bound_port, "ada", _PASSWORD)
@@ -233,6 +235,262 @@ def test_in_process_catalog_reads_that_runtime(tmp_path: Path):
     finally:
         server.shutdown()
         host.close()
+
+
+_CATALOG_ROUTES = ("/v1/memory", "/v1/skills", "/v1/routines", "/v1/approvals")
+
+
+def test_single_process_catalog_fails_closed_without_membership(tmp_path: Path):
+    """An operator who omits the profile, or names another one, cannot read this runtime."""
+    data = tmp_path / "data"
+    create_profile(data, "alpha")
+    create_profile(data, "beta")
+    store = AccountStore(data / "accounts.db")
+    ada = store.create_account(username_text="ada", password=_PASSWORD, display_name="Ada")
+    store.create_account(
+        username_text="otto",
+        password=_PASSWORD,
+        display_name="Otto",
+        role="operator",
+    )
+    bea = store.create_account(
+        username_text="bea",
+        password=_PASSWORD,
+        display_name="Bea",
+        role="operator",
+    )
+    member = store.create_account(
+        username_text="mina",
+        password=_PASSWORD,
+        display_name="Mina",
+        role="operator",
+    )
+    store.set_membership(ada.id, "alpha", "owner")
+    store.set_membership(bea.id, "beta", "operator")
+    store.set_membership(member.id, "alpha", "operator")
+    runtime = build_runtime(
+        env={},
+        config_path=tmp_path / "missing.toml",
+        data_path=data / "unused.db",
+        cwd=tmp_path,
+        profile="alpha",
+        providers={"ollama": ScriptedProvider([AssistantFinal(content="ok")])},
+    )
+    runtime.memory.remember("ALPHA-SECRET-NOTE")
+    pending = ApprovalQueue()
+    pending.profile_id = runtime.profile_id
+    host = Host(runtime, pending)
+    server = GatewayServer(
+        host="127.0.0.1",
+        port=0,
+        token="test-token",
+        agent=host,
+        approvals=pending,
+        logger=JsonLogger(tmp_path / "daemon.log"),
+        accounts=store,
+        audit=runtime.audit,
+        data_root=data,
+    )
+    server.start()
+    try:
+        with pytest.raises(PermissionError, match="different profile"):
+            host.list_memory("beta")
+        with pytest.raises(PermissionError, match="different profile"):
+            host.list_skills("beta")
+        with pytest.raises(PermissionError, match="different profile"):
+            host.list_routines("beta")
+        with pytest.raises(PermissionError, match="different profile"):
+            host.set_model("ollama:qwen3:32b", profile="beta")
+        assert any(item["content"] == "ALPHA-SECRET-NOTE" for item in host.list_memory("alpha"))
+        assert any(item["content"] == "ALPHA-SECRET-NOTE" for item in host.list_memory(""))
+
+        otto_cookie, otto_csrf, _otto = _login(server.bound_port, "otto", _PASSWORD)
+        bea_cookie, bea_csrf, _bea = _login(server.bound_port, "bea", _PASSWORD)
+        mina_cookie, mina_csrf, _mina = _login(server.bound_port, "mina", _PASSWORD)
+        denied = (
+            (otto_cookie, otto_csrf, "", "not a member of this profile"),
+            (otto_cookie, otto_csrf, "alpha", "not a member of this profile"),
+            (otto_cookie, otto_csrf, "beta", "this daemon runs a different profile"),
+            (bea_cookie, bea_csrf, "", "not a member of this profile"),
+            (bea_cookie, bea_csrf, "beta", "this daemon runs a different profile"),
+        )
+        for route in _CATALOG_ROUTES:
+            for cookie, csrf, profile, message in denied:
+                status, _headers, body = _request(
+                    server.bound_port,
+                    "GET",
+                    route,
+                    cookie=cookie,
+                    csrf=csrf,
+                    profile=profile,
+                )
+                assert status == 403, (route, profile, body)
+                assert body["error"]["code"] == "forbidden"
+                assert body["error"]["message"] == message
+                assert "ALPHA-SECRET-NOTE" not in json.dumps(body)
+            status, _headers, body = _request(
+                server.bound_port,
+                "GET",
+                route,
+                cookie=mina_cookie,
+                csrf=mina_csrf,
+                profile="alpha",
+            )
+            assert status == 200, (route, body)
+            status, _headers, body = _request(
+                server.bound_port,
+                "GET",
+                route,
+                cookie=mina_cookie,
+                csrf=mina_csrf,
+            )
+            assert status == 200, (route, body)
+        status, _headers, body = _request(
+            server.bound_port,
+            "GET",
+            "/v1/memory",
+            cookie=mina_cookie,
+            csrf=mina_csrf,
+            profile="alpha",
+        )
+        assert any(item["content"] == "ALPHA-SECRET-NOTE" for item in body["entries"])
+        status, _headers, body = _request(
+            server.bound_port,
+            "GET",
+            "/v1/memory",
+            cookie=bea_cookie,
+            csrf=bea_csrf,
+            profile="beta",
+        )
+        assert status == 403
+        assert body["error"]["message"] == "this daemon runs a different profile"
+        assert "ALPHA-SECRET-NOTE" not in json.dumps(body)
+
+        status, _headers, ticket_body = _request(
+            server.bound_port,
+            "POST",
+            "/v1/auth/ws-ticket",
+            cookie=otto_cookie,
+            csrf=otto_csrf,
+        )
+        assert status == 200
+        outsider_ws = _ticket_client(server.bound_port, str(ticket_body["ticket"]))
+        try:
+            omitted = outsider_ws.request("approvals.list", {})
+            named = outsider_ws.request("approvals.list", {"profile": "beta"})
+        finally:
+            outsider_ws.close()
+        assert omitted.get("type") == "error"
+        assert "not a member" in json.dumps(omitted)
+        assert named.get("type") == "error"
+        assert "different profile" in json.dumps(named)
+        assert "ALPHA-SECRET-NOTE" not in json.dumps(omitted)
+        assert "ALPHA-SECRET-NOTE" not in json.dumps(named)
+    finally:
+        server.shutdown()
+        host.close()
+        store.close()
+
+
+def test_named_profile_approval_list_does_not_include_another_profile(tmp_path: Path):
+    data = tmp_path / "data"
+    create_profile(data, "alpha")
+    create_profile(data, "beta")
+    store = AccountStore(data / "accounts.db")
+    ada = store.create_account(username_text="ada", password=_PASSWORD, display_name="Ada")
+    store.set_membership(ada.id, "alpha", "owner")
+    store.set_membership(ada.id, "beta", "owner")
+    cards = _Cards()
+    server = GatewayServer(
+        host="127.0.0.1",
+        port=0,
+        token="test-token",
+        agent=_Spy(),  # type: ignore[arg-type]
+        approvals=cards,  # type: ignore[arg-type]
+        logger=JsonLogger(tmp_path / "daemon.log"),
+        accounts=store,
+        data_root=data,
+        multi_profile=True,
+    )
+    server.start()
+    try:
+        cookie, csrf, _body = _login(server.bound_port, "ada", _PASSWORD)
+        status, _headers, body = _request(
+            server.bound_port,
+            "GET",
+            "/v1/approvals",
+            cookie=cookie,
+            csrf=csrf,
+        )
+        assert status == 403
+        assert body["error"]["message"] == "a profile is required"
+        status, _headers, body = _request(
+            server.bound_port,
+            "GET",
+            "/v1/approvals",
+            cookie=cookie,
+            csrf=csrf,
+            profile="beta",
+        )
+        assert status == 200
+        assert [item["id"] for item in body["approvals"]] == ["ap_bbbbbbbb"]
+        assert "ALPHA-CARD" not in json.dumps(body)
+        assert "BETA-CARD" in json.dumps(body)
+    finally:
+        server.shutdown()
+        store.close()
+
+
+def test_routing_catalog_asks_only_the_named_worker():
+    from praxis_prime.supervisor.supervisor import WorkerUnavailable, _require_profile
+
+    class _Sup:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str]] = []
+
+        def call(self, profile: str, method: str, params: object = None, timeout: float = 30):
+            del params, timeout
+            checked = _require_profile(profile)
+            self.calls.append((checked, method))
+            return {"entries": [{"content": checked}], "skills": [], "routines": []}
+
+    supervisor = _Sup()
+    host = RoutingHost(supervisor, object(), object())  # type: ignore[arg-type]
+    assert host.list_memory("beta") == [{"content": "beta"}]
+    assert host.list_skills("beta") == []
+    assert host.list_routines("beta") == []
+    assert supervisor.calls == [
+        ("beta", "memory.catalog"),
+        ("beta", "skills.list"),
+        ("beta", "routines.list"),
+    ]
+    with pytest.raises(WorkerUnavailable):
+        host.list_memory("")
+
+
+def test_worker_stream_reports_events_past_the_cap():
+    from praxis_prime.worker import WorkerApp
+
+    app = WorkerApp.__new__(WorkerApp)
+    app.profile = "alpha"
+    app._stream = []
+    app._stream_dropped = 0
+    app._stream_lock = threading.Lock()
+    for index in range(501):
+        app._note_stream({"kind": "text", "text": str(index)})
+    drained = app.handle("chat.events", {})
+    assert drained["truncated"] is True
+    assert drained["dropped"] == 1
+    events = drained["events"]
+    assert isinstance(events, list)
+    assert events[0]["phase"] == "truncated"
+    assert events[0]["dropped"] == 1
+    assert events[1]["text"] == "1"
+    assert events[-1]["text"] == "500"
+    again = app.handle("chat.events", {})
+    assert again == {"events": []}
+    with pytest.raises(PermissionError, match="different profile"):
+        app.handle("memory.catalog", {"profile": "beta"})
 
 
 def test_web_approval_is_once_and_stays_on_that_account(tmp_path: Path):
@@ -424,6 +682,50 @@ def test_routing_host_forwards_events_while_chat_runs():
     )
     assert result == TurnResult(session_id="s", text="Hi there", error=None, cancelled=False)
     assert seen == ["Hi", " there"]
+
+
+class _Cards:
+    """Two profiles' approval cards, so a named read cannot return both."""
+
+    profile_id = ""
+
+    def list_pending(self) -> list[dict[str, object]]:
+        return [
+            {
+                "id": "ap_aaaaaaaa",
+                "profileId": "alpha",
+                "tool": "alpha-tool",
+                "sessionId": "",
+                "summary": "ALPHA-CARD",
+            },
+            {
+                "id": "ap_bbbbbbbb",
+                "profileId": "beta",
+                "tool": "beta-tool",
+                "sessionId": "",
+                "summary": "BETA-CARD",
+            },
+        ]
+
+    def list_meta(self, *, profiles: object = None) -> list[dict[str, object]]:
+        rows = []
+        for item in self.list_pending():
+            if isinstance(profiles, frozenset) and item["profileId"] not in profiles:
+                continue
+            rows.append(
+                {
+                    "id": item["id"],
+                    "tool": item["tool"],
+                    "risk": "READ",
+                    "createdAt": "",
+                    "decision": "pending",
+                }
+            )
+        return rows
+
+    def get(self, approval_id: str) -> dict[str, object] | None:
+        del approval_id
+        return None
 
 
 class _Spy:
