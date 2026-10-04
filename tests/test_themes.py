@@ -149,6 +149,24 @@ _NAMED_RFN = {
     "smf.medical": set(),
     "smf.dental": set(),
 }
+# Name ID 0 is the copyright notice. It keeps the author's name and the
+# Reserved Font Name clause. Every other name record in a renamed subset
+# must not contain these strings. Lexend is not in this set.
+_RENAMED_FONTS = {
+    "LibreBaskerville.woff2",
+    "SourceSans3.woff2",
+    "SourceCodePro.woff2",
+    "IBMPlexSans.woff2",
+    "IBMPlexMono-Regular.woff2",
+    "IBMPlexMono-Bold.woff2",
+}
+_RFN_LEFTOVERS = (
+    "Libre Baskerville",
+    "LibreBaskerville",
+    "Source",
+    "IBM Plex",
+    "IBMPlex",
+)
 
 
 def _reserved_font_names(text: str) -> set[str]:
@@ -178,11 +196,16 @@ def test_subset_fonts_drop_reserved_names():
             try:
                 by_id: dict[int, list[str]] = {}
                 for record in font["name"].names:
-                    if record.nameID not in {0, 1, 4, 6, 16}:
-                        continue
                     by_id.setdefault(record.nameID, []).append(record.toUnicode())
             finally:
                 font.close()
+            if path.name in _RENAMED_FONTS:
+                for name_id, values in by_id.items():
+                    if name_id == 0:
+                        continue
+                    for value in values:
+                        leaked = [needle for needle in _RFN_LEFTOVERS if needle in value]
+                        assert not leaked, (path.name, name_id, value, leaked)
             shown = [
                 value
                 for name_id in (1, 4, 6, 16)
