@@ -20,7 +20,7 @@ from praxis_prime.loop.control import TurnControl
 from praxis_prime.loop.events import StatusEvent, ToolSpan, TurnEnded
 from praxis_prime.memory.tiers import memory_channel
 from praxis_prime.profiles.ids import profile_id
-from praxis_prime.router.types import TextDelta
+from praxis_prime.router.types import InferenceNotConfigured, TextDelta
 from praxis_prime.runtime import Runtime
 
 EventCallback = Callable[[dict[str, object]], None]
@@ -172,7 +172,12 @@ class Host:
 
     def status(self) -> dict[str, object]:
         with self._lock:
-            model = "" if self._closed else self.runtime.router.primary.spec()
+            model = ""
+            if not self._closed:
+                try:
+                    model = self.runtime.router.primary.spec()
+                except InferenceNotConfigured:
+                    model = ""
             mode = "" if self._closed else self.runtime.settings.mode
         return {
             "service": "praxis-primed",

@@ -95,14 +95,13 @@ class RouterJudge:
         question: Question,
         state: str,
     ) -> JudgeVote | None:
+        if not model or not str(model).strip():
+            return None
         try:
             ref = parse_model_spec(model)
         except ValueError:
-            ref = None
-        if ref is None:
-            provider_name, model_name = "ollama", model
-        else:
-            provider_name, model_name = ref.provider, ref.model
+            return None
+        provider_name, model_name = ref.provider, ref.model
         provider = self.router.providers.get(provider_name)
         if provider is None:
             return None

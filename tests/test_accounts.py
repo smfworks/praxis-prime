@@ -233,6 +233,7 @@ def test_viewer_cannot_approve_and_a_non_member_is_forbidden(tmp_path: Path):
     store.set_membership(owner.id, "work", "owner")
     store.set_membership(viewer.id, "work", "viewer")
     runtime = build_runtime(
+        model="ollama:qwen3:32b",
         env={},
         config_path=tmp_path / "missing.toml",
         data_path=data / "prime.db",
@@ -494,6 +495,7 @@ def test_auditor_reads_approval_metadata_and_not_the_card(tmp_path: Path):
         role="auditor",
     )
     runtime = build_runtime(
+        model="ollama:qwen3:32b",
         env={},
         config_path=tmp_path / "missing.toml",
         data_path=data / "prime.db",
@@ -591,6 +593,7 @@ def test_bearer_token_is_owner_equivalent_until_disabled(tmp_path: Path):
     store = AccountStore(data / "accounts.db")
     store.create_account(username_text="ada", password=_PASSWORD, display_name="Ada")
     runtime = build_runtime(
+        model="ollama:qwen3:32b",
         env={},
         config_path=tmp_path / "missing.toml",
         data_path=data / "prime.db",

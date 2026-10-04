@@ -17,7 +17,7 @@ from praxis_prime.approvals.gate import ApprovalDecision, ApprovalRequest
 from praxis_prime.gateway.client import GatewayClient, GatewayError
 from praxis_prime.loop.control import TurnControl
 from praxis_prime.loop.events import StatusEvent, TurnEnded
-from praxis_prime.router.types import TextDelta
+from praxis_prime.router.types import InferenceNotConfigured, TextDelta
 from praxis_prime.runtime import Runtime
 
 ReadLine = Callable[[str], str]
@@ -151,7 +151,7 @@ def run_repl(
     except LookupError as exc:
         write(f"praxis-prime chat: {exc}\n")
         return 1
-    write(_banner(runtime.router.primary.spec(), active_id))
+    write(_banner(_active_model(runtime), active_id))
     while True:
         try:
             line = read_line("you> ")
@@ -170,8 +170,8 @@ def run_repl(
             write(HELP)
             continue
         if command == "/model":
-            chain = ", ".join(ref.spec() for ref in runtime.router.chain)
-            write(f"model {runtime.router.primary.spec()}\nfallbacks {chain}\n")
+            chain = ", ".join(ref.spec() for ref in runtime.router.chain) or "(none)"
+            write(f"model {_active_model(runtime)}\nfallbacks {chain}\n")
             continue
         if command.startswith("/model "):
             spec = command.split(None, 1)[1].strip()
@@ -289,6 +289,13 @@ def stdout_writer(stream: object | None = None) -> Write:
         target.flush()
 
     return write
+
+
+def _active_model(runtime: Runtime) -> str:
+    try:
+        return runtime.router.primary.spec()
+    except InferenceNotConfigured as exc:
+        return str(exc)
 
 
 def _banner(model: str, session_id: str) -> str:

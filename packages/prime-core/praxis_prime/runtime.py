@@ -34,7 +34,7 @@ from praxis_prime.profiles.policy import ToolAllowlist, clamp_dials
 from praxis_prime.router.factory import build_router
 from praxis_prime.router.router import ChatProvider, ModelRouter
 from praxis_prime.router.settings import Settings, load_settings
-from praxis_prime.router.types import parse_model_spec
+from praxis_prime.router.types import InferenceNotConfigured, parse_model_spec
 from praxis_prime.skills.catalog import SkillCatalog, bundled_skills_dir
 from praxis_prime.skills.tools import install_skill_tool
 from praxis_prime.state import StateDB, refuse_if_migrating
@@ -119,8 +119,12 @@ class Runtime:
         else:
             history = []
             active_preamble = preamble
+            try:
+                session_model = self.router.primary.spec()
+            except InferenceNotConfigured:
+                session_model = ""
             session_id = self.store.create(
-                model=self.router.primary.spec(),
+                model=session_model,
                 preamble=preamble,
                 owner_account=owner_account,
                 owner_profile=owner_profile,
@@ -184,12 +188,16 @@ def build_runtime(
             config_path=config_path,
         )
     chosen = providers
+    stub_map = None
     if chosen is None:
         from praxis_prime.router.stub import providers_from_env
 
         source = os.environ if env is None else env
-        chosen = providers_from_env(source)
+        stub_map = providers_from_env(source)
+        chosen = stub_map
     router = build_router(settings, chosen)
+    router.require_verified = providers is None and stub_map is None
+    router.verified_specs = set(settings.verified_specs)
     if model:
         ref = parse_model_spec(model)
         router.use_primary(ref)

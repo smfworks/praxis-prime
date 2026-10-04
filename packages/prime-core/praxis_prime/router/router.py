@@ -13,6 +13,7 @@ from typing import Protocol
 from praxis_prime.router.types import (
     ChatRequest,
     FallbackNotice,
+    InferenceNotConfigured,
     ModelRef,
     ProviderUnreachable,
     RouterExhausted,
@@ -28,14 +29,23 @@ class ChatProvider(Protocol):
 
 
 class ModelRouter:
-    def __init__(self, chain: list[ModelRef], providers: dict[str, ChatProvider]) -> None:
-        if not chain:
-            raise ValueError("the model chain is empty")
+    def __init__(
+        self,
+        chain: list[ModelRef],
+        providers: dict[str, ChatProvider],
+        *,
+        require_verified: bool = False,
+        verified_specs: set[str] | None = None,
+    ) -> None:
         self.chain = list(chain)
         self.providers = providers
+        self.require_verified = require_verified
+        self.verified_specs = set(verified_specs or ())
 
     @property
     def primary(self) -> ModelRef:
+        if not self.chain:
+            raise InferenceNotConfigured()
         return self.chain[0]
 
     def use_primary(self, ref: ModelRef) -> None:
@@ -47,6 +57,10 @@ class ModelRouter:
             yield event
 
     def iter_stream(self, request: ChatRequest) -> Iterator[StreamEvent]:
+        if not self.chain:
+            raise InferenceNotConfigured()
+        if self.require_verified and self.chain[0].spec() not in self.verified_specs:
+            raise InferenceNotConfigured()
         errors: list[ProviderUnreachable] = []
         for index, ref in enumerate(self.chain):
             provider = self.providers.get(ref.provider)

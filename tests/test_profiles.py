@@ -354,6 +354,7 @@ def test_migration_then_chat_keeps_the_same_tools(tmp_path: Path):
         [_tool("read_file", {"path": "note.txt"}), AssistantFinal(content="saw it")]
     )
     before = build_runtime(
+        model="ollama:qwen3:32b",
         env={},
         config_path=tmp_path / "missing.toml",
         data_path=data / "prime.db",
@@ -382,6 +383,7 @@ def test_migration_then_chat_keeps_the_same_tools(tmp_path: Path):
         [_tool("read_file", {"path": "note.txt"}), AssistantFinal(content="saw it again")]
     )
     after = build_runtime(
+        model="ollama:qwen3:32b",
         env={},
         config_path=tmp_path / "missing.toml",
         data_path=data / "unused.db",
@@ -451,6 +453,7 @@ def _runtime(
     replies: list[AssistantFinal] | None = None,
 ):
     return build_runtime(
+        model="ollama:qwen3:32b",
         env={},
         config_path=tmp_path / "missing.toml",
         data_path=data / "unused.db",

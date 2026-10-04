@@ -96,18 +96,27 @@ class ProviderUnreachable(ProviderError):
         super().__init__(provider, message, unreachable=True)
 
 
+INFERENCE_NOT_CONFIGURED = (
+    "No model provider is configured. Run `praxis-prime setup` or open the web UI."
+)
+
+
+class InferenceNotConfigured(RuntimeError):
+    """Chat was asked to run before the operator chose and verified a provider."""
+
+    def __init__(self, message: str = INFERENCE_NOT_CONFIGURED) -> None:
+        super().__init__(message)
+
+
 class RouterExhausted(RuntimeError):
     """Every provider in the chain failed before producing a response."""
 
     def __init__(self, attempts: list[ProviderUnreachable]) -> None:
         self.attempts = attempts
-        lines = ["No configured model provider is reachable."]
+        lines = ["The configured model provider is not reachable."]
         for attempt in attempts:
             lines.append(f"- {attempt.provider}: {attempt.message}")
-        lines.append(
-            "Start Ollama with `ollama serve`, set PRAXIS_PRIME_MODEL, "
-            "or set PRAXIS_PRIME_FALLBACK_MODELS. API keys belong in the environment, not config."
-        )
+        lines.append("Run `praxis-prime setup` or open the web UI.")
         super().__init__("\n".join(lines))
 
 
@@ -126,6 +135,7 @@ def parse_model_spec(spec: str) -> ModelRef:
         "llama.cpp": "openai-compatible",
         "llama_cpp": "openai-compatible",
         "vllm": "openai-compatible",
+        "lmstudio": "openai-compatible",
         "openai_compatible": "openai-compatible",
     }
     provider = aliases.get(provider, provider)

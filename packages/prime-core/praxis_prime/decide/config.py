@@ -1,8 +1,8 @@
 """Decision Engine settings from ``config.toml``.
 
-Defaults match ARCHITECTURE §25, with the approval pre-screener off.
-Judge model names are router specs (``ollama:qwen3:8b``). Nothing here is a
-hosted Jev model name.
+The approval pre-screener is off. Judge model names are router specs
+(for example ``ollama:qwen3:8b``) and stay unset until setup writes them.
+Nothing here is a hosted Jev model name. T0 rules still run with no model.
 """
 
 from __future__ import annotations
@@ -28,9 +28,9 @@ class DecideConfig:
     disagreement_js: float = 0.15
     aggregation: str = "confidence-weighted"
     jury_size: int = 3
-    tier2_model: str = "ollama:qwen3:8b"
-    tier4_model: str = "ollama:qwen3:32b"
-    judge_models: tuple[str, ...] = ("ollama:qwen3:8b", "ollama:qwen3:1.7b")
+    tier2_model: str = ""
+    tier4_model: str = ""
+    judge_models: tuple[str, ...] = ()
     personas: tuple[str, ...] = (
         "skeptic",
         "safety",
@@ -46,7 +46,7 @@ class DecideConfig:
     deny: tuple[str, ...] = ()
     allow: tuple[str, ...] = ()
     escalate_to_human: bool = False
-    backend: str = "ollama"
+    backend: str = ""
 
     @staticmethod
     def from_table(table: Mapping[str, object] | None) -> DecideConfig:
@@ -65,7 +65,9 @@ class DecideConfig:
         return tuple(padded)
 
     def model_for_role(self, index: int) -> str:
-        models = self.judge_models or (self.tier2_model,)
+        models = self.judge_models or ((self.tier2_model,) if self.tier2_model else ())
+        if not models:
+            return ""
         return models[index % len(models)]
 
 
@@ -112,9 +114,9 @@ def _from_mapping(table: Mapping[str, object]) -> DecideConfig:
         disagreement_js=_clamp(_as_float(table.get("disagreement_js"), 0.15), 0.0, 1.0),
         aggregation=aggregation,
         jury_size=min(5, max(3, _as_int(table.get("jury_size"), 3))),
-        tier2_model=str(models.get("tier2") or "ollama:qwen3:8b"),
-        tier4_model=str(models.get("tier4") or "ollama:qwen3:32b"),
-        judge_models=tuple(judge_models) or ("ollama:qwen3:8b", "ollama:qwen3:1.7b"),
+        tier2_model=str(models.get("tier2") or ""),
+        tier4_model=str(models.get("tier4") or ""),
+        judge_models=tuple(judge_models),
         personas=tuple(personas)
         or ("skeptic", "safety", "domain", "cost", "user-advocate"),
         latency_budget_ms=max(0, latency_ms),
@@ -125,7 +127,7 @@ def _from_mapping(table: Mapping[str, object]) -> DecideConfig:
         deny=tuple(_strings(lists.get("deny"))),
         allow=tuple(_strings(lists.get("allow"))),
         escalate_to_human=_as_bool(table.get("escalate_to_human"), False),
-        backend=str(judges.get("backend") or "ollama"),
+        backend=str(judges.get("backend") or ""),
     )
 
 

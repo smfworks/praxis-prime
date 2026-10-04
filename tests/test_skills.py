@@ -53,6 +53,7 @@ def test_use_skill_loads_the_body_and_does_not_fence_it(tmp_path: Path):
         ]
     )
     runtime = build_runtime(
+        model="ollama:qwen3:32b",
         env={},
         config_path=tmp_path / "missing.toml",
         data_path=tmp_path / "prime.db",

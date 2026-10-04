@@ -492,6 +492,7 @@ def test_decide_tool_answers_from_tier0_without_a_judge(tmp_path: Path):
     from praxis_prime.runtime import build_runtime
 
     runtime = build_runtime(
+        model="ollama:qwen3:32b",
         env={},
         config_path=tmp_path / "missing.toml",
         data_path=tmp_path / "prime.db",
@@ -548,6 +549,9 @@ def _engine(
         deny=deny,
         min_confidence=min_confidence,
         escalate_to_human=escalate_to_human,
+        tier2_model="ollama:qwen3:8b",
+        tier4_model="ollama:qwen3:32b",
+        judge_models=("ollama:qwen3:8b", "ollama:qwen3:1.7b"),
     )
     engine = DecisionEngine(
         config,

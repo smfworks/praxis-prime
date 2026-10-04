@@ -45,6 +45,7 @@ from praxis_prime.router.types import (
     ChatMessage,
     ChatRequest,
     FallbackNotice,
+    InferenceNotConfigured,
     ProviderUnreachable,
     RouterExhausted,
     TextDelta,
@@ -176,7 +177,13 @@ class AgentLoop:
                 yield TextDelta(blocked)
                 yield from self._turn_ended(blocked, error="compliance")
                 return
-            model = self.router.primary.spec()
+            try:
+                model = self.router.primary.spec()
+            except InferenceNotConfigured as exc:
+                message = str(exc)
+                yield StatusEvent("plan", message)
+                yield from self._turn_ended("", error=message)
+                return
             yield StatusEvent("plan", f"iteration {iteration} · {model}")
             request = ChatRequest(
                 model=self.router.primary.model,
@@ -316,7 +323,7 @@ class AgentLoop:
                     yield event
                 elif isinstance(event, AssistantFinal):
                     outcome.final = event
-        except (RouterExhausted, ProviderUnreachable) as exc:
+        except (RouterExhausted, ProviderUnreachable, InferenceNotConfigured) as exc:
             message = str(exc)
             outcome.error = message
             self._audit("model_error", "model provider failed", {"error": _short(message, 400)})

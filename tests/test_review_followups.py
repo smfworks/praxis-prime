@@ -187,6 +187,7 @@ def test_decide_hides_a_foreign_session_id(tmp_path: Path) -> None:
     store.set_membership(ada.id, "work", "owner")
     store.set_membership(bea.id, "work", "operator")
     runtime = build_runtime(
+        model="ollama:qwen3:32b",
         env={},
         config_path=tmp_path / "missing.toml",
         data_path=data / "unused.db",
