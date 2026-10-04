@@ -95,7 +95,7 @@ def install_files(
             (
                 ThemeIssue(
                     "bad_id",
-                    "Ids smf and smf.* are reserved for built-in themes.",
+                    "Ids smf, smf.*, and omarchy.live are reserved.",
                     package.theme_id,
                     "Choose another id.",
                 ),
@@ -408,7 +408,7 @@ def _scan(root: Path, source: str) -> list[InstalledTheme]:
 
 
 def _reserved_id(theme_id: str) -> bool:
-    return theme_id == "smf" or theme_id.startswith("smf.")
+    return theme_id == "smf" or theme_id.startswith("smf.") or theme_id == "omarchy.live"
 
 
 def _ensure_lock(files: Mapping[str, bytes], theme_id: str, version: str) -> None:

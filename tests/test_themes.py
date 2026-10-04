@@ -21,6 +21,7 @@ from praxis_prime.profiles.policy import load_layer
 from praxis_prime.state import StateDB
 from praxis_prime.themes.archive import MAX_PREVIEW_BYTES, read_dir, write_zip
 from praxis_prime.themes.cli import dispatch_theme
+from praxis_prime.themes.color import contrast_ratio
 from praxis_prime.themes.cssgen import render_css
 from praxis_prime.themes.errors import ThemeError
 from praxis_prime.themes.legacy import describe_hint, materialize_pack_theme, pack_theme_id
@@ -669,6 +670,46 @@ def test_damaged_and_duplicate_zips_are_rejected():
     with pytest.raises(ThemeError) as caught:
         validate_zip(collapsed.getvalue())
     assert "zip_duplicate" in _codes(caught.value)
+
+
+def test_translucent_page_colours_are_refused():
+    files = _clone("lab.glass")
+    text = files["theme.toml"].decode("utf-8").replace('bg = "#14110f"', 'bg = "#14110f10"', 1)
+    files["theme.toml"] = text.encode("utf-8")
+    with pytest.raises(ThemeError) as caught:
+        validate_files(files)
+    opaque = [issue.message for issue in caught.value.issues]
+    assert any("must be fully opaque" in message and "bg" in message for message in opaque)
+
+    for token in ("bg", "bgRaised", "codeBg"):
+        issues = contrast_modes({"dark": {token: "#14110f10"}}, "AA")
+        messages = [issue.message for issue in issues]
+        assert any("must be fully opaque" in message and token in message for message in messages)
+
+    # Dark ink on a nearly clear latte swatch. Over white this clears 4.5:1.
+    # Over a black page it does not, and the validator has to use the worse one.
+    ink = "#3f425b"
+    wash = "#eff1f510"
+    assert contrast_ratio(ink, wash) >= 4.5
+    issues = contrast_modes({"dark": {"accent": wash, "accentFg": ink}}, "AA")
+    assert any("accentFg" in issue.message and "accent" in issue.message for issue in issues)
+
+    # selection is drawn on bg, so a translucent white highlight on a dark page
+    # stays dark and light text still clears.
+    glass = _clone("lab.selection")
+    sheet = glass["theme.toml"].decode("utf-8")
+    sheet = sheet.replace("[tokens.dark]\n", '[tokens.dark]\nselection = "#ffffff20"\n', 1)
+    glass["theme.toml"] = sheet.encode("utf-8")
+    package = validate_files(glass)
+    assert package.modes["dark"]["selection"] == "#ffffff20"
+
+
+def test_omarchy_live_id_cannot_be_installed(tmp_path: Path):
+    files = _clone("omarchy.live")
+    with pytest.raises(ThemeError) as caught:
+        install_files(files, tmp_path)
+    assert caught.value.issues[0].code == "bad_id"
+    assert "omarchy.live" in caught.value.issues[0].message
 
 
 def test_smf_namespace_cannot_shadow_a_builtin(tmp_path: Path):

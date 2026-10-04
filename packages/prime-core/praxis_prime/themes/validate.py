@@ -18,7 +18,7 @@ from praxis_prime.themes.archive import (
     read_dir,
     read_zip,
 )
-from praxis_prime.themes.color import contrast_ratio, parse_color
+from praxis_prime.themes.color import Color, composite, contrast_ratio, parse_color
 from praxis_prime.themes.css_restrict import check_theme_css
 from praxis_prime.themes.errors import ThemeError, ThemeIssue
 from praxis_prime.themes.model import FontFace, ThemePackage
@@ -47,6 +47,15 @@ _SCHEMA_COLOR = re.compile(
 _WOFF2 = b"wOF2"
 _PNG = b"\x89PNG\r\n\x1a\n"
 _OFL_MARK = "SIL Open Font License"
+
+# Page colours paint the canvas. A translucent one is drawn over whatever the
+# browser uses for `color-scheme`, which is white in light mode and dark in
+# dark mode. bgRaised and selection are drawn on bg. Other contrast
+# backgrounds may stay translucent, and those are checked on both canvases.
+_OPAQUE_BACKGROUNDS = ("bg", "bgRaised", "codeBg")
+_COMPOSITE_OVER_BG = frozenset({"bgRaised", "selection"})
+_WHITE_PAGE = Color(1, 1, 1)
+_DARK_PAGE = Color(0, 0, 0)
 
 _SHAPE_DEFAULTS: dict[str, object] = {
     "scale": 1.25,
@@ -517,6 +526,9 @@ def _modes(
         try:
             ready[mode] = complete_colors(colors, level=level)
         except ValueError as exc:
+            # Derivation gives up before the contrast pass. Still say when a
+            # page colour is translucent, which is why the dark palette failed.
+            issues.extend(_opaque_page_issues(mode, colors))
             issues.append(
                 _fix(
                     "contrast",
@@ -597,8 +609,12 @@ def _contrast_at(modes: Mapping[str, Mapping[str, str]], level: str) -> list[The
     text_min, ui_min = thresholds(level)
     for mode, colors in modes.items():
         parsed = {name: parse_color(value) for name, value in colors.items()}
+        issues.extend(_opaque_page_issues(mode, parsed))
+        page = parsed.get("bg")
         for foreground, background, kind in CONTRAST_PAIRS:
-            ratio = contrast_ratio(parsed[foreground], parsed[background])
+            if foreground not in parsed or background not in parsed:
+                continue
+            ratio = _pair_ratio(parsed[foreground], parsed[background], background, page)
             minimum = text_min if kind == "text" else ui_min
             if ratio + 1e-9 < minimum:
                 issues.append(
@@ -610,6 +626,48 @@ def _contrast_at(modes: Mapping[str, Mapping[str, str]], level: str) -> list[The
                     )
                 )
     return issues
+
+
+def _opaque_page_issues(mode: str, colors: Mapping[str, Color | str]) -> list[ThemeIssue]:
+    issues: list[ThemeIssue] = []
+    for name in _OPAQUE_BACKGROUNDS:
+        value = colors.get(name)
+        if value is None:
+            continue
+        color = value if isinstance(value, Color) else parse_color(value)
+        if color.a < 0.999:
+            issues.append(
+                _fix(
+                    "contrast",
+                    f"{mode} {name} must be fully opaque.",
+                    f"modes.{mode}.{name}",
+                    "Use #rgb, #rrggbb, or oklch() without an alpha.",
+                )
+            )
+    return issues
+
+
+def _pair_ratio(
+    foreground: Color,
+    background: Color,
+    background_name: str,
+    page: Color | None,
+) -> float:
+    """Contrast of one pair, using the canvas the browser will actually paint."""
+    if background_name in _COMPOSITE_OVER_BG and page is not None:
+        if page.a >= 0.999:
+            surface = background if background.a >= 0.999 else composite(background, page)
+            return contrast_ratio(foreground, surface)
+        return min(
+            contrast_ratio(foreground, composite(background, composite(page, _WHITE_PAGE))),
+            contrast_ratio(foreground, composite(background, composite(page, _DARK_PAGE))),
+        )
+    if background.a < 0.999:
+        return min(
+            contrast_ratio(foreground, composite(background, _WHITE_PAGE)),
+            contrast_ratio(foreground, composite(background, _DARK_PAGE)),
+        )
+    return contrast_ratio(foreground, background)
 
 
 def _webp(payload: bytes) -> bool:
