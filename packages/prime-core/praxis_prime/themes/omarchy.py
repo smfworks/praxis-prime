@@ -116,23 +116,24 @@ def installed(path: Path | None = None) -> InstalledTheme | None:
     The watcher is armed on the theme directory and on its parent, and it
     is re-armed when that directory is replaced. Every check still stats
     the file inode, mtime, and size and the parent directory inode. A
-    cached package, including a cached refusal, is reused only when that
-    signature matches. An unchanged signature does not compile again.
+    dirty or overflowed watch re-reads the file even when that signature
+    matches. A clean watch reuses the cached package, including a cached
+    refusal, when the signature matches, and does not compile again.
     """
     source = theme_file(path)
     key = str(source)
     with _LOCK:
         previous = _WATCH_TOKEN.get(key, "")
     try:
-        _changed, token = _watcher().observe(source, previous, startup=not previous)
+        changed, token = _watcher().observe(source, previous, startup=not previous)
     except OSError:
-        token = previous
+        changed, token = True, previous
     with _LOCK:
         _WATCH_TOKEN[key] = token
     signature = _signature(source)
     with _LOCK:
         cached = _CACHE.get(key)
-        if cached is not None and cached[0] == signature:
+        if not changed and cached is not None and cached[0] == signature:
             return cached[1]
     compiled = _load(source)
     with _LOCK:

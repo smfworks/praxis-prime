@@ -197,12 +197,20 @@ def test_replaced_directory_is_watched_again(tmp_path: Path):
     try:
         changed, token = watcher.observe(target, "", startup=True)
         assert changed
+        stamp = target.stat()
         shutil.rmtree(theme)
         incoming = current / "incoming"
         incoming.mkdir()
-        (incoming / "live.txt").write_text("two")
+        rewritten = incoming / "live.txt"
+        if watcher.backend == "inotify":
+            rewritten.write_text("two")
+            os.utime(rewritten, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+        else:
+            rewritten.write_text("two\n")
         incoming.rename(theme)
         replaced = theme / "live.txt"
+        if watcher.backend == "inotify":
+            assert file_token(replaced) == token
         changed, token = watcher.observe(replaced, token, startup=False)
         assert changed
         if watcher.backend != "inotify":
@@ -232,8 +240,14 @@ def test_repointed_symlink_is_noticed(tmp_path: Path):
     try:
         changed, token = watcher.observe(link / "live.txt", "", startup=True)
         assert changed
+        stamp = (first / "live.txt").stat()
         link.unlink()
         link.symlink_to(second, target_is_directory=True)
+        if watcher.backend == "inotify":
+            os.utime(second / "live.txt", ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+            assert file_token(link / "live.txt") == token
+        else:
+            (second / "live.txt").write_text("two\n")
         changed, _token = watcher.observe(link / "live.txt", token, startup=False)
         assert changed
         if watcher.backend != "inotify":
@@ -268,6 +282,57 @@ def test_kernel_queue_overflow_is_dirty(tmp_path: Path):
         assert str(ignored) not in watcher._armed
         assert 7 not in watcher._wd_path
         assert str(ignored / "live.txt") in watcher._dirty
+    finally:
+        watcher.close()
+
+
+def _kernel_watch_ids(fd: int) -> set[int]:
+    """Watch descriptors from ``/proc/self/fdinfo``. The kernel prints them in hex."""
+    text = Path(f"/proc/self/fdinfo/{fd}").read_text(encoding="utf-8")
+    found: set[int] = set()
+    for line in text.splitlines():
+        if not line.startswith("inotify wd:"):
+            continue
+        found.add(int(line.split()[1].split(":", 1)[1], 16))
+    return found
+
+
+def test_watch_map_stays_exact_after_many_switches(tmp_path: Path):
+    current = tmp_path / "current"
+    theme = current / "theme"
+    theme.mkdir(parents=True)
+    target = theme / "live.txt"
+    target.write_text("one")
+    watcher = DirectoryWatcher()
+    try:
+        changed, token = watcher.observe(target, "", startup=True)
+        assert changed
+        counts: list[int] = []
+        for index in range(8):
+            stamp = target.stat()
+            body = target.read_text(encoding="utf-8")
+            theme.rename(current / f"aside-{index}")
+            theme.mkdir()
+            target = theme / "live.txt"
+            if watcher.backend == "inotify":
+                target.write_text(body, encoding="utf-8")
+                os.utime(target, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+                assert file_token(target) == token
+            else:
+                target.write_text(body + "x", encoding="utf-8")
+            changed, token = watcher.observe(target, token, startup=False)
+            assert changed
+            paths = [str(path) for path in watcher._wd_path.values()]
+            assert len(paths) == len(set(paths))
+            assert set(paths) == watcher._armed
+            if watcher.backend == "inotify":
+                assert watcher._armed == {str(theme), str(current)}
+                assert watcher._fd is not None
+                assert set(watcher._wd_path) == _kernel_watch_ids(watcher._fd)
+            else:
+                assert watcher._armed == set()
+            counts.append(len(watcher._wd_path))
+        assert counts == [counts[0]] * len(counts)
     finally:
         watcher.close()
 

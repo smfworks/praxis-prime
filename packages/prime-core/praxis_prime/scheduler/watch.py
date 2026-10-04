@@ -5,16 +5,19 @@ the path. A token is the file size and mtime, or a hash of a directory's
 immediate children, so a missed change is still visible on the next start.
 
 A watched directory is armed again after it is deleted or replaced. Every
-check still stats the path: an empty inotify queue is not proof the file
-is unchanged.
+check still stats the path. An empty queue is not proof the file is
+unchanged, and a dirty path or a queue overflow is a change even when the
+stat token matches.
 """
 
 from __future__ import annotations
 
 import ctypes
+import errno
 import hashlib
 import os
 import struct
+import threading
 from pathlib import Path
 from typing import NamedTuple
 
@@ -96,6 +99,7 @@ class DirectoryWatcher:
         self._reconciled: set[str] = set()
         self._overflow = False
         self._libc: ctypes.CDLL | None = None
+        self._lock = threading.RLock()
         fd, libc = _open_inotify()
         if fd is not None and libc is not None:
             self._fd = fd
@@ -103,102 +107,158 @@ class DirectoryWatcher:
             self.backend = "inotify"
 
     def close(self) -> None:
-        if self._fd is not None:
+        with self._lock:
+            if self._fd is None:
+                return
             os.close(self._fd)
             self._fd = None
+            self._libc = None
 
     def arm(self, path: Path) -> None:
-        if self.backend != "inotify" or self._fd is None or self._libc is None:
-            return
-        watch_dir = path if path.is_dir() else path.parent
-        self._add_watch(watch_dir)
-        parent = watch_dir.parent
-        if parent != watch_dir:
-            self._add_watch(parent)
+        with self._lock:
+            if self.backend != "inotify" or self._fd is None or self._libc is None:
+                return
+            watch_dir = path if path.is_dir() else path.parent
+            self._add_watch(watch_dir)
+            parent = watch_dir.parent
+            if parent != watch_dir:
+                self._add_watch(parent)
 
     def observe(self, path: Path, previous: str, *, startup: bool) -> tuple[bool, str]:
         """Return whether ``path`` changed, and the token to store.
 
         ``startup`` is the scheduler's first tick. The directory watch is
         re-armed when it has gone away, and the path is statted on every
-        call. A matching token is not a change.
+        call. A matching token is still a change when the path is dirty
+        or the kernel queue overflowed.
         """
         del startup
-        self.arm(path)
-        self._drain()
-        # A delete in the queue drops the watch. Arm the path that is there now.
-        self.arm(path)
-        key = str(path)
-        self._watched.add(key)
-        token = file_token(path)
-        self._dirty.discard(key)
-        if self._overflow:
-            self._reconciled.add(key)
-            if self._watched <= self._reconciled:
-                self._overflow = False
-                self._reconciled.clear()
-        return token != previous, token
+        with self._lock:
+            self.arm(path)
+            self._drain()
+            # A delete in the queue drops the watch. Arm the path that is there now.
+            self.arm(path)
+            key = str(path)
+            self._watched.add(key)
+            token = file_token(path)
+            signalled = key in self._dirty or self._overflow
+            self._dirty.discard(key)
+            if self._overflow:
+                self._reconciled.add(key)
+                if self._watched <= self._reconciled:
+                    self._overflow = False
+                    self._reconciled.clear()
+            self._repair_map()
+            return signalled or token != previous, token
 
     def _add_watch(self, watch_dir: Path) -> None:
         if self._fd is None or self._libc is None:
             return
-        key = str(watch_dir)
-        if key in self._armed or not watch_dir.is_dir():
+        if not watch_dir.is_dir():
             return
+        key = str(watch_dir)
+        existing = [wd for wd, path in self._wd_path.items() if str(path) == key]
+        # One path keeps one wd. A second wd is the drift left by a replace.
+        if len(existing) == 1:
+            self._armed.add(key)
+            return
+        for wd in existing:
+            self._wd_path.pop(wd, None)
+            self._rm_watch(wd)
+        self._armed.discard(key)
         encoded = os.fsencode(watch_dir)
         wd = self._libc.inotify_add_watch(self._fd, encoded, _MASK)
         if wd < 0:
             return
+        self._bind_watch(int(wd), watch_dir)
+
+    def _bind_watch(self, wd: int, watch_dir: Path) -> None:
+        key = str(watch_dir)
+        previous = self._wd_path.get(wd)
+        if previous is not None and str(previous) != key:
+            old_key = str(previous)
+            others = [
+                other
+                for other, path in self._wd_path.items()
+                if other != wd and str(path) == old_key
+            ]
+            if not others:
+                self._armed.discard(old_key)
+        for old, path in list(self._wd_path.items()):
+            if old != wd and str(path) == key:
+                self._wd_path.pop(old, None)
+                self._rm_watch(old)
+        self._wd_path[wd] = watch_dir
         self._armed.add(key)
-        self._wd_path[int(wd)] = watch_dir
+
+    def _repair_map(self) -> None:
+        """Drop a second wd for one path, and make ``_armed`` match the map."""
+        kept: dict[str, int] = {}
+        extras: list[int] = []
+        for wd, path in self._wd_path.items():
+            key = str(path)
+            if key in kept:
+                extras.append(kept[key])
+            kept[key] = wd
+        for wd in extras:
+            self._wd_path.pop(wd, None)
+            self._rm_watch(wd)
+        self._armed.clear()
+        self._armed.update(kept)
 
     def _drain(self) -> None:
-        if self.backend != "inotify" or self._fd is None:
-            return
-        while True:
-            try:
-                raw = os.read(self._fd, 4096)
-            except BlockingIOError:
+        with self._lock:
+            if self.backend != "inotify" or self._fd is None:
                 return
-            except OSError:
-                return
-            if not raw:
-                return
-            for event in _parse(raw, self._wd_path):
-                self._apply(event)
+            while True:
+                try:
+                    raw = os.read(self._fd, 4096)
+                except BlockingIOError:
+                    return
+                except OSError:
+                    return
+                if not raw:
+                    return
+                for event in _parse(raw, self._wd_path):
+                    self._apply(event)
 
     def _apply(self, event: _Event) -> None:
-        if event.wd < 0 or event.mask & _IN_Q_OVERFLOW:
-            self._overflow = True
-            self._dirty.clear()
-            self._reconciled.clear()
-            return
-        if event.path is None:
-            return
-        key = str(event.path)
-        if event.mask & _SELF_GONE:
-            self._drop_wd(event.wd)
+        with self._lock:
+            if event.wd < 0 or event.mask & _IN_Q_OVERFLOW:
+                self._overflow = True
+                self._dirty.clear()
+                self._reconciled.clear()
+                return
+            if event.path is None:
+                return
+            key = str(event.path)
+            if event.mask & _SELF_GONE:
+                self._drop_wd(event.wd)
+                self._mark_tree(key)
+                return
             self._mark_tree(key)
-            return
-        self._mark_tree(key)
-        # A new directory at this path is a new inode. Forget the old watch.
-        if event.name and event.mask & _CHILD_SWAP:
-            self._drop_path(key)
+            # A new directory at this path is a new inode. Forget the old watch.
+            if event.name and event.mask & _CHILD_SWAP:
+                self._drop_path(key)
 
     def _drop_wd(self, wd: int) -> None:
         path = self._wd_path.pop(wd, None)
         if path is None:
             return
+        # MOVE_SELF leaves the kernel watch on the inode. Delete may already
+        # have dropped it, which returns EINVAL.
+        self._rm_watch(wd)
         key = str(path)
         if not any(str(other) == key for other in self._wd_path.values()):
             self._armed.discard(key)
 
     def _drop_path(self, key: str) -> None:
-        stale = [wd for wd, path in self._wd_path.items() if str(path) == key]
-        for wd in stale:
-            self._wd_path.pop(wd, None)
-            self._rm_watch(wd)
-        self._armed.discard(key)
+        with self._lock:
+            stale = [wd for wd, path in self._wd_path.items() if str(path) == key]
+            for wd in stale:
+                self._wd_path.pop(wd, None)
+                self._rm_watch(wd)
+            self._armed.discard(key)
 
     def _rm_watch(self, wd: int) -> None:
         if self._fd is None or self._libc is None:
@@ -206,24 +266,29 @@ class DirectoryWatcher:
         rm_watch = getattr(self._libc, "inotify_rm_watch", None)
         if rm_watch is None:
             return
-        rm_watch(self._fd, wd)
+        if rm_watch(self._fd, int(wd)) >= 0:
+            return
+        if ctypes.get_errno() == errno.EINVAL:
+            return
 
     def _mark_tree(self, key: str) -> None:
-        self._mark_dirty(key)
-        prefix = key + os.sep
-        for watched in list(self._watched):
-            if watched == key or watched.startswith(prefix):
-                self._mark_dirty(watched)
+        with self._lock:
+            self._mark_dirty(key)
+            prefix = key + os.sep
+            for watched in list(self._watched):
+                if watched == key or watched.startswith(prefix):
+                    self._mark_dirty(watched)
 
     def _mark_dirty(self, key: str) -> None:
-        if self._overflow:
-            return
-        if len(self._dirty) >= _DIRTY_CAP:
-            self._overflow = True
-            self._dirty.clear()
-            self._reconciled.clear()
-            return
-        self._dirty.add(key)
+        with self._lock:
+            if self._overflow:
+                return
+            if len(self._dirty) >= _DIRTY_CAP:
+                self._overflow = True
+                self._dirty.clear()
+                self._reconciled.clear()
+                return
+            self._dirty.add(key)
 
 
 def _open_inotify() -> tuple[int | None, ctypes.CDLL | None]:

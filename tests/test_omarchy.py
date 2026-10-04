@@ -322,12 +322,46 @@ def test_eight_digit_hex_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPa
         assert live_theme() is None
     assert "hex" in caplog.text
     caplog.clear()
+    preserved = path.stat()
     latte["bg"] = "#eff1f528"
     latte["bgRaised"] = "#e6e9ef28"
     _write(path, latte)
+    if watch_backend() == "inotify":
+        os.utime(path, ns=(preserved.st_atime_ns, preserved.st_mtime_ns))
+    else:
+        path.write_text(path.read_text(encoding="utf-8") + "\n", encoding="utf-8")
     with caplog.at_level(logging.WARNING, logger="praxis_prime.themes.omarchy"):
         assert installed() is None
     assert "hex" in caplog.text
+
+
+def test_same_size_same_mtime_refusal_reloads_when_inotify_is_dirty(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    if watch_backend() != "inotify":
+        pytest.skip("poll cannot see a same-size same-mtime rewrite")
+    path = tmp_path / "praxis-prime.json"
+    _point(monkeypatch, path)
+    keys = ("bg", "bgRaised", "fg", "fgMuted", "accent", "border", "ok", "warn", "danger")
+    refused = json.dumps({key: "#ffffff" for key in keys})
+    valid = json.dumps({key: _DARK[key] for key in keys})
+    if len(refused) < len(valid):
+        refused += " " * (len(valid) - len(refused))
+    elif len(valid) < len(refused):
+        valid += " " * (len(refused) - len(valid))
+    assert len(refused) == len(valid)
+    path.write_text(refused, encoding="utf-8")
+    assert installed() is None
+    stamp = path.stat()
+    path.write_text(valid, encoding="utf-8")
+    os.utime(path, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+    again = path.stat()
+    assert again.st_mtime_ns == stamp.st_mtime_ns
+    assert again.st_size == stamp.st_size
+    theme = installed()
+    assert theme is not None
+    assert theme.package.modes["dark"]["bg"] == "#14110f"
 
 
 def test_symlinked_parent_is_followed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
