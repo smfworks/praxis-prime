@@ -137,6 +137,9 @@ def _create(args: argparse.Namespace) -> int:
     try:
         if not store.has_accounts():
             return _create_owner(args, store, password)
+        from praxis_prime.onboarding.token import invalidate_first_run_token
+
+        invalidate_first_run_token(_config(args))
         account = store.create_account(
             username_text=args.username,
             password=password,
@@ -181,6 +184,9 @@ def _create_owner(args: argparse.Namespace, store: AccountStore, password: str) 
                 pass
         print(f"praxis-prime account: {exc}", file=sys.stderr)
         return 2
+    from praxis_prime.onboarding.token import invalidate_first_run_token
+
+    invalidate_first_run_token(_config(args))
     print(f"created owner {account.username} ({account.id})")
     print(f"profile {result.profile_id}")
     if result.backup:

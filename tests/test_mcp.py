@@ -302,6 +302,7 @@ def test_untrusted_write_asks_and_echo_is_fenced(tmp_path: Path, monkeypatch):
         ]
     )
     runtime = build_runtime(
+        model="ollama:qwen3:32b",
         env=dict(os.environ),
         config_path=config / "config.toml",
         data_path=tmp_path / "data" / "prime.db",
@@ -352,6 +353,7 @@ def test_allowed_write_is_audited(tmp_path: Path):
         ]
     )
     runtime = build_runtime(
+        model="ollama:qwen3:32b",
         env={"PATH": os.environ.get("PATH", "/usr/bin"), "HOME": str(tmp_path)},
         config_path=config / "config.toml",
         data_path=tmp_path / "data" / "prime.db",

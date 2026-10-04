@@ -169,6 +169,7 @@ def test_daemon_serve_shuts_down_and_does_not_log_the_token(tmp_path, monkeypatc
     def builder(**kwargs):
         del kwargs
         runtime = build_runtime(
+            model="ollama:qwen3:32b",
             env={},
             config_path=tmp_path / "missing.toml",
             data_path=tmp_path / "prime.db",
@@ -260,6 +261,7 @@ def test_ask_attaches_and_local_stays_in_process(tmp_path, monkeypatch, capsys):
         assert "attached to praxis-primed" in captured.err
 
         local_runtime = build_runtime(
+            model="ollama:qwen3:32b",
             env={},
             config_path=tmp_path / "missing.toml",
             data_path=tmp_path / "local.db",
@@ -354,6 +356,7 @@ def _server(
 ) -> tuple[GatewayServer, Host, ApprovalQueue, ScriptedProvider]:
     provider = ScriptedProvider(replies)
     runtime = build_runtime(
+        model="ollama:qwen3:32b",
         env={},
         config_path=tmp_path / "missing.toml",
         data_path=tmp_path / "prime.db",

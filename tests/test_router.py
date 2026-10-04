@@ -73,28 +73,40 @@ def test_all_providers_down_raises_a_clear_error():
         message = str(exc)
     else:
         raise AssertionError("expected RouterExhausted")
-    assert "No configured model provider is reachable" in message
+    assert "The configured model provider is not reachable" in message
     assert "Ollama is not reachable" in message
     assert "API key is not set" in message
-    assert "ollama serve" in message
+    assert "praxis-prime setup" in message
+    assert "ollama serve" not in message
 
 
-def test_settings_chain_falls_back_to_ollama_and_hides_keys(tmp_path: Path):
+def test_settings_chain_does_not_guess_a_provider(tmp_path: Path):
     missing = tmp_path / "missing.toml"
     settings = load_settings(
         {
-            "PRAXIS_PRIME_MODEL": "anthropic:claude-sonnet",
-            "PRAXIS_PRIME_ANTHROPIC_API_KEY": "sk-test-secret",
+            "OPENAI_API_KEY": "sk-env-secret",
+            "OLLAMA_HOST": "http://127.0.0.1:11434",
             "PRAXIS_PRIME_OPENAI_COMPATIBLE_BASE_URL": "http://127.0.0.1:8080/v1",
         },
         config_path=missing,
     )
-    chain = [(ref.provider, ref.model) for ref in settings.chain()]
-    assert chain[0] == ("anthropic", "claude-sonnet")
-    assert ("ollama", "qwen3:32b") in chain
-    assert ("openai-compatible", "local") in chain
-    assert "sk-test-secret" not in repr(settings)
-    assert settings.anthropic_api_key == "sk-test-secret"
+    assert settings.model_spec == ""
+    assert settings.chain() == []
+    assert settings.openai_api_key == "sk-env-secret"
+    assert "sk-env-secret" not in repr(settings)
+
+    chosen = load_settings(
+        {
+            "PRAXIS_PRIME_MODEL": "anthropic:claude-sonnet",
+            "PRAXIS_PRIME_ANTHROPIC_API_KEY": "sk-test-secret",
+            "PRAXIS_PRIME_FALLBACK_MODELS": "ollama:qwen3:8b",
+            "PRAXIS_PRIME_OPENAI_COMPATIBLE_BASE_URL": "http://127.0.0.1:8080/v1",
+        },
+        config_path=missing,
+    )
+    chain = [(ref.provider, ref.model) for ref in chosen.chain()]
+    assert chain == [("anthropic", "claude-sonnet")]
+    assert "sk-test-secret" not in repr(chosen)
 
 
 def test_model_spec_aliases_and_rejection():
@@ -102,6 +114,7 @@ def test_model_spec_aliases_and_rejection():
 
     assert parse_model_spec("vllm:my-model").provider == "openai-compatible"
     assert parse_model_spec("llamacpp:qwen").provider == "openai-compatible"
+    assert parse_model_spec("lmstudio:local").provider == "openai-compatible"
     assert parse_model_spec("ollama:qwen3:32b").model == "qwen3:32b"
     try:
         parse_model_spec("mystery:model")

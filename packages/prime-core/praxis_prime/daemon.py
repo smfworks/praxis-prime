@@ -152,6 +152,8 @@ def serve(
         return 1
     queue.profile_id = runtime.profile_id
     accounts: AccountStore | None = AccountStore(root / "accounts.db")
+    config_directory = config_path.parent if config_path is not None else config_dir(environ)
+    _sync_first_run_token(config_directory, accounts)
     agent = Host(runtime, queue)
     adapter = _telegram(environ, agent, queue, logger, telegram_token)
     socket_path = str(runtime_root / "prime.sock")
@@ -168,6 +170,7 @@ def serve(
         audit=runtime.audit,
         data_root=root,
         bearer_enabled=bearer_auth_enabled(environ),
+        config_dir=config_directory,
     )
 
     def on_pending(item: dict[str, object]) -> None:
@@ -252,6 +255,16 @@ def serve(
     return 0
 
 
+def _sync_first_run_token(config_directory: Path, accounts: AccountStore) -> None:
+    """Mint the setup token only while no account exists. Never log it."""
+    from praxis_prime.onboarding.token import ensure_first_run_token, invalidate_first_run_token
+
+    if accounts.has_accounts():
+        invalidate_first_run_token(config_directory)
+        return
+    ensure_first_run_token(config_directory)
+
+
 def _serve_workers(
     *,
     stop: threading.Event,
@@ -279,6 +292,8 @@ def _serve_workers(
     audit_db = StateDB(root / "audit.db")
     audit = AuditLog(audit_db)
     accounts = AccountStore(root / "accounts.db")
+    config_directory = config_path.parent if config_path is not None else config_dir(environ)
+    _sync_first_run_token(config_directory, accounts)
     supervisor = Supervisor(
         data_root=root,
         runtime_dir=runtime_root,
@@ -350,6 +365,7 @@ def _serve_workers(
         data_root=root,
         bearer_enabled=bearer_auth_enabled(environ),
         multi_profile=True,
+        config_dir=config_directory,
     )
 
     def on_pending(item: dict[str, object]) -> None:

@@ -116,9 +116,48 @@ praxis-prime oidc remove google
 
 Scopes default to `openid email profile` and must include `openid`. `--preset google` uses `https://accounts.google.com`. `--preset entra` needs `--tenant` and uses `https://login.microsoftonline.com/<tenant>/v2.0`, and it maps the `roles` claim `Praxis.Admin`, `Praxis.Operator`, `Praxis.Viewer`, and `Praxis.Auditor` unless you pass `--no-role-map`. `--preset authentik` and `--preset keycloak` need `--issuer`. A fixed preset issuer is rejected when `--issuer` names a different URL. `--dev-loopback` allows an `http://127.0.0.1` or `http://localhost` issuer for a local provider. `--allow-email user@example.com` (repeatable) is the only way a verified email can link or create an account. The address is matched with ASCII lowercasing. Omit it and sign-in requires a pre-linked `iss`+`sub`. An owner or admin is not linked from that list. Running `oidc add` again for an id that already exists exits 2, leaves the stored client secret unchanged, and tells you to `oidc remove` that id before adding it again. `oidc remove` exits 2 and leaves the provider in place when a linked account would lose its last sign-in factor. The sign-in page is `http://127.0.0.1:18790` once `ui/dist` is present. See [SECURITY.md](SECURITY.md).
 
+## Setup
+
+`praxis-prime setup` is the first-run wizard. The web UI uses the same backend. Nothing is preselected. A fresh install has no provider, and chat answers with "No model provider is configured. Run `praxis-prime setup` or open the web UI." Rules and other non-LLM features keep working.
+
+Interactive setup shows the current owner, provider, and dial positions and changes only what you confirm. Re-running it does not delete an account, a secret, an OIDC provider, or a Telegram binding. A config write copies `config.toml` to a timestamped mode-0600 backup first.
+
+```bash
+praxis-prime setup
+praxis-prime setup --section models
+praxis-prime setup --section owner
+praxis-prime setup --section dials
+praxis-prime setup --section oidc
+praxis-prime setup --section telegram
+praxis-prime setup --web
+```
+
+`--section` edits that part only. `--section oidc` points at `praxis-prime oidc add` for the full form. `--section telegram` prints a `/pair` code and does not write the code into `config.toml`. `--web` prints `http://127.0.0.1:<port>/#setup=<token>` while no owner exists. The token is in the URL fragment, so it is not sent as a query string, a log line, or a Referer. After an owner exists, `--web` prints the sign-in URL and does not print a token.
+
+A terminal is required. Without one, the command exits 2 and tells you to pass `--non-interactive`.
+
+```bash
+printf '%s\n' "$OWNER_PASSWORD" | praxis-prime setup --non-interactive \
+  --owner ada --owner-password-stdin \
+  --provider llamacpp --model local-model --base-url http://127.0.0.1:8080
+printf '%s\n' "$OPENAI_API_KEY" | praxis-prime setup --non-interactive \
+  --provider openai --model gpt-4o --api-key-stdin
+PRAXIS_PRIME_OPENAI_API_KEY="$OPENAI_API_KEY" praxis-prime setup --non-interactive \
+  --provider openai --model gpt-4o --api-key-env PRAXIS_PRIME_OPENAI_API_KEY
+praxis-prime setup --non-interactive --provider skip
+```
+
+The key is read from stdin or from the named environment variable. It is not a command argument. Exit 0 means the choice was saved. An explicit `--provider skip` exits 0 and leaves inference not ready. Exit 1 means the live test failed. Exit 2 means the command was used wrong, the terminal was missing, or an existing provider would have been replaced. `--replace` is required to change an existing provider or key. `--skip-test` is refused and cannot mark a provider ready.
+
+The lanes are "On this computer" (a detected server or a URL you type), "On my network" (a base URL, an optional key, and a TLS fingerprint for a self-signed certificate), "Cloud provider" (`openai`, `anthropic`, `xai`, or `openai-compatible`), and "Skip for now". The primary model is required. Utility, vision, and the Decision Engine judge are optional. The test is one completion and one tool call against only the provider you named, plus a context-length check when the server reports one. Below 32768 tokens is a warning. Below 16384, agent mode stays off and the provider is not marked ready.
+
+When HIPAA, FERPA, COPPA, GDPR, or PCI is `monitor` or `enforce`, a cloud choice shows "Requires a BAA/DPA with the provider; PHI will leave this machine". The dials step shows the current positions. The default is all off, and a blank answer leaves them as they are. `models.allow_providers` is an org allowlist. An empty list allows every provider. A non-empty list refuses a save outside it.
+
+With no owner, the web UI shows the wizard instead of the sign-in form. Open it from the `--web` URL so the page can read the fragment. After an owner exists, an owner or admin sees "Setup needed" with the missing items and a link to each step. Other roles see only "Inference not configured".
+
 ## Models
 
-The default spec is `ollama:qwen3:32b`. Ollama's native chat API is `http://127.0.0.1:11434`. Override it with `PRAXIS_PRIME_OLLAMA_HOST` or `OLLAMA_HOST`.
+There is no default spec. Ollama's native chat API, when you choose it, is `http://127.0.0.1:11434`. Override that host with `PRAXIS_PRIME_OLLAMA_HOST` or `OLLAMA_HOST`. Those variables do not select Ollama.
 
 Other specs:
 
@@ -130,17 +169,15 @@ Other specs:
 | `anthropic:<model>` | Anthropic Messages API |
 | `xai:<model>` | xAI (OpenAI-compatible) |
 
-Set the base URL for llama.cpp or vLLM with `PRAXIS_PRIME_OPENAI_COMPATIBLE_BASE_URL`. A model name for that server can be `PRAXIS_PRIME_OPENAI_COMPATIBLE_MODEL` (default `local`).
+Set the base URL for llama.cpp, vLLM, or LM Studio with `PRAXIS_PRIME_OPENAI_COMPATIBLE_BASE_URL` or in setup. `lmstudio:<model>` is the same OpenAI-compatible lane. A model name for that server can be `PRAXIS_PRIME_OPENAI_COMPATIBLE_MODEL`. It is empty until you set it. Example specs such as `ollama:qwen3:8b` are examples, not defaults.
 
-Keys, only in the environment:
+Keys, in the environment or in the mode-0600 secrets file (`secrets.env` beside `config.toml`, or `PRAXIS_PRIME_SECRETS_FILE`):
 
 - `PRAXIS_PRIME_OPENAI_API_KEY` or `OPENAI_API_KEY`
 - `PRAXIS_PRIME_ANTHROPIC_API_KEY` or `ANTHROPIC_API_KEY`
 - `PRAXIS_PRIME_XAI_API_KEY` or `XAI_API_KEY`
 
-`praxis-prime config` never writes those values. If the selected provider is down or has no key, the router tries the next entry. A non-local primary falls back to Ollama. A configured OpenAI-compatible base URL is added to the chain. Paid providers are not called unless the spec or `PRAXIS_PRIME_FALLBACK_MODELS` names them.
-
-`PRAXIS_PRIME_MODEL` overrides `models.primary` in the config file. `PRAXIS_PRIME_MAX_ITERATIONS` caps a turn (default 200).
+`praxis-prime config` never writes those values. Setup writes them only to the secrets file. If the selected provider is down, the router does not switch to another provider. A fallback runs only when that spec is listed in `PRAXIS_PRIME_FALLBACK_MODELS` or `models.fallback` and that spec has passed its own test. Paid providers are not called unless the spec names them. `PRAXIS_PRIME_MODEL` overrides `models.primary` for this process. It still has to have passed a test before chat will call it. `PRAXIS_PRIME_MAX_ITERATIONS` caps a turn (default 200).
 
 ## What the loop guarantees
 

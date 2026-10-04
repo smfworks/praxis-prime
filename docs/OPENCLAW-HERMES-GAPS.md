@@ -36,8 +36,8 @@ One agent per person. Chat accounts bind to agents, with one-time pairing. Each 
 Several API keys per provider, with fallback for side tasks, so the agent keeps working when one key is rate-limited.
 
 - **Upstream:** HE `features/credential-pools.md`, `fallback-providers.md`; OC `docs/concepts/model-failover.md`.
-- **Praxis:** a fallback chain exists. Key pools do not.
-- **Milestone:** M2 (small to medium).
+- **Praxis:** an explicit fallback chain exists, and each fallback has to pass its own test. Key pools were not built in the M2 wizard. They stay a follow-up.
+- **Milestone:** M2 (small to medium). Not in the M2 wizard; follow-up.
 - **Acceptance criteria:**
   - A provider can hold more than one API key.
   - When one key is rate-limited, a side task uses another key from that pool.
@@ -48,8 +48,8 @@ Several API keys per provider, with fallback for side tasks, so the agent keeps 
 1Password, Bitwarden, Vault, or a custom command. Secrets are referenced by pointer, never written back to disk. Access is approved and audited.
 
 - **Upstream:** HE `user-guide/secrets/*`; OC `extensions/vault`, `extensions/onepassword`.
-- **Praxis:** not planned.
-- **Milestone:** M2/M4 (medium).
+- **Praxis:** setup stores API keys in `secrets.env` (mode 0600). 1Password, Bitwarden, Vault, and age were not built in the M2 wizard. They stay a follow-up. Keychain was not added.
+- **Milestone:** M2/M4 (medium). Not in the M2 wizard; follow-up.
 - **Acceptance criteria:**
   - A secret can be named as a pointer into 1Password, Bitwarden, Vault, or a custom command.
   - Reading it requires an approval, and the read is in the audit log.
@@ -96,8 +96,8 @@ Load MCP tool definitions only when needed, instead of every tool every turn.
 Doctor fixes problems and runs a security audit. A safe update command has stable and beta channels. Backup and recovery sit here too.
 
 - **Upstream:** OC `doctor`, `backup`, `security audit --fix`, and development channels; HE `updating.md`, `session-storage-recovery.md`.
-- **Praxis:** doctor reports only. Only a signed AppImage updater is planned.
-- **Milestone:** M2/M5a (medium).
+- **Praxis:** doctor reports the configured provider and lists detected local servers as information. It does not fix, audit, update, or back up. Those commands were not built in the M2 wizard.
+- **Milestone:** M2/M5a (medium). Not in the M2 wizard; follow-up.
 - **Acceptance criteria:**
   - `praxis-prime doctor` can fix the problems it knows how to fix, and it can run a security audit.
   - `praxis-prime update` is a separate command, with a stable channel and a beta channel, and it refuses an update it cannot verify.

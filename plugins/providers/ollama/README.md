@@ -1,5 +1,5 @@
 # ollama
 
-Ollama provider. Local default. `praxis-prime doctor` only probes 127.0.0.1:11434.
+Ollama provider. It is used only after `praxis-prime setup` chooses it. `praxis-prime doctor` lists a reachable Ollama as information and does not select it.
 
 TODO: ARCHITECTURE §6. Not implemented.

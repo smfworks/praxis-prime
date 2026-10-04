@@ -23,6 +23,7 @@ from praxis_prime.compliance.cli import add_compliance_parsers, dispatch_complia
 from praxis_prime.config import describe_write, resolve_config_dir, write_default_config
 from praxis_prime.doctor import format_report, report_exit_code, run_system_doctor
 from praxis_prime.mcp.cli import add_mcp_parser, mcp_command
+from praxis_prime.onboarding.cli import add_setup_parser, setup_command
 from praxis_prime.packs.cli import add_packs_parsers, dispatch_packs
 from praxis_prime.profiles.cli import add_profile_parser, profile_command
 from praxis_prime.state import MigrationInProgress
@@ -61,6 +62,8 @@ def _main(argv: list[str] | None = None) -> int:
         return _approvals_command(args)
     if args.command == "telegram":
         return _telegram_command(args)
+    if args.command == "setup":
+        return setup_command(args)
     if args.command == "code":
         return _code_command(args)
     if args.command == "decide":
@@ -185,6 +188,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     decide.add_argument("rest", nargs=argparse.REMAINDER, help=argparse.SUPPRESS)
 
+    add_setup_parser(commands)
     telegram = commands.add_parser("telegram", help="Pair the Telegram bot with your chat.")
     telegram_commands = telegram.add_subparsers(dest="telegram_command")
     telegram_commands.add_parser(

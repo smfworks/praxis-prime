@@ -90,6 +90,7 @@ def test_chat_requires_the_runtime_profile_and_membership(tmp_path: Path) -> Non
     store.set_membership(ada.id, "default", "owner")
     provider = ScriptedProvider([AssistantFinal(content="hello from default")])
     runtime = build_runtime(
+        model="ollama:qwen3:32b",
         env={},
         config_path=tmp_path / "missing.toml",
         data_path=data / "unused.db",
@@ -187,6 +188,7 @@ def test_foreign_session_cannot_inherit_a_grant_or_see_the_id(tmp_path: Path) ->
         [AssistantFinal(content="ada turn"), AssistantFinal(content="should not run")]
     )
     runtime = build_runtime(
+        model="ollama:qwen3:32b",
         env={},
         config_path=tmp_path / "missing.toml",
         data_path=data / "unused.db",
@@ -365,6 +367,7 @@ def test_passwd_disable_and_role_revoke_sessions_and_tickets(tmp_path: Path) -> 
     store.set_membership(ada.id, "default", "owner")
     store.set_membership(olga.id, "default", "operator")
     runtime = build_runtime(
+        model="ollama:qwen3:32b",
         env={},
         config_path=tmp_path / "missing.toml",
         data_path=data / "unused.db",
@@ -467,6 +470,7 @@ def test_migrate_refuses_a_live_daemon_and_unscoped_cards_are_admin_only(
     owner = _account(store, "ada", _PRIMARY, display_name="Ada")
     operator = _account(store, "nora", _SECOND, display_name="Nora", role="operator")
     runtime = build_runtime(
+        model="ollama:qwen3:32b",
         env={},
         config_path=tmp_path / "missing.toml",
         data_path=data / "prime.db",
@@ -549,6 +553,7 @@ def test_audit_profile_comes_from_the_runtime(tmp_path: Path) -> None:
     store.set_membership(account.id, "default", "operator")
     store.set_membership(account.id, "work", "operator")
     runtime = build_runtime(
+        model="ollama:qwen3:32b",
         env={},
         config_path=tmp_path / "missing.toml",
         data_path=data / "unused.db",
@@ -635,6 +640,7 @@ def test_lockout_is_held_across_argon2(tmp_path: Path, monkeypatch: pytest.Monke
 
 def test_idempotency_cache_is_per_account(tmp_path: Path) -> None:
     runtime = build_runtime(
+        model="ollama:qwen3:32b",
         env={},
         config_path=tmp_path / "missing.toml",
         data_path=tmp_path / "prime.db",
@@ -797,6 +803,7 @@ def test_approval_meta_is_limited_to_the_callers_profiles(tmp_path: Path) -> Non
     store.set_membership(ada.id, "default", "owner")
     store.set_membership(nora.id, "work", "operator")
     runtime = build_runtime(
+        model="ollama:qwen3:32b",
         env={},
         config_path=tmp_path / "missing.toml",
         data_path=data / "unused.db",
@@ -920,6 +927,7 @@ def test_approval_events_stay_with_the_principal(tmp_path: Path) -> None:
     store.set_membership(bea.id, "default", "operator")
     store.set_membership(olga.id, "default", "operator")
     runtime = build_runtime(
+        model="ollama:qwen3:32b",
         env={},
         config_path=tmp_path / "missing.toml",
         data_path=data / "prime.db",
@@ -1040,6 +1048,7 @@ def test_audit_log_uses_its_own_connection(tmp_path: Path) -> None:
     ada = _account(store, "ada", _PRIMARY, display_name="Ada")
     store.set_membership(ada.id, "default", "owner")
     runtime = build_runtime(
+        model="ollama:qwen3:32b",
         env={},
         config_path=tmp_path / "missing.toml",
         data_path=data / "prime.db",
@@ -1258,6 +1267,7 @@ def test_data_root_honours_an_explicit_data_dir(
     xdg_soul.parent.mkdir(parents=True)
     xdg_soul.write_text("XDG-SOUL\n", encoding="utf-8")
     runtime = build_runtime(
+        model="ollama:qwen3:32b",
         env={},
         config_path=tmp_path / "missing.toml",
         data_path=explicit / "prime.db",
@@ -1378,6 +1388,7 @@ def test_closing_one_runtime_keeps_the_other_data_root(
         (path / "profiles" / "default" / "SOUL.md").write_text(path.name + "\n", encoding="utf-8")
     bind_data_root(None)
     outer = build_runtime(
+        model="ollama:qwen3:32b",
         env={},
         config_path=tmp_path / "missing.toml",
         data_path=left / "prime.db",
@@ -1385,6 +1396,7 @@ def test_closing_one_runtime_keeps_the_other_data_root(
         providers={"ollama": ScriptedProvider([AssistantFinal(content="ok")])},
     )
     inner = build_runtime(
+        model="ollama:qwen3:32b",
         env={},
         config_path=tmp_path / "missing-inner.toml",
         data_path=right / "prime.db",

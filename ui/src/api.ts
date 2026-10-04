@@ -1,6 +1,24 @@
 const PROFILE_KEY = "praxis-prime-profile";
 
 let csrf = "";
+let setupToken = "";
+
+export function setSetupToken(token: string): void {
+  setupToken = token;
+}
+
+export function clearSetupToken(): void {
+  setupToken = "";
+}
+
+/** Read `#setup=<token>` once, then drop it so it never stays in the address bar. */
+export function takeSetupFragment(): void {
+  const hash = window.location.hash;
+  if (!hash.startsWith("#setup=")) return;
+  const token = decodeURIComponent(hash.slice("#setup=".length)).trim();
+  if (token) setupToken = token;
+  window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}`);
+}
 
 export class ApiError extends Error {
   status: number;
@@ -52,6 +70,7 @@ export async function api(
   body?: Record<string, unknown>,
 ): Promise<Record<string, unknown>> {
   const headers: Record<string, string> = { Accept: "application/json" };
+  if (setupToken) headers["x-praxis-setup-token"] = setupToken;
   const profile = currentProfile();
   if (catalogRoute(path) && !profile) {
     throw new ApiError(403, "forbidden", "a profile is required");

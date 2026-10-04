@@ -158,6 +158,7 @@ def test_profile_cap_scopes_and_tools(tmp_path: Path):
 def test_profile_and_recall_are_injected_without_changing_the_system_prompt(tmp_path: Path):
     provider = ScriptedProvider([AssistantFinal(content="Noted the billing api.")])
     runtime = build_runtime(
+        model="ollama:qwen3:32b",
         env={},
         config_path=tmp_path / "missing.toml",
         data_path=tmp_path / "prime.db",
