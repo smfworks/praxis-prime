@@ -82,3 +82,9 @@ src = ["packages/prime-core", "tests", "packs"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
+
+# SMF's attribution kit keeps its own line length, semicolons, lambda, and
+# single-letter names. Those files stay as the kit wrote them.
+[tool.ruff.lint.per-file-ignores]
+"scripts/check_attribution.py" = ["E501", "E731", "E741"]
+"tests/test_check_attribution.py" = ["E501", "E702", "E741"]

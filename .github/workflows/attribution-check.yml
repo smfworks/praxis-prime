@@ -1,0 +1,58 @@
+# SMF Works attribution check.
+# Install as .github/workflows/attribution-check.yml, with the checker at
+# scripts/check_attribution.py. Runs on pull_request only (never
+# pull_request_target), with a read-only token. The PR body is read from the
+# event payload file by the script; it is never interpolated into a shell command.
+name: Attribution check
+
+on:
+  pull_request:
+    # "edited" re-runs when the PR description changes; "labeled"/"unlabeled"
+    # re-run when the credits-edit-ok label is added or removed.
+    types: [opened, edited, synchronize, reopened, ready_for_review, labeled, unlabeled]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: attribution-check-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  attribution:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out the PR (full history, for the diff)
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          path: pr
+          fetch-depth: 0
+          persist-credentials: false
+
+      # Run the checker from the base branch, so a PR can't edit the script to
+      # make its own check pass.
+      - name: Check out the checker from the base branch
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: trusted
+          sparse-checkout: scripts
+          persist-credentials: false
+
+      - name: Run attribution check
+        env:
+          # Names whose copyright headers count as "ours" (comma-separated).
+          OWN_COPYRIGHT_HOLDERS: "Michael Gannotti,SMF Works,smfworks"
+          # This repo's own SPDX license IDs, e.g. "MIT". Files with only these
+          # SPDX headers won't trigger a warning. Leave empty to warn on all.
+          OWN_SPDX_IDS: "MIT"
+          CREDITS_FILE: "CREDITS.md"
+        run: |
+          script="trusted/scripts/check_attribution.py"
+          if [ ! -f "$script" ]; then
+            echo "::warning::No checker on the base branch yet (first install?). Using the PR's copy."
+            script="pr/scripts/check_attribution.py"
+          fi
+          python3 "$script" --repo pr
