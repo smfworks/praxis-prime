@@ -3,14 +3,17 @@
 Reads the rendered file ``~/.local/state/omarchy/current/theme/praxis-prime.json``
 (override with ``PRAXIS_PRIME_OMARCHY_THEME``; ``XDG_STATE_HOME`` is honoured).
 The file is untrusted: size is capped, only the template's keys are read,
-and colour values must be hex. Missing required tokens are derived in OKLCH.
-The result goes through the same contrast check as a package. Lightness may
-move by at most 0.25. If it still fails AA, the adapter logs the reason and
-returns nothing, so selection falls through to ``smf.praxis``.
+and a colour must be ``#rgb`` or ``#rrggbb``. Missing required tokens are
+derived in OKLCH from the dark ``smf.praxis`` palette when ``bg`` is dark,
+otherwise from the light palette. The result goes through the same contrast
+check as a package. Lightness may move by at most 0.25 in total. If it still
+fails AA, the adapter logs the reason and returns nothing, so selection falls
+through to ``smf.praxis``.
 
 The compiled package is kept in memory as ``omarchy.live``. It is not
-installed and it cannot be locked. Nothing here calls the network or opens
-any path other than that one file.
+installed and it cannot be locked. Nothing here calls the network.
+``O_NOFOLLOW`` covers the final path component. A symlinked parent, such as
+Omarchy's ``current/theme``, is followed on purpose.
 
 ARCHITECTURE §28.2. Addendum A §1.6.
 """
@@ -52,8 +55,10 @@ LIVE_ID = "omarchy.live"
 ENV_PATH = "PRAXIS_PRIME_OMARCHY_THEME"
 MAX_BYTES = 64 * 1024
 _FILENAME = "praxis-prime.json"
-# #rgb, #rrggbb, #rrggbbaa. Four-digit #rgba and oklch() are not accepted.
-_HEX = re.compile(r"^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$")
+# #rgb or #rrggbb. Eight-digit hex is translucent and is refused: a dark
+# color-scheme paints that colour over a dark canvas, which the white-page
+# contrast math does not see. Four-digit #rgba and oklch() are not accepted.
+_HEX = re.compile(r"^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$")
 _COLOR_KEYS = (
     "bg",
     "bgRaised",
@@ -85,6 +90,7 @@ _SECTION = re.compile(r"(?ms)^\[(?P<name>tokens\.(?:light|dark))\]\n.*?(?=^\[|\Z
 _ORNAMENTS = re.compile(r"(?ms)^\[ornaments\]\n.*?(?=^\[|\Z)")
 _LOCK = threading.Lock()
 _CACHE: dict[str, tuple[str, InstalledTheme | None]] = {}
+_WATCH_TOKEN: dict[str, str] = {}
 _WATCHER: DirectoryWatcher | None = None
 
 
@@ -104,15 +110,25 @@ def live_theme(path: Path | None = None) -> str | None:
 def installed(path: Path | None = None) -> InstalledTheme | None:
     """The in-memory package for the current file, or None.
 
-    Checked on each call from the file's mtime and size, so a rewrite is
-    visible to the next ``/v1/themes/active`` without a background thread.
-    inotify is armed on the parent directory when the kernel provides it;
-    the mtime poll still decides.
+    inotify on the parent directory decides when the kernel provides it.
+    A clean watch returns the cached package, including a cached refusal,
+    without reading the file again. A poll backend, a first sight, or an
+    overflowed watch stats inode, mtime, and size and recompiles on a change.
     """
     source = theme_file(path)
-    _arm(source)
-    signature = _signature(source)
     key = str(source)
+    with _LOCK:
+        previous = _WATCH_TOKEN.get(key, "")
+    try:
+        changed, token = _watcher().observe(source, previous, startup=not previous)
+    except OSError:
+        changed, token = True, previous
+    with _LOCK:
+        _WATCH_TOKEN[key] = token
+        cached = _CACHE.get(key)
+        if not changed and cached is not None:
+            return cached[1]
+    signature = _signature(source)
     with _LOCK:
         cached = _CACHE.get(key)
         if cached is not None and cached[0] == signature:
@@ -140,13 +156,6 @@ def watch_backend() -> str:
     return _watcher().backend
 
 
-def _arm(path: Path) -> None:
-    try:
-        _watcher().observe(path, "", startup=True)
-    except OSError:
-        return
-
-
 def _watcher() -> DirectoryWatcher:
     global _WATCHER
     if _WATCHER is None:
@@ -162,7 +171,7 @@ def _signature(path: Path) -> str:
         info = os.lstat(path)
     except OSError:
         return "unreadable"
-    return f"f:{info.st_mtime_ns}:{info.st_size}"
+    return f"f:{info.st_ino}:{info.st_mtime_ns}:{info.st_size}"
 
 
 def _load(path: Path) -> InstalledTheme | None:
@@ -185,7 +194,7 @@ def _load(path: Path) -> InstalledTheme | None:
 
 
 def _read_capped(path: Path) -> bytes | None:
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     try:
         descriptor = os.open(path, flags)
     except OSError as exc:
@@ -212,7 +221,7 @@ def _read_capped(path: Path) -> bytes | None:
 def _parse_colors(raw: bytes) -> dict[str, str] | None:
     try:
         loaded = json.loads(raw.decode("utf-8"))
-    except (UnicodeError, json.JSONDecodeError):
+    except (UnicodeError, json.JSONDecodeError, ValueError, RecursionError):
         _LOG.warning("Omarchy theme file is not UTF-8 JSON. Ignoring it and using smf.praxis.")
         return None
     if not isinstance(loaded, dict):
@@ -224,7 +233,7 @@ def _parse_colors(raw: bytes) -> dict[str, str] | None:
             continue
         if not isinstance(value, str) or _HEX.fullmatch(value.strip()) is None:
             _LOG.warning(
-                "Omarchy theme key %s is not a hex colour (#rgb, #rrggbb, or #rrggbbaa). "
+                "Omarchy theme key %s is not a hex colour (#rgb or #rrggbb). "
                 "Refusing the file and using smf.praxis.",
                 key,
             )
@@ -241,7 +250,10 @@ def _compile(supplied: dict[str, str]) -> InstalledTheme | None:
     if base is None:
         _LOG.warning("smf.praxis is not available, so the Omarchy palette was not compiled.")
         return None
-    seed = {name: base.package.modes["light"][name] for name in REQUIRED_COLORS}
+    seed_mode = "light"
+    if "bg" in supplied and parse_color(supplied["bg"]).oklch()[0] < 0.5:
+        seed_mode = "dark"
+    seed = {name: base.package.modes[seed_mode][name] for name in REQUIRED_COLORS}
     tuned = _nudge(supplied, seed)
     if tuned is None:
         _LOG.warning(
@@ -289,8 +301,13 @@ def _write_tokens(text: str, colors: dict[str, str]) -> str:
 
 
 def _nudge(supplied: dict[str, str], seed: dict[str, str]) -> dict[str, str] | None:
-    """Return a palette that passes AA, moving supplied colours by at most 0.25."""
+    """Return a palette that passes AA, moving supplied colours by at most 0.25.
+
+    The 0.25 OKLCH lightness budget is measured from the colour in the file,
+    across every pass. A later pass cannot spend the budget again.
+    """
     current = dict(supplied)
+    original = {key: parse_color(value).oklch()[0] for key, value in supplied.items()}
     full = _assemble(current, seed)
     if full is not None and _clear(full):
         return full
@@ -298,7 +315,7 @@ def _nudge(supplied: dict[str, str], seed: dict[str, str]) -> dict[str, str] | N
     for _pass in range(3):
         moved = False
         for key in keys:
-            updated = _search(key, current, seed)
+            updated = _search(key, current, seed, original[key])
             if updated is None or updated == current[key]:
                 continue
             current[key] = updated
@@ -311,22 +328,63 @@ def _nudge(supplied: dict[str, str], seed: dict[str, str]) -> dict[str, str] | N
     return None
 
 
-def _search(key: str, current: dict[str, str], seed: dict[str, str]) -> str | None:
+def _search(
+    key: str,
+    current: dict[str, str],
+    seed: dict[str, str],
+    original_light: float,
+) -> str | None:
+    """Smallest lightness move that clears this token, inside the original band."""
     color = parse_color(current[key])
     light, _chroma, _hue = color.oklch()
-    for step in range(0, 51):
-        delta = step * 0.005
-        signs = (0.0,) if step == 0 else (-1.0, 1.0)
-        for sign in signs:
-            candidate = color.with_lightness(min(1.0, max(0.0, light + sign * delta)))
-            trial = dict(current)
-            trial[key] = candidate.to_hex()
-            full = _assemble(trial, seed)
-            if full is None:
-                continue
-            if _token_clear(full, key):
-                return candidate.to_hex()
-    return None
+    low = max(0.0, original_light - 0.25)
+    high = min(1.0, original_light + 0.25)
+
+    def attempt(target: float) -> str | None:
+        if target < low - 1e-9 or target > high + 1e-9:
+            return None
+        candidate = color.with_lightness(min(high, max(low, target)))
+        trial = dict(current)
+        trial[key] = candidate.to_hex()
+        full = _assemble(trial, seed)
+        if full is None or not _token_clear(full, key):
+            return None
+        return candidate.to_hex()
+
+    found = attempt(light)
+    if found is not None:
+        return found
+    best: tuple[float, str] | None = None
+    for sign in (-1.0, 1.0):
+        reach = (light - low) if sign < 0 else (high - light)
+        if reach <= 1e-9:
+            continue
+        hit: float | None = None
+        for step in range(1, 9):
+            delta = reach * (step / 8)
+            if attempt(light + sign * delta) is not None:
+                hit = delta
+                break
+        if hit is None:
+            continue
+        lo_delta, hi_delta = 0.0, hit
+        winner = hit
+        for _step in range(8):
+            mid = (lo_delta + hi_delta) / 2
+            if attempt(light + sign * mid) is not None:
+                winner = mid
+                hi_delta = mid
+            else:
+                lo_delta = mid
+        chosen = attempt(light + sign * winner) or attempt(light + sign * hit)
+        if chosen is None:
+            continue
+        moved = abs(parse_color(chosen).oklch()[0] - original_light)
+        if best is None or moved < best[0]:
+            best = (moved, chosen)
+    if best is None:
+        return None
+    return best[1]
 
 
 def _assemble(supplied: dict[str, str], seed: dict[str, str]) -> dict[str, str] | None:

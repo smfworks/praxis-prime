@@ -27,7 +27,13 @@ from praxis_prime.themes.errors import ThemeError, ThemeIssue
 from praxis_prime.themes.legacy import hint_theme
 from praxis_prime.themes.omarchy import LIVE_ID
 from praxis_prime.themes.omarchy import installed as live_installed
-from praxis_prime.themes.select import ThemeChoice, resolve_theme, set_lock, set_profile_theme
+from praxis_prime.themes.select import (
+    ThemeChoice,
+    any_profile_chose,
+    resolve_theme,
+    set_lock,
+    set_profile_theme,
+)
 from praxis_prime.themes.store import (
     InstalledTheme,
     discard_stage,
@@ -417,6 +423,10 @@ def _may_select(principal: Principal,
 
 def _by_hash(data_root: Path | None, theme_id: str, digest: str) -> InstalledTheme | None:
     if theme_id == LIVE_ID:
+        # The stylesheet route is unauthenticated. Open the Omarchy file only
+        # after a profile has stored that choice. Otherwise 404, and do not stat it.
+        if data_root is None or not any_profile_chose(data_root, "omarchy"):
+            return None
         live = live_installed()
         if live is not None and live.package_hash == digest:
             return live

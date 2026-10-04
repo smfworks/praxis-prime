@@ -17,6 +17,9 @@ _IN_NONBLOCK = 0x00000800
 _IN_CLOEXEC = 0x00080000
 _MASK = 0x2 | 0x4 | 0x8 | 0x40 | 0x80 | 0x100 | 0x200
 _HEADER = struct.Struct("iIII")
+# A noisy directory must not grow this set without bound. Past the cap the
+# watcher forgets individual paths and the next observe stats instead.
+_DIRTY_CAP = 1024
 
 
 def file_token(path: Path) -> str:
@@ -51,6 +54,9 @@ class DirectoryWatcher:
         self._wd_path: dict[int, Path] = {}
         self._armed: set[str] = set()
         self._dirty: set[str] = set()
+        self._watched: set[str] = set()
+        self._reconciled: set[str] = set()
+        self._overflow = False
         self._libc: ctypes.CDLL | None = None
         fd, libc = _open_inotify()
         if fd is not None and libc is not None:
@@ -82,9 +88,12 @@ class DirectoryWatcher:
         self.arm(path)
         self._drain()
         key = str(path)
+        self._watched.add(key)
+        force = self._overflow
         if (
             self.backend == "inotify"
             and not startup
+            and not force
             and previous
             and previous != "missing"
             and key not in self._dirty
@@ -92,6 +101,11 @@ class DirectoryWatcher:
             return False, previous
         token = file_token(path)
         self._dirty.discard(key)
+        if force:
+            self._reconciled.add(key)
+            if self._watched <= self._reconciled:
+                self._overflow = False
+                self._reconciled.clear()
         return token != previous, token
 
     def _drain(self) -> None:
@@ -107,7 +121,17 @@ class DirectoryWatcher:
             if not raw:
                 return
             for event_path in _parse(raw, self._wd_path):
-                self._dirty.add(str(event_path))
+                self._mark_dirty(str(event_path))
+
+    def _mark_dirty(self, key: str) -> None:
+        if self._overflow:
+            return
+        if len(self._dirty) >= _DIRTY_CAP:
+            self._overflow = True
+            self._dirty.clear()
+            self._reconciled.clear()
+            return
+        self._dirty.add(key)
 
 
 def _open_inotify() -> tuple[int | None, ctypes.CDLL | None]:

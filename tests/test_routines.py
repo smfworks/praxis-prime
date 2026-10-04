@@ -23,7 +23,7 @@ from praxis_prime.scheduler.cron import ScheduleError
 from praxis_prime.scheduler.runner import execute_routine
 from praxis_prime.scheduler.service import RoutineScheduler
 from praxis_prime.scheduler.store import Routine, RoutineRun, RoutineStore
-from praxis_prime.scheduler.watch import DirectoryWatcher, file_token
+from praxis_prime.scheduler.watch import _DIRTY_CAP, DirectoryWatcher, file_token
 from praxis_prime.state import StateDB
 from praxis_prime.tools.registry import Risk, Tool, ToolContext, ToolRegistry
 
@@ -158,6 +158,25 @@ def test_file_change_while_down_can_be_skipped(tmp_path: Path):
     finally:
         scheduler.join()
         db.close()
+
+
+def test_dirty_set_is_bounded_and_overflow_stats(tmp_path: Path):
+    path = tmp_path / "live.txt"
+    path.write_text("same")
+    watcher = DirectoryWatcher()
+    try:
+        for index in range(_DIRTY_CAP + 5):
+            watcher._mark_dirty(f"/tmp/noise-{index}")
+        assert watcher._overflow
+        assert len(watcher._dirty) <= _DIRTY_CAP
+        watcher.backend = "inotify"
+        changed, token = watcher.observe(path, "stale", startup=False)
+        assert changed
+        assert token == file_token(path)
+        changed, token = watcher.observe(path, token, startup=False)
+        assert changed is False
+    finally:
+        watcher.close()
 
 
 def test_inotify_or_poll_sees_a_write(tmp_path: Path):

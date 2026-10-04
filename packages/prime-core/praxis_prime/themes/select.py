@@ -12,16 +12,20 @@ from __future__ import annotations
 
 import os
 import re
+import threading
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
-from praxis_prime.profiles.home import ProfileHome, org_policy_path
+from praxis_prime.profiles.home import ProfileHome, list_profiles, org_policy_path
 from praxis_prime.statfile import StatKind, lstat_kind
 from praxis_prime.themes.errors import ThemeError, ThemeIssue
-from praxis_prime.themes.omarchy import LIVE_ID, live_theme
+from praxis_prime.themes.omarchy import LIVE_ID, live_theme, theme_file
 from praxis_prime.themes.store import InstalledTheme, find_theme
 from praxis_prime.themes.tokens import MODE_CHOICES
+
+_LIVE_SEEN: dict[str, str] = {}
+_LIVE_SEEN_LOCK = threading.Lock()
 
 _HEADING = re.compile(r"^\[([A-Za-z0-9_.-]+)\]\s*$")
 _DEFAULT_ID = "smf.praxis"
@@ -73,13 +77,76 @@ def resolve_theme(data_root: Path, profile: str = "") -> ThemeChoice:
             "default theme is missing",
             (ThemeIssue("not_found", "smf.praxis is not available.", _DEFAULT_ID),),
         )
-    return ThemeChoice(
+    choice = ThemeChoice(
         theme_id=installed.package.theme_id,
         mode=mode,
         locked=locked,
         requested=requested or _DEFAULT_ID,
         installed=installed,
     )
+    if choice.theme_id == LIVE_ID:
+        _note_live_swap(data_root, choice)
+    return choice
+
+
+def any_profile_chose(data_root: Path, theme_id: str) -> bool:
+    """True when a profile's stored choice is ``theme_id``.
+
+    Used to keep ``GET /themes/omarchy.live/<hash>.css`` from opening the
+    Omarchy file until some profile has actually chosen it.
+    """
+    for name in list_profiles(data_root):
+        choice_id, _mode = _profile_choice(data_root, name)
+        if choice_id == theme_id:
+            return True
+    return False
+
+
+def _note_live_swap(data_root: Path, choice: ThemeChoice) -> None:
+    """Audit a palette that replaced one already compiled in this process.
+
+    The first observation is silent. Selecting System (Omarchy) already
+    writes ``theme.activate``. A later rewrite of the same file does too,
+    with the new package hash. A missing ``prime.db`` is left uncreated.
+    """
+    source = str(theme_file())
+    digest = choice.installed.package_hash
+    with _LIVE_SEEN_LOCK:
+        previous = _LIVE_SEEN.get(source)
+        _LIVE_SEEN[source] = digest
+    if previous is None or previous == digest:
+        return
+    _audit_activate(data_root, choice)
+
+
+def _audit_activate(data_root: Path, choice: ThemeChoice) -> None:
+    from praxis_prime.audit.log import AuditLog
+    from praxis_prime.profiles.home import resolve_runtime_layout
+    from praxis_prime.state import StateDB
+
+    layout = resolve_runtime_layout(None, data_file=data_root / "prime.db", profile=None)
+    if lstat_kind(layout.db_path) is not StatKind.FILE:
+        return
+    payload: dict[str, object] = {
+        "id": choice.theme_id,
+        "mode": choice.mode,
+        "packageHash": choice.installed.package_hash,
+        "locked": choice.locked,
+    }
+    db = StateDB(layout.db_path)
+    try:
+        log = AuditLog(db)
+        try:
+            log.append(
+                session_id=None,
+                kind="theme.activate",
+                summary=f"activated theme {choice.theme_id}",
+                payload=payload,
+            )
+        finally:
+            log.close()
+    finally:
+        db.close()
 
 
 def set_profile_theme(data_root: Path, profile: str, theme_id: str, mode: str) -> ThemeChoice:
