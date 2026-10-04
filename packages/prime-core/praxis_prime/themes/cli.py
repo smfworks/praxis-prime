@@ -157,7 +157,15 @@ def _pack(args: argparse.Namespace) -> int:
 
 
 def _remove(args: argparse.Namespace) -> int:
-    remove_theme(args.theme_id, _data(args), system=bool(args.system))
+    data = _data(args)
+    removed = remove_theme(args.theme_id, data, system=bool(args.system))
+    for item in removed:
+        _audit(
+            data,
+            "theme.remove",
+            f"removed theme {item.theme_id}",
+            {"id": item.theme_id, "version": item.version, "packageHash": item.package_hash},
+        )
     print(f"removed {args.theme_id}")
     return 0
 

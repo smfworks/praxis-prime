@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import io
 import os
+import re
 import stat
 import zipfile
+import zlib
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -38,6 +40,12 @@ _ROOT_FILES = frozenset(
     }
 )
 _SCRIPT_SUFFIXES = frozenset({".js", ".mjs", ".cjs", ".html", ".htm", ".wasm"})
+# Every asset name is a single path segment. Quotes, slashes, and CSS
+# punctuation cannot appear, so a filename cannot break out of url("...").
+_ASSET_PATH = re.compile(r"^assets/(fonts|ornaments)/[A-Za-z0-9._-]+$")
+FONT_PATH = re.compile(r"^assets/fonts/[A-Za-z0-9._-]+\.woff2$")
+ORNAMENT_PATH = re.compile(r"^assets/ornaments/[A-Za-z0-9._-]+\.(?:svg|png|webp)$")
+_FONT_SIDECAR = frozenset({"OFL.txt", "LICENSE", "LICENSE.txt"})
 
 
 def read_zip(data: bytes) -> dict[str, bytes]:
@@ -49,69 +57,91 @@ def read_zip(data: bytes) -> dict[str, bytes]:
         )
     try:
         archive = zipfile.ZipFile(io.BytesIO(data))
-    except zipfile.BadZipFile as exc:
-        raise ThemeError(
-            "theme zip is not a zip file",
-            (_issue("zip_invalid", "Upload a .zip produced by theme pack.", "package.zip"),),
-        ) from exc
+    except (zipfile.BadZipFile, zlib.error) as exc:
+        raise _damaged_zip() from exc
     files: dict[str, bytes] = {}
     total = 0
-    with archive:
-        infos = archive.infolist()
-        if len(infos) > MAX_FILES:
-            raise ThemeError(
-                "theme zip has too many members",
-                (_issue("zip_too_many", "Keep the package to 200 files or fewer.", "package.zip"),),
-            )
-        for info in infos:
-            if info.flag_bits & 0x1:
+    try:
+        with archive:
+            infos = archive.infolist()
+            if len(infos) > MAX_FILES:
                 raise ThemeError(
-                    "encrypted theme zip",
-                    (_issue("zip_encrypted", "Do not encrypt the zip.", info.filename),),
-                )
-            if stat.S_ISLNK(info.external_attr >> 16):
-                raise ThemeError(
-                    "theme zip contains a symlink",
+                    "theme zip has too many members",
                     (
                         _issue(
-                            "zip_symlink",
-                            "Remove the symlink and pack regular files.",
-                            info.filename,
+                            "zip_too_many",
+                            "Keep the package to 200 files or fewer.",
+                            "package.zip",
                         ),
                     ),
                 )
-            name = _member_name(info.filename)
-            if name is None:
-                raise ThemeError(
-                    "theme zip path escapes the package",
-                    (
-                        _issue(
-                            "zip_traversal",
-                            "Use relative paths inside the zip. No absolute paths or '..'.",
-                            info.filename,
+            for info in infos:
+                if info.flag_bits & 0x1:
+                    raise ThemeError(
+                        "encrypted theme zip",
+                        (_issue("zip_encrypted", "Do not encrypt the zip.", info.filename),),
+                    )
+                if stat.S_ISLNK(info.external_attr >> 16):
+                    raise ThemeError(
+                        "theme zip contains a symlink",
+                        (
+                            _issue(
+                                "zip_symlink",
+                                "Remove the symlink and pack regular files.",
+                                info.filename,
+                            ),
                         ),
-                    ),
-                )
-            if not name:
-                continue
-            if info.file_size > MAX_FILE_BYTES or info.file_size > MAX_EXPANDED_BYTES:
-                raise ThemeError(
-                    "theme file is over the size limit",
-                    (_issue("file_too_large", "Keep each file under 4 MiB.", name),),
-                )
-            total += info.file_size
-            if total > MAX_EXPANDED_BYTES:
-                raise ThemeError(
-                    "theme zip expands past 15 MiB",
-                    (_issue("zip_too_large", "Keep the expanded package under 15 MiB.", name),),
-                )
-            payload = archive.read(info)
-            if len(payload) > MAX_FILE_BYTES:
-                raise ThemeError(
-                    "theme file is over the size limit",
-                    (_issue("file_too_large", "Keep each file under 4 MiB.", name),),
-                )
-            files[name] = payload
+                    )
+                name = _member_name(info.filename)
+                if name is None:
+                    raise ThemeError(
+                        "theme zip path escapes the package",
+                        (
+                            _issue(
+                                "zip_traversal",
+                                "Use relative paths inside the zip. No absolute paths or '..'.",
+                                info.filename,
+                            ),
+                        ),
+                    )
+                if not name:
+                    continue
+                if name in files:
+                    raise ThemeError(
+                        "theme zip repeats a file name",
+                        (
+                            _issue(
+                                "zip_duplicate",
+                                "Each file name must appear once.",
+                                name,
+                            ),
+                        ),
+                    )
+                if info.file_size > MAX_FILE_BYTES or info.file_size > MAX_EXPANDED_BYTES:
+                    raise ThemeError(
+                        "theme file is over the size limit",
+                        (_issue("file_too_large", "Keep each file under 4 MiB.", name),),
+                    )
+                total += info.file_size
+                if total > MAX_EXPANDED_BYTES:
+                    raise ThemeError(
+                        "theme zip expands past 15 MiB",
+                        (_issue("zip_too_large", "Keep the expanded package under 15 MiB.", name),),
+                    )
+                try:
+                    payload = archive.read(info)
+                except (zipfile.BadZipFile, zlib.error) as exc:
+                    raise _damaged_zip(name) from exc
+                if len(payload) > MAX_FILE_BYTES:
+                    raise ThemeError(
+                        "theme file is over the size limit",
+                        (_issue("file_too_large", "Keep each file under 4 MiB.", name),),
+                    )
+                files[name] = payload
+    except ThemeError:
+        raise
+    except (zipfile.BadZipFile, zlib.error) as exc:
+        raise _damaged_zip() from exc
     _check_layout(files)
     return files
 
@@ -243,19 +273,16 @@ def _check_layout(files: Mapping[str, bytes]) -> None:
 
 
 def _allowed(path: str) -> bool:
+    """Fixed top-level files, or one safe name under assets/fonts or assets/ornaments."""
     if path in _ROOT_FILES:
         return True
-    if path.startswith("assets/fonts/"):
-        name = path.removeprefix("assets/fonts/")
-        if "/" in name:
-            return False
-        return name.endswith(".woff2") or name in {"OFL.txt", "LICENSE", "LICENSE.txt"}
-    if path.startswith("assets/ornaments/"):
-        name = path.removeprefix("assets/ornaments/")
-        if "/" in name:
-            return False
-        return Path(name).suffix.lower() in {".svg", ".png", ".webp"}
-    return path in {"assets/preview.png", "assets/preview.webp"}
+    if _ASSET_PATH.fullmatch(path) is None:
+        return False
+    folder = path.split("/", 2)[1]
+    name = path.split("/", 2)[2]
+    if folder == "fonts":
+        return FONT_PATH.fullmatch(path) is not None or name in _FONT_SIDECAR
+    return ORNAMENT_PATH.fullmatch(path) is not None
 
 
 def _size_limit(path: str) -> int:
@@ -266,6 +293,19 @@ def _size_limit(path: str) -> int:
     if path.startswith("assets/preview."):
         return MAX_PREVIEW_BYTES
     return MAX_FILE_BYTES
+
+
+def _damaged_zip(path: str = "package.zip") -> ThemeError:
+    return ThemeError(
+        "theme zip is damaged",
+        (
+            _issue(
+                "zip_invalid",
+                "The zip is damaged (bad CRC, name, or compression). Pack it again.",
+                path,
+            ),
+        ),
+    )
 
 
 def _issue(code: str, message: str, path: str) -> ThemeIssue:

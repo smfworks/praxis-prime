@@ -212,6 +212,110 @@ def test_theme_install_audit_records_the_package_hash(tmp_path: Path):
         payload = json.loads(row["payload_json"])
         assert payload["packageHash"] == digest
         assert payload["id"] == "lab.api"
+
+        status, _headers, removed = _request(
+            server.bound_port,
+            "POST",
+            "/v1/themes/remove",
+            token="test-token",
+            body_json={"id": "lab.api"},
+        )
+        assert status == 200
+        assert removed["removed"] == "lab.api"
+        row = runtime.audit._conn.execute(
+            "SELECT payload_json FROM audit_events WHERE kind = 'theme.remove'"
+        ).fetchone()
+        assert row is not None
+        payload = json.loads(row["payload_json"])
+        assert payload["id"] == "lab.api"
+        assert payload["version"] == "1.0.0"
+        assert payload["packageHash"] == digest
+    finally:
+        server.shutdown()
+        host.close()
+
+
+def test_damaged_zip_is_http_400(tmp_path: Path):
+    server, host, _runtime = _accounts(tmp_path, profile="default")
+    try:
+        status, _headers, body = _raw(
+            server.bound_port,
+            "POST",
+            "/v1/themes/install",
+            payload=b"this is not a zip",
+            extra={"Authorization": "Bearer test-token", "Content-Type": "application/zip"},
+        )
+        assert status == 400
+        assert body["ok"] is False
+        issues = body["error"]["issues"]
+        assert isinstance(issues, list)
+        assert any(item.get("code") == "zip_invalid" for item in issues if isinstance(item, dict))
+    finally:
+        server.shutdown()
+        host.close()
+
+
+def test_failed_install_discards_the_stage(tmp_path: Path):
+    server, host, _runtime = _accounts(tmp_path, profile="default")
+    try:
+        status, _headers, body = _raw(
+            server.bound_port,
+            "POST",
+            "/v1/themes/preview",
+            payload=_sample_zip(),
+            extra={"Authorization": "Bearer test-token", "Content-Type": "application/zip"},
+        )
+        assert status == 200
+        digest = str(body["packageHash"])
+        stage = server.data_root / "theme-stage" / digest
+        assert stage.is_dir()
+        (stage / "theme.toml").write_text("not toml", encoding="utf-8")
+        status, _headers, failed = _request(
+            server.bound_port,
+            "POST",
+            "/v1/themes/install",
+            token="test-token",
+            body_json={"packageHash": digest},
+        )
+        assert status == 400
+        assert failed["ok"] is False
+        assert not stage.exists()
+    finally:
+        server.shutdown()
+        host.close()
+
+
+def test_user_smf_copy_does_not_win_and_a_tampered_theme_is_404(tmp_path: Path):
+    server, host, _runtime = _accounts(tmp_path, profile="default")
+    try:
+        assert server.data_root is not None
+        builtin = read_builtin_files("smf.praxis")
+        planted = server.data_root / "themes" / "smf.praxis" / "1.0.0"
+        for name, payload in builtin.items():
+            path = planted.joinpath(*name.split("/"))
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(payload)
+        status, _headers, active = _raw(server.bound_port, "GET", "/v1/themes/active")
+        assert status == 200
+        assert active["id"] == "smf.praxis"
+        assert active["source"] == "builtin"
+
+        status, _headers, body = _raw(
+            server.bound_port,
+            "POST",
+            "/v1/themes/install",
+            payload=_sample_zip(),
+            extra={"Authorization": "Bearer test-token", "Content-Type": "application/zip"},
+        )
+        assert status == 200
+        css_path = str(body["theme"]["css"])
+        status, _headers, raw = _raw_bytes(server.bound_port, "GET", css_path)
+        assert status == 200
+        readme = server.data_root / "themes" / "lab.api" / "1.0.0" / "THEME.md"
+        readme.write_bytes(readme.read_bytes() + b"\n")
+        status, _headers, raw = _raw_bytes(server.bound_port, "GET", css_path)
+        assert status == 404
+        assert b"--pp-bg:" not in raw
     finally:
         server.shutdown()
         host.close()

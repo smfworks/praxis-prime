@@ -102,6 +102,9 @@ CONTRAST_PAIRS: tuple[tuple[str, str, str], ...] = (
     ("accent", "bg", "ui"),
     ("accent", "bgRaised", "ui"),
     ("approval", "bg", "ui"),
+    ("dialOff", "bg", "ui"),
+    ("dialMonitor", "bg", "ui"),
+    ("dialEnforce", "bg", "ui"),
 )
 
 TYPE_TOKENS: tuple[str, ...] = (

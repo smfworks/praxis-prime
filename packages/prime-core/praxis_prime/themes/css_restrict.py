@@ -1,8 +1,9 @@
 """Allowlist for an optional theme.css.
 
-tinycss2 parses the file. The bytes that are served are a re-serialization of
-the rules that passed, so a comment or an unparsed tail cannot survive.
-Addendum A §1.4.
+tinycss2 parses the file. Decorative rules that pass are re-serialized, so a
+comment or an unparsed tail cannot survive. Custom properties are returned
+on the report for the token maps and are not copied into the served
+stylesheet. Addendum A §1.4.
 """
 
 from __future__ import annotations
@@ -102,6 +103,29 @@ _BANNED_PROPS = frozenset(
 )
 _PROTECTED = ("pp-approval", "pp-dial", "pp-audit")
 _LENGTH = re.compile(r"^([0-9]+(?:\.[0-9]+)?)(px)?$")
+# A decorative length cannot push a card off the viewport.
+_LENGTH_MAX = 16.0
+_CAPPED = frozenset(
+    {
+        "border",
+        "border-width",
+        "border-top",
+        "border-right",
+        "border-bottom",
+        "border-left",
+        "border-top-width",
+        "border-right-width",
+        "border-bottom-width",
+        "border-left-width",
+        "border-radius",
+        "border-top-left-radius",
+        "border-top-right-radius",
+        "border-bottom-right-radius",
+        "border-bottom-left-radius",
+        "background-size",
+        "letter-spacing",
+    }
+)
 
 
 @dataclass
@@ -146,8 +170,9 @@ def check_theme_css(text: str, assets: set[str]) -> CssReport:
         issues.extend(found)
         if rendered is None:
             continue
-        blocks.append(rendered[0])
-        bucket, props = rendered[1], rendered[2]
+        body, bucket, props = rendered
+        if body:
+            blocks.append(body)
         if bucket == "light":
             light.update(props)
         elif bucket == "dark":
@@ -236,7 +261,8 @@ def _rule(
                 issues.append(checked)
                 continue
             props[name] = value
-        elif lower not in _DECOR_PROPS:
+            continue
+        if lower not in _DECOR_PROPS:
             issues.append(
                 _issue(
                     "css_property",
@@ -245,10 +271,11 @@ def _rule(
                 )
             )
             continue
+        limited = _decor_limit_issues(lower, item.value)
+        if limited:
+            issues.extend(limited)
+            continue
         lines.append(f"  {name}: {_rewrite_urls(value, assets)};")
-    if issues and not lines:
-        return None, issues
-    body = selector + " {\n" + "\n".join(lines) + "\n}"
     bucket = "root"
     dark = ("data-mode=dark", 'data-mode="dark"', "data-mode='dark'")
     light = ("data-mode=light", 'data-mode="light"', "data-mode='light'")
@@ -258,6 +285,11 @@ def _rule(
         bucket = "light"
     elif decorative:
         bucket = ""
+    if not lines:
+        if props:
+            return ("", bucket, props), issues
+        return None, issues
+    body = selector + " {\n" + "\n".join(lines) + "\n}"
     return (body, bucket, props), issues
 
 
@@ -317,6 +349,89 @@ def _number(token: str, value: str) -> float | None:
     if number < low or number > high:
         return None
     return number
+
+
+def _decor_limit_issues(prop: str, tokens: list[object]) -> list[ThemeIssue]:
+    """Cap lengths that can move layout. ``oklch()`` percentages stay."""
+    if prop == "box-shadow":
+        return _shadow_issues(tokens)
+    if prop == "background-position":
+        return _bounded_issues(tokens, low=-_LENGTH_MAX, high=_LENGTH_MAX)
+    if prop in _CAPPED:
+        return _bounded_issues(tokens, low=0, high=_LENGTH_MAX)
+    return []
+
+
+def _bounded_issues(tokens: list[object], *, low: float, high: float) -> list[ThemeIssue]:
+    issues: list[ThemeIssue] = []
+    for token in _length_tokens(tokens):
+        message = _length_message(token, low=low, high=high)
+        if message:
+            issues.append(_issue("css_property", message, "theme.css"))
+    return issues
+
+
+def _shadow_issues(tokens: list[object]) -> list[ThemeIssue]:
+    issues: list[ThemeIssue] = []
+    index = 0
+    for token in tokens:
+        kind = getattr(token, "type", "")
+        if kind == "literal" and getattr(token, "value", "") == ",":
+            index = 0
+            continue
+        if kind == "function" and getattr(token, "lower_name", "") == "oklch":
+            continue
+        if kind in {"() block", "[] block", "{} block"}:
+            issues.extend(_shadow_issues(getattr(token, "content", [])))
+            continue
+        if kind not in {"dimension", "percentage", "number"}:
+            continue
+        if index >= 4:
+            issues.append(
+                _issue("css_property", "box-shadow accepts at most four lengths.", "theme.css")
+            )
+            index += 1
+            continue
+        low, high = (-_LENGTH_MAX, _LENGTH_MAX) if index < 2 else (0, _LENGTH_MAX)
+        message = _length_message(token, low=low, high=high)
+        if message:
+            issues.append(_issue("css_property", message, "theme.css"))
+        index += 1
+    return issues
+
+
+def _length_tokens(tokens: list[object]) -> list[object]:
+    found: list[object] = []
+    for token in tokens:
+        kind = getattr(token, "type", "")
+        if kind == "function":
+            if getattr(token, "lower_name", "") == "oklch":
+                continue
+            found.extend(_length_tokens(getattr(token, "arguments", [])))
+        elif kind in {"() block", "[] block", "{} block"}:
+            found.extend(_length_tokens(getattr(token, "content", [])))
+        elif kind in {"dimension", "percentage", "number"}:
+            found.append(token)
+    return found
+
+
+def _length_message(token: object, *, low: float, high: float) -> str:
+    kind = getattr(token, "type", "")
+    if kind == "percentage":
+        return "Decorative lengths are px only. Percentages and viewport units are refused."
+    if kind == "number":
+        value = float(getattr(token, "value", 0))
+        if value == 0 and low <= 0 <= high:
+            return ""
+        return "Decorative lengths are px only, from 0 to 16 (shadow offsets may be -16 to 16)."
+    if kind != "dimension":
+        return ""
+    if str(getattr(token, "unit", "")) != "px":
+        return "Decorative lengths are px only. Percentages and viewport units are refused."
+    value = float(getattr(token, "value", 0))
+    if value < low or value > high:
+        return "Decorative lengths stay within 16px. Shadow offsets may be -16px to 16px."
+    return ""
 
 
 def _rewrite_urls(value: str, assets: set[str]) -> str:

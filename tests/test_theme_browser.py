@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -55,6 +56,55 @@ def test_settings_switches_theme_and_mode(tmp_path: Path):
             browser.close()
     blocked = [item for item in errors if "Content Security Policy" in item or "Refused to" in item]
     assert blocked == []
+
+
+@pytest.mark.browser
+def test_apply_theme_rejects_foreign_and_normalized_css(tmp_path: Path):
+    playwright_sync = _require_browser()
+    digest = "ab" * 32
+    foreign = {
+        "ok": True,
+        "mode": "light",
+        "css": "https://evil.example/theme.css",
+    }
+    normalized = {
+        "ok": True,
+        "mode": "light",
+        "css": f"/themes/../{digest}.css",
+    }
+    with _daemon(tmp_path, [{"content": "ok"}]) as port:
+        sync_playwright = playwright_sync.sync_playwright  # type: ignore[attr-defined]
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch()
+            page = browser.new_page(viewport={"width": 1280, "height": 800})
+            page.set_default_timeout(30_000)
+            page.route("**/v1/themes/active*", lambda route: _fulfill_json(route, foreign))
+            page.goto(f"http://127.0.0.1:{port}/")
+            page.locator("h1").first.wait_for()
+            page.wait_for_timeout(300)
+            assert page.locator("#pp-theme").count() == 0
+            page.unroute("**/v1/themes/active*")
+            page.route("**/v1/themes/active*", lambda route: _fulfill_json(route, normalized))
+            page.reload()
+            page.locator("h1").first.wait_for()
+            page.wait_for_timeout(300)
+            assert page.locator("#pp-theme").count() == 0
+            script = page.locator("script[src]").first.get_attribute("src") or ""
+            bundle = page.evaluate(
+                "(src) => fetch(src).then((response) => response.text())",
+                script,
+            )
+            assert "pp-dial-control" in bundle
+            assert "pp-approval-actions" in bundle
+            browser.close()
+
+
+def _fulfill_json(route, body: dict[str, object]) -> None:
+    route.fulfill(
+        status=200,
+        content_type="application/json",
+        body=json.dumps(body),
+    )
 
 
 _BG_IS = """(expected) => {

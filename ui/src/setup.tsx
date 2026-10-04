@@ -392,15 +392,15 @@ export function SetupWizard({
       ) : null}
 
       {step === "dials" ? (
-        <section className="grid gap-3">
+        <section className="pp-dial grid gap-3">
           <h1 className="text-2xl font-semibold">Compliance dials</h1>
           {ready ? <p role="status">Inference ready</p> : null}
           <p>Every dial stays off unless you change it. Existing positions are kept.</p>
           {Object.entries(dials).map(([id, position]) => (
-            <label key={id} className="flex items-center justify-between gap-3">
+            <label key={id} className="pp-dial-row flex items-center justify-between gap-3">
               {id}
               <select
-                className="field w-auto"
+                className="pp-dial-control field w-auto"
                 value={position}
                 onChange={(event) => setDials({ ...dials, [id]: event.target.value })}
               >

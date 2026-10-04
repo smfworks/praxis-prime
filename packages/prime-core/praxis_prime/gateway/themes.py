@@ -28,11 +28,14 @@ from praxis_prime.themes.legacy import hint_theme
 from praxis_prime.themes.select import ThemeChoice, resolve_theme, set_lock, set_profile_theme
 from praxis_prime.themes.store import (
     InstalledTheme,
+    discard_stage,
+    files_match_lock,
     find_hash,
     install_files,
     list_themes,
     remove_theme,
     stage_theme,
+    sweep_stages,
     take_stage,
     winners,
 )
@@ -93,7 +96,7 @@ def load_theme_asset(data_root: Path | None, route: str) -> tuple[bytes, str] | 
     if ".." in route:
         return None
     installed = _by_hash(data_root, theme_id, digest)
-    if installed is None:
+    if installed is None or not files_match_lock(installed, digest):
         return None
     if css is not None:
         body = render_css(installed.package, installed.package_hash).encode("utf-8")
@@ -209,6 +212,7 @@ def _catalog(root: Path, profile: str) -> dict[str, object]:
 
 
 def _preview(root: Path, headers: dict[str, str], body: bytes) -> tuple[int, dict[str, object]]:
+    sweep_stages(root)
     _require_zip(headers)
     package = validate_zip(body)
     digest = stage_theme(package, root)
@@ -233,29 +237,41 @@ def _install(
     body: bytes,
     audit: AuditLog | None,
 ) -> tuple[int, dict[str, object]]:
+    sweep_stages(root)
     media = headers.get("content-type", "").split(";", 1)[0].strip().casefold()
-    if media in _ZIP:
-        package = validate_zip(body)
-        installed = install_files(package.files, root)
-    else:
-        payload = _object(body)
-        digest = payload.get("packageHash", "")
-        if not isinstance(digest, str):
-            raise ThemeError("packageHash is required",
-                (ThemeIssue("schema", "Send packageHash.", "packageHash"),))
-        staged = take_stage(digest, root)
-        if staged is None:
-            raise ThemeError(
-                "theme preview expired",
-                (
-                    ThemeIssue(
-                        "not_found",
-                        "Preview that package again. Staged uploads last 15 minutes.",
-                        "packageHash",
+    digest = ""
+    try:
+        if media in _ZIP:
+            package = validate_zip(body)
+            installed = install_files(package.files, root)
+        else:
+            payload = _object(body)
+            raw_digest = payload.get("packageHash", "")
+            if not isinstance(raw_digest, str):
+                raise ThemeError(
+                    "packageHash is required",
+                    (ThemeIssue("schema", "Send packageHash.", "packageHash"),),
+                )
+            digest = raw_digest
+            staged = take_stage(digest, root)
+            if staged is None:
+                raise ThemeError(
+                    "theme preview expired",
+                    (
+                        ThemeIssue(
+                            "not_found",
+                            "Preview that package again. Staged uploads last 15 minutes.",
+                            "packageHash",
+                        ),
                     ),
-                ),
-            )
-        installed = install_files(staged, root)
+                )
+            installed = install_files(staged, root)
+    except Exception:
+        if digest:
+            discard_stage(digest, root)
+        raise
+    if digest:
+        discard_stage(digest, root)
     _event(
         audit,
         "theme.install",
@@ -273,8 +289,18 @@ def _install(
 def _remove(root: Path, body: bytes, audit: AuditLog | None) -> tuple[int, dict[str, object]]:
     payload = _object(body)
     theme_id = _theme_id(payload.get("id"))
-    remove_theme(theme_id, root)
-    del audit
+    removed = remove_theme(theme_id, root)
+    for item in removed:
+        _event(
+            audit,
+            "theme.remove",
+            f"removed theme {item.theme_id}",
+            {
+                "id": item.theme_id,
+                "version": item.version,
+                "packageHash": item.package_hash,
+            },
+        )
     return 200, {"ok": True, "removed": theme_id}
 
 

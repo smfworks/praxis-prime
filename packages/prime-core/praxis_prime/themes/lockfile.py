@@ -49,3 +49,39 @@ def parse_lock(data: bytes) -> dict[str, object]:
     if not isinstance(loaded, dict):
         raise ValueError("theme.lock.json must be an object")
     return loaded
+
+
+def verify_lock(files: Mapping[str, bytes], theme_id: str, version: str) -> None:
+    """Raise ``ValueError`` when ``theme.lock.json`` does not match ``files``.
+
+    Built-ins have no lock. Call this for a user or system directory, whose
+    map includes the lock file itself.
+    """
+    raw = files.get(_LOCK_NAME)
+    if not isinstance(raw, bytes):
+        raise ValueError("theme.lock.json is missing")
+    try:
+        loaded = parse_lock(raw)
+    except (UnicodeError, json.JSONDecodeError, ValueError) as exc:
+        raise ValueError("theme.lock.json is not valid JSON") from exc
+    if loaded.get("schema") != LOCK_SCHEMA:
+        raise ValueError("theme.lock.json schema does not match")
+    if loaded.get("id") != theme_id:
+        raise ValueError("theme.lock.json id does not match")
+    if loaded.get("version") != version:
+        raise ValueError("theme.lock.json version does not match")
+    declared = loaded.get("files")
+    if not isinstance(declared, dict):
+        raise ValueError("theme.lock.json files must be an object")
+    actual = {
+        path: file_sha256(payload)
+        for path, payload in files.items()
+        if path != _LOCK_NAME
+    }
+    if set(declared) != set(actual):
+        raise ValueError("theme.lock.json file list does not match")
+    for path, digest in declared.items():
+        if not isinstance(path, str) or not isinstance(digest, str) or digest != actual.get(path):
+            raise ValueError("theme.lock.json hash does not match")
+    if loaded.get("packageHash") != package_hash(files):
+        raise ValueError("theme.lock.json packageHash does not match")

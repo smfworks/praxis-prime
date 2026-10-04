@@ -10,7 +10,7 @@ import re
 import tomllib
 from collections.abc import Mapping
 
-from praxis_prime.themes.archive import _check_layout, read_dir, read_zip
+from praxis_prime.themes.archive import FONT_PATH, ORNAMENT_PATH, _check_layout, read_dir, read_zip
 from praxis_prime.themes.color import contrast_ratio, parse_color
 from praxis_prime.themes.css_restrict import check_theme_css
 from praxis_prime.themes.errors import ThemeError, ThemeIssue
@@ -34,6 +34,9 @@ _ID = re.compile(r"^[a-z0-9][a-z0-9.-]{0,63}$")
 _VERSION = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 _FAMILY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}$")
 _WEIGHT = re.compile(r"^[1-9]00(?: [1-9]00)?$")
+_SCHEMA_COLOR = re.compile(
+    r"^(?:#[0-9A-Fa-f]{3}|#[0-9A-Fa-f]{4}|#[0-9A-Fa-f]{6}|#[0-9A-Fa-f]{8}|oklch\([^)]+\))$"
+)
 _WOFF2 = b"wOF2"
 _PNG = b"\x89PNG\r\n\x1a\n"
 _OFL_MARK = "SIL Open Font License"
@@ -252,24 +255,29 @@ def _fonts(
 
 def _font_entry(slot: str, entry: object, issues: list[ThemeIssue]) -> tuple[str, str, str]:
     if isinstance(entry, str):
-        return entry, "400", "normal"
-    if not isinstance(entry, dict):
+        path, weight, style = entry, "400", "normal"
+    elif not isinstance(entry, dict):
         issues.append(_fix("schema",
             "A font file must be a string or a table.",
             f"fonts.{slot}",
             "Fix files."))
         return "", "400", "normal"
-    path = entry.get("path", "")
-    if not isinstance(path, str) or not path.endswith(".woff2"):
+    else:
+        path = entry.get("path", "")
+        weight = str(entry.get("weight", "400"))
+        style = str(entry.get("style", "normal"))
+    if not isinstance(path, str) or FONT_PATH.fullmatch(path) is None:
         issues.append(
-            _fix("font_format",
-                "Bundled fonts must be .woff2.",
+            _fix(
+                "font_format",
+                "Bundled fonts must be assets/fonts/<name>.woff2.",
                 f"fonts.{slot}",
-                "Point path at a .woff2 file.")
+                "Point path at one .woff2 file under assets/fonts.",
+            )
         )
         return "", "400", "normal"
-    weight = str(entry.get("weight", "400"))
-    style = str(entry.get("style", "normal"))
+    if isinstance(entry, str):
+        return path, weight, style
     if not _WEIGHT.fullmatch(weight):
         issues.append(_fix("schema",
             f"Bad font weight {weight}.",
@@ -385,7 +393,18 @@ def _shared(
         if raw in ("", None):
             shared[token] = "none"
             continue
-        if not isinstance(raw, str) or raw not in files:
+        if not isinstance(raw, str) or ORNAMENT_PATH.fullmatch(raw) is None:
+            issues.append(
+                _fix(
+                    "file_type",
+                    "Ornament paths must be assets/ornaments/<name>.svg, .png, or .webp.",
+                    f"ornaments.{key}",
+                    "Use one file name under assets/ornaments.",
+                )
+            )
+            shared[token] = "none"
+            continue
+        if raw not in files:
             issues.append(
                 _fix("asset_missing",
                     f"Missing ornament {raw}.",
@@ -453,6 +472,16 @@ def _modes(
                         f"{name} must be a colour string.",
                         f"{label}.{mode}.{name}",
                         "Use #rrggbb or oklch().",
+                    )
+                )
+                continue
+            if _SCHEMA_COLOR.fullmatch(value) is None:
+                issues.append(
+                    _fix(
+                        "bad_color",
+                        f"{mode} {name} does not match the theme colour pattern.",
+                        f"{label}.{mode}.{name}",
+                        "Use #rgb, #rrggbb, or oklch().",
                     )
                 )
                 continue
@@ -580,12 +609,14 @@ def _webp(payload: bytes) -> bool:
     return len(payload) >= 12 and payload.startswith(b"RIFF") and payload[8:12] == b"WEBP"
 
 
-def _binaries(files: Mapping[str, bytes], issues: list[ThemeIssue]) -> None:
-    for path, payload in files.items():
+def _binaries(files: dict[str, bytes], issues: list[ThemeIssue]) -> None:
+    for path, payload in list(files.items()):
         if path.endswith(".svg"):
-            found = check_svg(path, payload)
+            cleaned, found = check_svg(path, payload)
             if found is not None:
                 issues.append(found)
+            elif cleaned:
+                files[path] = cleaned
         elif path.endswith(".png") and not payload.startswith(_PNG):
             issues.append(_fix("file_type", f"{path} is not a PNG.", path, "Export a PNG."))
         elif path.endswith(".webp") and not _webp(payload):

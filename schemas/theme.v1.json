@@ -175,9 +175,18 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "header": { "type": "string" },
-        "divider": { "type": "string" },
-        "watermark": { "type": "string" },
+        "header": { "oneOf": [
+          { "const": "" },
+          { "type": "string", "pattern": "^assets/ornaments/[A-Za-z0-9._-]+\\.(svg|png|webp)$" }
+        ] },
+        "divider": { "oneOf": [
+          { "const": "" },
+          { "type": "string", "pattern": "^assets/ornaments/[A-Za-z0-9._-]+\\.(svg|png|webp)$" }
+        ] },
+        "watermark": { "oneOf": [
+          { "const": "" },
+          { "type": "string", "pattern": "^assets/ornaments/[A-Za-z0-9._-]+\\.(svg|png|webp)$" }
+        ] },
         "watermarkOpacity": { "type": "number", "minimum": 0, "maximum": 0.06 }
       }
     }

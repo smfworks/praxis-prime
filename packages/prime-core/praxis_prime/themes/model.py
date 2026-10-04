@@ -1,7 +1,8 @@
 """Loaded shape of a praxis.theme/v1 package.
 
 The bytes are the package the author shipped, minus ``theme.lock.json``.
-Generated CSS is not part of the package.
+SVG ornaments are the sanitized re-serialization. Generated CSS is not
+part of the package.
 """
 
 from __future__ import annotations

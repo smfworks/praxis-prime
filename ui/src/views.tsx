@@ -150,14 +150,26 @@ export function Approvals({ profile }: { profile: string }) {
             <h3 className="font-semibold">{tool}</h3>
             <p>{textOf(item.risk)}</p>
             <p>{textOf(item.summary) || textOf(item.reason)}</p>
-            <div className="flex flex-wrap gap-2">
-              <button className="btn" type="button" onClick={() => void decide(id, "allow_once")}>
+            <div className="pp-approval-actions flex flex-wrap gap-2">
+              <button
+                className="pp-approval-allow btn"
+                type="button"
+                onClick={() => void decide(id, "allow_once")}
+              >
                 Approve once
               </button>
-              <button className="btn-quiet" type="button" onClick={() => void decide(id, "allow_session")}>
+              <button
+                className="pp-approval-allow btn-quiet"
+                type="button"
+                onClick={() => void decide(id, "allow_session")}
+              >
                 Approve for this session
               </button>
-              <button className="btn-danger" type="button" onClick={() => void decide(id, "deny")}>
+              <button
+                className="pp-approval-deny btn-danger"
+                type="button"
+                onClick={() => void decide(id, "deny")}
+              >
                 Deny
               </button>
             </div>

@@ -133,6 +133,7 @@ No TypeSafe source is vendored in `praxis_prime.decide`.
 | pyasn1 | BSD-2-Clause | Transitive dependency of `webauthn` for attestation structures. No source is copied into this repository. |
 | pyasn1-modules | BSD | Transitive dependency of `webauthn` for ASN.1 modules. No source is copied into this repository. |
 | tinycss2 | BSD-3-Clause | CSS parser for the theme `theme.css` allowlist. No source is copied into this repository. |
+| webencodings | BSD | Transitive dependency of tinycss2. No source is copied into this repository. |
 
 ## Bundled fonts
 

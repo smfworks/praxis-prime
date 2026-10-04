@@ -23,12 +23,13 @@ from praxis_prime.paths import data_dir
 from praxis_prime.statfile import StatKind, lstat_kind
 from praxis_prime.themes.archive import read_dir
 from praxis_prime.themes.errors import ThemeError, ThemeIssue
-from praxis_prime.themes.lockfile import lock_document, package_hash
+from praxis_prime.themes.lockfile import lock_document, package_hash, verify_lock
 from praxis_prime.themes.model import ThemePackage
 from praxis_prime.themes.validate import validate_files
 
 SYSTEM_ROOT = Path("/var/lib/praxis-prime/themes")
 _SOURCE_RANK = {"user": 0, "system": 1, "builtin": 2}
+_STAGE_TTL = 15 * 60
 _builtin_cache: dict[str, InstalledTheme] = {}
 
 
@@ -41,6 +42,13 @@ class InstalledTheme:
 
     def version_tuple(self) -> tuple[int, int, int]:
         return self.package.version_tuple()
+
+
+@dataclass(frozen=True, slots=True)
+class RemovedTheme:
+    theme_id: str
+    version: str
+    package_hash: str
 
 
 def user_themes_root(data_root: Path | None = None) -> Path:
@@ -81,14 +89,32 @@ def install_files(
 ) -> InstalledTheme:
     """Validate and write one version. A symlink destination is refused."""
     package = validate_files(file_map)
+    if _reserved_id(package.theme_id):
+        raise ThemeError(
+            "built-in theme ids are reserved",
+            (
+                ThemeIssue(
+                    "bad_id",
+                    "Ids smf and smf.* are reserved for built-in themes.",
+                    package.theme_id,
+                    "Choose another id.",
+                ),
+            ),
+        )
     root = SYSTEM_ROOT if system else user_themes_root(data_root)
     return _place(package, root, "system" if system else "user")
 
 
-def remove_theme(theme_id: str, data_root: Path | None = None, *, system: bool = False) -> str:
+def remove_theme(
+    theme_id: str,
+    data_root: Path | None = None,
+    *,
+    system: bool = False,
+) -> list[RemovedTheme]:
     """Remove every version of ``theme_id`` from the user or system store.
 
     Built-ins stay in the wheel. Removing a user copy uncovers the built-in.
+    The returned rows are the versions that were on disk, for the audit log.
     """
     root = SYSTEM_ROOT if system else user_themes_root(data_root)
     target = root / theme_id
@@ -115,8 +141,22 @@ def remove_theme(theme_id: str, data_root: Path | None = None, *, system: bool =
             f"theme {theme_id} is not installed",
             (ThemeIssue("not_found", f"No installed theme {theme_id}.", theme_id),),
         )
+    removed: list[RemovedTheme] = []
+    try:
+        versions = list(target.iterdir())
+    except OSError:
+        versions = []
+    for version_dir in versions:
+        if version_dir.name.startswith(".") or lstat_kind(version_dir) is not StatKind.DIR:
+            continue
+        digest = ""
+        try:
+            digest = package_hash(read_dir(version_dir))
+        except (ThemeError, OSError):
+            digest = ""
+        removed.append(RemovedTheme(theme_id, version_dir.name, digest))
     shutil.rmtree(target)
-    return theme_id
+    return removed
 
 
 def list_themes(data_root: Path | None = None) -> list[InstalledTheme]:
@@ -149,41 +189,36 @@ def find_theme(data_root: Path | None, theme_id: str) -> InstalledTheme | None:
 
 def stage_theme(package: ThemePackage, data_root: Path | None = None) -> str:
     """Keep a validated package for about 15 minutes so install can commit it."""
+    sweep_stages(data_root)
     digest = package_hash(package.files)
     root = _stage_dir(data_root)
-    root.mkdir(parents=True, exist_ok=True)
-    dest = root / digest
-    if lstat_kind(dest) is StatKind.SYMLINK:
+    if lstat_kind(root) is StatKind.SYMLINK:
         raise ThemeError(
             "refusing to stage through a symlink",
             (ThemeIssue("path_unsafe", "The stage path is a symlink.", digest),),
         )
-    if lstat_kind(dest) is not StatKind.MISSING:
-        shutil.rmtree(dest)
-    dest.mkdir()
-    for relative, payload in package.files.items():
-        path = dest.joinpath(*relative.split("/"))
-        path.parent.mkdir(parents=True, exist_ok=True)
-        _write_bytes(path, payload)
-    _write_bytes(root / f"{digest}.time", str(time.time()).encode("utf-8"))
+    root.mkdir(parents=True, exist_ok=True)
+    _discard_entry(root, digest)
+    dest = root / digest
+    try:
+        dest.mkdir()
+        for relative, payload in package.files.items():
+            path = dest.joinpath(*relative.split("/"))
+            path.parent.mkdir(parents=True, exist_ok=True)
+            _write_bytes(path, payload)
+        _write_bytes(root / f"{digest}.time", str(time.time()).encode("utf-8"))
+    except Exception:
+        _discard_entry(root, digest)
+        raise
     return digest
 
 
 def take_stage(digest: str, data_root: Path | None = None) -> dict[str, bytes] | None:
     if re.fullmatch(r"[0-9a-f]{64}", digest) is None:
         return None
-    root = _stage_dir(data_root)
-    stamp = root / f"{digest}.time"
-    dest = root / digest
-    if lstat_kind(stamp) is not StatKind.FILE or lstat_kind(dest) is not StatKind.DIR:
-        return None
-    try:
-        created = float(stamp.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, ValueError):
-        return None
-    if time.time() - created > 15 * 60:
-        shutil.rmtree(dest, ignore_errors=True)
-        stamp.unlink(missing_ok=True)
+    sweep_stages(data_root)
+    dest = _stage_dir(data_root) / digest
+    if lstat_kind(dest) is not StatKind.DIR:
         return None
     try:
         return read_dir(dest)
@@ -191,8 +226,96 @@ def take_stage(digest: str, data_root: Path | None = None) -> dict[str, bytes] |
         return None
 
 
+def discard_stage(digest: str, data_root: Path | None = None) -> None:
+    """Delete one staged preview. A symlink is unlinked and not followed."""
+    if re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+        return
+    _discard_entry(_stage_dir(data_root), digest)
+
+
+def sweep_stages(data_root: Path | None = None) -> None:
+    """Drop staged previews older than 15 minutes, and any symlink in the stage."""
+    root = _stage_dir(data_root)
+    if lstat_kind(root) is not StatKind.DIR:
+        return
+    now = time.time()
+    try:
+        names = [child.name for child in root.iterdir()]
+    except OSError:
+        return
+    digests: set[str] = set()
+    for name in names:
+        if name.endswith(".time") and re.fullmatch(r"[0-9a-f]{64}", name[:-5]):
+            digests.add(name[:-5])
+        elif re.fullmatch(r"[0-9a-f]{64}", name):
+            digests.add(name)
+        else:
+            _unlink_child(root / name)
+    for digest in digests:
+        stamp = root / f"{digest}.time"
+        dest = root / digest
+        if (
+            _expired_stamp(stamp, now)
+            or lstat_kind(dest) is StatKind.MISSING
+            or lstat_kind(dest) is StatKind.SYMLINK
+            or lstat_kind(stamp) is StatKind.SYMLINK
+        ):
+            _discard_entry(root, digest)
+
+
+def files_match_lock(installed: InstalledTheme, digest: str) -> bool:
+    """True when this package may be served at ``digest``.
+
+    Built-ins and hint themes have no directory and no lock. A user or
+    system theme is served only when the directory still matches its lock
+    and that hash is ``digest``.
+    """
+    if installed.package_hash != digest:
+        return False
+    if installed.root is None:
+        return True
+    try:
+        disk = read_dir(installed.root)
+        verify_lock(disk, installed.package.theme_id, installed.package.version)
+    except (ThemeError, ValueError, OSError):
+        return False
+    bare = {path: payload for path, payload in disk.items() if path != "theme.lock.json"}
+    return package_hash(bare) == digest
+
+
 def _stage_dir(data_root: Path | None) -> Path:
     return _root(data_root) / "theme-stage"
+
+
+def _discard_entry(root: Path, digest: str) -> None:
+    if re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+        return
+    for path in (root / digest, root / f"{digest}.time"):
+        kind = lstat_kind(path)
+        if kind is StatKind.MISSING:
+            continue
+        if kind is StatKind.DIR:
+            shutil.rmtree(path)
+        else:
+            path.unlink(missing_ok=True)
+
+
+def _expired_stamp(stamp: Path, now: float) -> bool:
+    if lstat_kind(stamp) is not StatKind.FILE:
+        return True
+    try:
+        created = float(stamp.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError):
+        return True
+    return now - created > _STAGE_TTL
+
+
+def _unlink_child(path: Path) -> None:
+    kind = lstat_kind(path)
+    if kind is StatKind.DIR:
+        shutil.rmtree(path, ignore_errors=True)
+    elif kind is not StatKind.MISSING:
+        path.unlink(missing_ok=True)
 
 
 def find_hash(data_root: Path | None, theme_id: str, digest: str) -> InstalledTheme | None:
@@ -261,7 +384,7 @@ def _scan(root: Path, source: str) -> list[InstalledTheme]:
     except OSError:
         return []
     for child in children:
-        if lstat_kind(child) is not StatKind.DIR:
+        if _reserved_id(child.name) or lstat_kind(child) is not StatKind.DIR:
             continue
         try:
             versions = list(child.iterdir())
@@ -272,15 +395,37 @@ def _scan(root: Path, source: str) -> list[InstalledTheme]:
                 continue
             try:
                 file_map = read_dir(version_dir)
+                _ensure_lock(file_map, child.name, version_dir.name)
                 package = validate_files(file_map)
             except (ThemeError, OSError):
                 continue
-            if package.theme_id != child.name:
+            if package.theme_id != child.name or package.version != version_dir.name:
                 continue
             found.append(
                 InstalledTheme(package, source, version_dir, package_hash(package.files))
             )
     return found
+
+
+def _reserved_id(theme_id: str) -> bool:
+    return theme_id == "smf" or theme_id.startswith("smf.")
+
+
+def _ensure_lock(files: Mapping[str, bytes], theme_id: str, version: str) -> None:
+    try:
+        verify_lock(files, theme_id, version)
+    except ValueError as exc:
+        raise ThemeError(
+            "theme.lock.json does not match the package",
+            (
+                ThemeIssue(
+                    "lock_mismatch",
+                    "theme.lock.json does not match the files on disk.",
+                    "theme.lock.json",
+                    "Install the package again.",
+                ),
+            ),
+        ) from exc
 
 
 def _builtin(theme_id: str) -> InstalledTheme | None:
