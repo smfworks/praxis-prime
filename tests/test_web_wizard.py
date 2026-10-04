@@ -102,3 +102,69 @@ def _walk(playwright_sync: object, gateway: int, token: str, model_port: int) ->
         page.get_by_role("button", name="Test and save").click()
         page.get_by_text("Inference ready").wait_for()
         browser.close()
+
+
+@pytest.mark.browser
+def test_wizard_rerun_replaces_the_provider_and_key(tmp_path: Path):
+    playwright_sync = _require_browser()
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with _daemon(
+            tmp_path,
+            [{"content": "unused"}],
+            extra_env={"PRAXIS_PRIME_MODEL": ""},
+        ) as gateway:
+            token_path = tmp_path / "config" / "praxis-prime" / "first-run.token"
+            token = token_path.read_text(encoding="utf-8").strip()
+            _replace(playwright_sync, gateway, token, int(port))
+            secret = (tmp_path / "config" / "praxis-prime" / "secrets.env").read_text(
+                encoding="utf-8"
+            )
+            assert "sk-second" in secret
+            assert "sk-first" not in secret
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def _replace(playwright_sync: object, gateway: int, token: str, model_port: int) -> None:
+    sync_playwright = playwright_sync.sync_playwright  # type: ignore[attr-defined]
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = browser.new_page()
+        page.set_default_timeout(30_000)
+        page.goto(f"http://127.0.0.1:{gateway}/#setup={token}")
+        page.get_by_role("button", name="Continue").click()
+        page.get_by_label("Username").fill("ada")
+        page.get_by_label("Password").fill(_PASSWORD)
+        page.get_by_role("button", name="Create owner").click()
+        page.get_by_role("button", name="Skip enrollment").click()
+        page.get_by_role("radio", name="On this computer").check()
+        page.get_by_role("button", name="Continue").click()
+        page.get_by_label("Provider id").fill("llamacpp")
+        page.get_by_label("Base URL").fill(f"127.0.0.1:{model_port}")
+        page.get_by_label("Primary model").fill("local-model")
+        page.get_by_label("API key").fill("sk-first")
+        page.get_by_role("button", name="Test and save").click()
+        page.get_by_text("Inference ready").wait_for()
+        page.get_by_role("button", name="Continue").click()
+        page.get_by_role("button", name="Continue").click()
+        page.get_by_role("link", name="Continue to the app").click()
+        page.get_by_role("button", name="Sign out").wait_for()
+        page.goto(f"http://127.0.0.1:{gateway}/#/setup")
+        page.get_by_role("heading", name="Choose a provider").wait_for()
+        page.get_by_role("radio", name="On this computer").check()
+        page.get_by_role("button", name="Continue").click()
+        page.get_by_label("Provider id").fill("vllm")
+        page.get_by_label("Base URL").fill(f"127.0.0.1:{model_port}")
+        page.get_by_label("Primary model").fill("local-model")
+        page.get_by_label("API key").fill("sk-second")
+        page.get_by_role("checkbox", name="Replace the current provider").check()
+        page.get_by_label("Account password").fill(_PASSWORD)
+        page.get_by_role("button", name="Test and save").click()
+        page.get_by_text("Inference ready").wait_for()
+        assert "pass --replace" not in page.content()
+        browser.close()

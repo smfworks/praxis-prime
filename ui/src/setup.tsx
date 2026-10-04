@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useEffect, useState, type FormEvent } from "react";
 
 import { api, clearSetupToken, rowsOf, setCsrf, textOf } from "./api";
+import { asPublicKey, credentialJson, requestOptions } from "./webauthn";
 
 const CLOUD_WARNING = "Requires a BAA/DPA with the provider; PHI will leave this machine";
 
@@ -63,9 +64,14 @@ export function SetupWizard({
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [pair, setPair] = useState("");
+  const [replace, setReplace] = useState(false);
+  const [accountPassword, setAccountPassword] = useState("");
+  const [totpCode, setTotpCode] = useState("");
+  const [passkeyToken, setPasskeyToken] = useState("");
 
   const warning = textOf(status.data?.cloudWarning);
   const missing = missingItems(status.data);
+  const configured = textOf(status.data?.provider) !== "";
 
   useEffect(() => {
     if (dialsReady || !status.data) return;
@@ -124,11 +130,42 @@ export function SetupWizard({
     });
   }
 
+  async function confirmChange(): Promise<Record<string, unknown>> {
+    if (!configured) return {};
+    if (!replace) throw new Error("Confirm replacement before saving a new provider.");
+    if (passkeyToken) return { replace: true, stepUpToken: passkeyToken };
+    const body = await api("POST", "/v1/auth/step-up", {
+      password: accountPassword,
+      code: totpCode,
+    });
+    const token = textOf(body.stepUpToken);
+    if (!token) throw new Error("step-up did not return a token");
+    return { replace: true, stepUpToken: token };
+  }
+
+  async function usePasskey() {
+    await run(async () => {
+      const started = await api("POST", "/v1/auth/step-up/passkey/options", {});
+      const credential = await navigator.credentials.get({
+        publicKey: requestOptions(started.options),
+      });
+      if (!credential) throw new Error("passkey was not used");
+      const body = await api("POST", "/v1/auth/step-up/passkey/verify", {
+        credential: credentialJson(asPublicKey(credential)),
+      });
+      const token = textOf(body.stepUpToken);
+      if (!token) throw new Error("step-up did not return a token");
+      setPasskeyToken(token);
+      setNotice("Passkey confirmed.");
+    });
+  }
+
   async function saveProvider(event: FormEvent) {
     event.preventDefault();
     await run(async () => {
+      const extra = await confirmChange();
       if (lane === "skip") {
-        const body = await api("POST", "/v1/onboarding/save", { lane: "skip" });
+        const body = await api("POST", "/v1/onboarding/save", { lane: "skip", ...extra });
         setReady(body.inferenceReady === true);
         setStep("done");
         return;
@@ -142,8 +179,11 @@ export function SetupWizard({
         utilityModel: utility,
         visionModel: vision,
         judgeModel: judge,
+        ...extra,
       });
       setApiKey("");
+      setAccountPassword("");
+      setTotpCode("");
       setReady(body.inferenceReady === true);
       const warnings = body.warnings;
       if (Array.isArray(warnings) && warnings.length) {
@@ -299,6 +339,45 @@ export function SetupWizard({
                 API key
                 <input className="field" type="password" value={apiKey} autoComplete="off" onChange={(event) => setApiKey(event.target.value)} />
               </label>
+            </>
+          ) : null}
+          {configured ? (
+            <>
+              <label className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={replace}
+                  onChange={(event) => setReplace(event.target.checked)}
+                />
+                Replace the current provider
+              </label>
+              <fieldset className="grid gap-2">
+                <legend>Confirm this change</legend>
+                <label className="grid gap-1">
+                  Account password
+                  <input
+                    className="field"
+                    type="password"
+                    autoComplete="current-password"
+                    value={accountPassword}
+                    onChange={(event) => setAccountPassword(event.target.value)}
+                  />
+                </label>
+                <label className="grid gap-1">
+                  Authenticator code
+                  <input
+                    className="field"
+                    inputMode="numeric"
+                    autoComplete="one-time-code"
+                    value={totpCode}
+                    onChange={(event) => setTotpCode(event.target.value)}
+                  />
+                  <span className="text-muted">Leave blank if you do not use one.</span>
+                </label>
+                <button className="btn-quiet w-fit" type="button" disabled={busy} onClick={() => void usePasskey()}>
+                  Use a passkey
+                </button>
+              </fieldset>
             </>
           ) : null}
           <button className="btn w-fit" type="submit" disabled={busy}>
