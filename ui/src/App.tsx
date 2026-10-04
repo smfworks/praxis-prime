@@ -1,8 +1,10 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState, type FormEvent } from "react";
 
+import { Appearance } from "./appearance";
 import { ApiError, api, currentProfile, rowsOf, selectProfile, setCsrf, textOf } from "./api";
 import { missingItems, SetupNeeded, SetupWizard } from "./setup";
+import { ThemeBridge } from "./theme";
 import { ChatView, DirectoryView, FactorsView, ListView, Approvals } from "./views";
 import { asPublicKey, credentialJson, requestOptions } from "./webauthn";
 
@@ -43,19 +45,25 @@ export function App() {
 
   if (session.isLoading) {
     return (
-      <p className="p-6" role="status">
-        Loading…
-      </p>
+      <>
+        <ThemeBridge profile="" />
+        <p className="p-6" role="status">
+          Loading…
+        </p>
+      </>
     );
   }
   if (!account) {
     return (
-      <SignedOut
-        onSignedIn={() => {
-          void client.invalidateQueries({ queryKey: ["session"] });
-          if (!location.hash) location.hash = "#/chat";
-        }}
-      />
+      <>
+        <ThemeBridge profile="" />
+        <SignedOut
+          onSignedIn={() => {
+            void client.invalidateQueries({ queryKey: ["session"] });
+            if (!location.hash) location.hash = "#/chat";
+          }}
+        />
+      </>
     );
   }
   return <Shell account={account} route={route} />;
@@ -153,19 +161,23 @@ function Shell({ account, route }: { account: Account; route: string }) {
   const missing = missingItems(setup.data);
   const admin = account.role === "owner" || account.role === "admin";
   return (
-    <div className="min-h-screen bg-canvas text-ink">
+    <div className="pp-app min-h-screen bg-canvas text-ink">
+      <ThemeBridge profile={profile} />
       <a className="skip" href="#main">
         Skip to content
       </a>
-      <header className="border-b border-line bg-card">
+      <header className="pp-header-band border-b border-line bg-card">
         <div className="mx-auto flex max-w-5xl flex-wrap items-center gap-4 px-4 py-3">
-          <p className="text-lg font-semibold">Praxis Prime</p>
-          <nav className="flex flex-wrap gap-3" aria-label="Primary">
+          <p className="pp-wordmark text-lg font-semibold">Praxis Prime</p>
+          <nav className="pp-nav flex flex-wrap gap-3" aria-label="Primary">
             {NAV.map(([id, label]) => (
               <a key={id} href={`#/${id}`} aria-current={route === id ? "page" : undefined}>
                 {label}
               </a>
             ))}
+            <a href="#/settings" aria-current={route === "settings" ? "page" : undefined}>
+              Settings
+            </a>
             {admin ? (
               <a href="#/directory" aria-current={route === "directory" ? "page" : undefined}>
                 Directory
@@ -196,6 +208,7 @@ function Shell({ account, route }: { account: Account; route: string }) {
           </button>
         </div>
       </header>
+      <div className="pp-divider" aria-hidden="true" />
       <main id="main" className="mx-auto max-w-5xl px-4 py-6">
         {admin && missing.length > 0 && route !== "setup" ? <SetupNeeded items={missing} /> : null}
         {!admin && setup.data?.inferenceReady === false ? (
@@ -231,6 +244,7 @@ function Shell({ account, route }: { account: Account; route: string }) {
         ) : (
           <p role="status">Choose a profile.</p>
         )}
+        {route === "settings" ? <Appearance admin={admin} profile={profile} /> : null}
         {route === "security" ? <FactorsView /> : null}
         {route === "directory" && admin ? <DirectoryView /> : null}
       </main>

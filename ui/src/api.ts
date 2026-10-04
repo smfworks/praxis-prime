@@ -99,6 +99,37 @@ export async function api(
   return parsed;
 }
 
+/** Upload a theme zip. The body is the file, not JSON. */
+export async function apiUpload(
+  path: string,
+  body: Blob,
+  contentType: string,
+): Promise<Record<string, unknown>> {
+  const headers: Record<string, string> = {
+    Accept: "application/json",
+    "Content-Type": contentType,
+    "x-csrf-token": csrf,
+  };
+  if (setupToken) headers["x-praxis-setup-token"] = setupToken;
+  const profile = currentProfile();
+  if (profile) headers["x-praxis-profile"] = profile;
+  const response = await fetch(path, { method: "POST", headers, body, credentials: "same-origin" });
+  const parsed = readJson(await response.text());
+  if (!response.ok) {
+    const error = parsed.error;
+    const code =
+      error && typeof error === "object" && "code" in error
+        ? String((error as { code?: unknown }).code || "error")
+        : "error";
+    const message =
+      error && typeof error === "object" && "message" in error
+        ? String((error as { message?: unknown }).message || response.statusText)
+        : response.statusText;
+    throw new ApiError(response.status, code, message);
+  }
+  return parsed;
+}
+
 export function textOf(value: unknown): string {
   return typeof value === "string" ? value : "";
 }
