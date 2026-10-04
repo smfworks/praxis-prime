@@ -12,9 +12,9 @@ Each question stops at the first tier whose calibrated confidence clears `min_co
 |---|---|---|
 | 0 | Deterministic rules: allow/deny lists, counts, ISO dates, and dial detectors | Confidence is 1 (or 0.95 on an allow-list hit) |
 | 1 | Pluggable classifiers. The built-in one is a keyword overlap baseline. No model is loaded | A clear keyword margin, about 0.86 or higher |
-| 2 | One local judge through the model router. Default spec `ollama:qwen3:8b` | The judge's calibrated top label clears the threshold |
+| 2 | One local judge through the model router. No default spec; set `models.tier2` in setup | The judge's calibrated top label clears the threshold |
 | 3 | A jury of 3–5 role lenses. Default roles: skeptic, safety, domain. Also available: cost, user-advocate, scout, strategist, forecaster | Agreement is high and pooled confidence clears the threshold |
-| 4 | A larger local model (`ollama:qwen3:32b` by default), then a human if `escalate_to_human` is true | The model is confident, or a human answered |
+| 4 | A larger model when `models.tier4` is set, then a human if `escalate_to_human` is true. There is no default spec | The model is confident, or a human answered |
 
 Jury votes are collected one after another in this build. Aggregation is `confidence-weighted` (default) or `majority`. Disagreement is the mean pairwise Jensen–Shannon divergence. Above `disagreement_js` (default 0.15), or on a tie, the jury does not decide and Tier 4 runs when `max_tier` allows it.
 
@@ -75,9 +75,9 @@ The agent loop can call the `decide` tool. It is read-only. It does not approve 
 | `aggregation` | `confidence-weighted` | or `majority` |
 | `jury_size` | `3` | Clamped to 3–5 |
 | `escalate_to_human` | `false` | Tier 4 may block on the approval queue |
-| `models.tier2` | `ollama:qwen3:8b` | Single judge |
-| `models.tier4` | `ollama:qwen3:32b` | Escalation model |
-| `judges.models` | two Ollama specs | Assigned round-robin to jury roles |
+| `models.tier2` | empty | Single judge. An example is `ollama:qwen3:8b`; that string is not the default |
+| `models.tier4` | empty | Escalation model. An example is `ollama:qwen3:32b`; that string is not the default |
+| `judges.models` | empty | Assigned round-robin to jury roles when you set them |
 | `judges.personas` | skeptic, safety, domain, cost, user-advocate | First `jury_size` roles sit |
 | `budgets.max_usd` | `0.05` | Cost cap. Local calls cost `usd_per_call` (default 0) |
 | `budgets.max_calls` | `8` | Model-call cap |

@@ -213,6 +213,7 @@ A2UI, OpenGenerativeUI, and MCP Apps iframes are listed under [Not adopting](#no
   - `src/server/platform-config.ts`: `setupStatus()` returns the list of missing settings.
   - The header of `.env.example`.
 - **What Praxis Prime will do:** the gateway's `onboarding.status` ([Addendum A §2.3](blueprint-addendum-2026-09.md#23-the-flow-web-wizard-and-cli-share-one-backend)) returns the exact missing items. The SPA and `praxis-prime setup` show them instead of failing.
+- **Landed in M2:** `onboarding.status` lists each missing item with the step that fixes it. A signed-in owner or admin sees "Setup needed" with those links. Before any owner exists, the SPA shows the wizard instead of the sign-in form. Another role sees only "Inference not configured".
 - **Milestone:** M2.
 - **Effort [E]:** less than 1 day (it refines a design already in M2).
 - **Acceptance criteria:**

@@ -9,7 +9,7 @@
 
 Praxis Prime is an open-source, local-first autonomous AI agent for Linux, by [SMF Works](https://github.com/smfworks) (Michael Gannotti). It is the flagship evolution of [SMF Praxis](https://github.com/smfworks/smf-praxis): a governed agent that can read, research, and draft on its own, and that stops for a human when an action has consequences. Sending, deleting, spending, sharing, and publishing stay behind that approval spine. Regulatory overlays are optional dials, and they ship **off**.
 
-It is aimed at Ubuntu 22.04 and 24.04, and at [Omarchy](https://github.com/basecamp/omarchy) (Arch plus Hyprland). Local models through Ollama are the default path. Cloud models are opt-in. There is no hosted decision service.
+It is aimed at Ubuntu 22.04 and 24.04, and at [Omarchy](https://github.com/basecamp/omarchy) (Arch plus Hyprland). No model provider is selected for you. Choose one with `praxis-prime setup` or the web wizard: this computer, a host on your network, or a cloud provider. There is no hosted decision service.
 
 The design takes patterns, and later may take MIT-licensed code, from [Hermes Agent](https://github.com/NousResearch/hermes-agent) (Nous Research), [OpenClaw](https://github.com/openclaw/openclaw) (OpenClaw Foundation, Peter Steinberger, and contributors), SMF Praxis, and [SMF Swarm 2.0](https://github.com/smfworks/smf-swarm-2.0). SMF Works does not own Hermes, OpenClaw, or Omarchy. See [NOTICE](NOTICE) and [THIRD_PARTY.md](THIRD_PARTY.md).
 
@@ -36,7 +36,7 @@ praxis-prime ask "summarize the files in this directory"
 
 `ask` runs one turn and prints the answer on stdout. The timeline goes to stderr.
 
-Ollama is the default provider (`ollama:qwen3:32b` in the generated config). Start it with `ollama serve`. If it is down, the error names the host and does not call a cloud API unless you configured one. API keys are environment variables, never config entries:
+A fresh config has no provider. Chat refuses with "No model provider is configured" until you choose one and it passes a live test. An API key in the environment, a running local server, or a pack author's model hint does not select a provider. API keys are stored in the secrets file or the environment, never in config entries:
 
 ```bash
 # optional cloud or local OpenAI-compatible servers
@@ -53,12 +53,13 @@ export PRAXIS_PRIME_FALLBACK_MODELS=openai-compatible:local
 
 A longer usage note is in [docs/USAGE.md](docs/USAGE.md).
 
-`doctor` checks four things and exits 0 unless Python is older than 3.12:
+`doctor` exits 0 unless Python is older than 3.12. That is the only failure. It also reports:
 
-- Python version
 - OS family: Ubuntu, Arch, or Omarchy (anything else is a warning)
 - Display session: Wayland or X11 (a headless machine is a warning)
-- Ollama on `http://127.0.0.1:11434` (unreachable is a warning, not a failure)
+- The configured provider (unset or unverified is a warning; a verified provider is ok)
+- Local servers it can see (information only; a detection does not select one)
+- Whether bubblewrap and the browser driver are present
 
 `config` writes the XDG default config. It does not overwrite an existing file unless you pass `--force`.
 
@@ -148,7 +149,7 @@ Condensed from [ARCHITECTURE §29](docs/ARCHITECTURE.md) and [Blueprint Addendum
 |---|---|---|
 | **M0** | Packs ship in the wheel. Legacy `pack.json` loader ignores `ollama-cloud` model pins and pack dashboard JavaScript. | MVP completion (v0.2–0.3) |
 | **M1** | Web shell, accounts, and profiles. Loopback only. **M1a** accounts, roles, and profiles (merged). **M1b** passkeys + TOTP (local enrollment and sign-in on the loopback daemon). **M1c** per-profile workers and supervisor (in the tree; see [SECURITY.md](docs/SECURITY.md)). **M1d** SPA (sign-in, chat, approvals, profile picker, factors, read-only catalog). **M1e** OIDC sign-in (in the tree; see [SECURITY.md](docs/SECURITY.md)). | MVP completion (v0.2–0.3) |
-| **M2** | First-run wizard. Remove the hard-coded Ollama default. | MVP completion (v0.2–0.3) |
+| **M2** | First-run wizard (in the tree). No default provider. `praxis-prime setup` and the web wizard share one backend. | MVP completion (v0.2–0.3) |
 | **M3** | Theme packages and seven built-in themes. | MVP completion (v0.2–0.3) |
 | **M4** | Local sandbox and agent computer: T1 bubblewrap (data-root mask and denylist) for shell, T2 rootless Podman for builds and the virtual desktop. | v0.5 |
 | **M5a** / **M5b** | Ubuntu and Omarchy installers, then a WSL2 supported beta. | v0.5 |
