@@ -8,6 +8,8 @@ import secrets
 from pathlib import Path
 from typing import Any
 
+from praxis_prime.router.types import specs_cover
+
 RECORD_NAME = "provider-ready.json"
 
 
@@ -49,4 +51,9 @@ def inference_ready(config_directory: Path, model_spec: str) -> bool:
     if not model_spec.strip():
         return False
     record = read_record(config_directory)
-    return record.get("ready") is True and record.get("spec") == model_spec.strip()
+    if record.get("ready") is not True:
+        return False
+    recorded = record.get("spec")
+    if not isinstance(recorded, str):
+        return False
+    return specs_cover(model_spec, [recorded])

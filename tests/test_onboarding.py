@@ -123,7 +123,11 @@ def test_save_marks_ready_only_after_a_passing_test(tmp_path: Path):
     assert "sk-local" not in text
     record = read_record(tmp_path)
     assert record["ready"] is True
-    assert record["spec"] == "llamacpp:local-model"
+    assert record["spec"] == "openai-compatible:local-model"
+    assert record["provider"] == "llamacpp"
+    assert record["roles"]["primary"]["spec"] == "openai-compatible:local-model"
+    assert settings.verified_specs == ("openai-compatible:local-model",)
+    assert settings.provider_ready() is True
     assert "sk-local" not in json.dumps(record)
     assert "sk-local" not in json.dumps(events)
     assert any(kind == "provider.configured" for kind, _payload in events)
@@ -269,14 +273,23 @@ def test_same_spec_at_a_new_base_url_requires_replace(tmp_path: Path):
             base_url="http://127.0.0.1:9",
         )
     )
-    provider = Selection(
+    same_endpoint = Selection(
         lane="local",
         provider="vllm",
         model="local-model",
         base_url="http://127.0.0.1:9",
         replace=True,
     )
-    assert service.needs_step_up(provider) is True
+    assert service.needs_step_up(same_endpoint) is False
+    assert service.requires_replace(same_endpoint) is False
+    other_port = Selection(
+        lane="local",
+        provider="vllm",
+        model="local-model",
+        replace=True,
+    )
+    assert service.needs_step_up(other_port) is True
+    assert service.requires_replace(other_port) is True
 
 
 def test_provider_test_payload_records_the_actor(tmp_path: Path):

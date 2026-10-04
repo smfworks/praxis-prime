@@ -167,6 +167,9 @@ export function SetupWizard({
       if (lane === "skip") {
         const body = await api("POST", "/v1/onboarding/save", { lane: "skip", ...extra });
         setReady(body.inferenceReady === true);
+        if (body.restartRequired === true) {
+          setNotice("Restart the daemon before this change can take effect.");
+        }
         setStep("done");
         return;
       }
@@ -186,7 +189,9 @@ export function SetupWizard({
       setTotpCode("");
       setReady(body.inferenceReady === true);
       const warnings = body.warnings;
-      if (Array.isArray(warnings) && warnings.length) {
+      if (body.restartRequired === true) {
+        setNotice("Restart the daemon before chat uses this provider.");
+      } else if (Array.isArray(warnings) && warnings.length) {
         setNotice(warnings.map((item) => String(item)).join(" "));
       }
       setStep("dials");

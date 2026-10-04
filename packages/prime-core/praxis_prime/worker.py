@@ -426,6 +426,23 @@ class WorkerApp:
                 events = list(self._events)
                 self._events.clear()
             return {"events": events}
+        if method == "runtime.reload":
+            import sqlite3
+
+            from praxis_prime.runtime import reload_serving_router
+
+            if self.config_path is None:
+                raise LookupError("router reload failed")
+            try:
+                reload_serving_router(
+                    self.host.runtime,
+                    env=os.environ,
+                    config_path=self.config_path,
+                    lock=self.host._lock,
+                )
+            except (OSError, ValueError, RuntimeError, sqlite3.Error) as exc:
+                raise LookupError("router reload failed") from exc
+            return {"ok": True}
         raise IpcError("method is not allowed")
 
     def _chat(self, params: Mapping[str, object]) -> dict[str, object]:

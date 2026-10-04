@@ -107,6 +107,7 @@ SUPERVISOR_METHODS = frozenset(
         "routines.list",
         "chat.events",
         "events.pull",
+        "runtime.reload",
     }
 )
 

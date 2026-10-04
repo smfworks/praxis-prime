@@ -26,6 +26,7 @@ from praxis_prime.onboarding.probe import (
 from praxis_prime.onboarding.record import inference_ready, read_record, write_record
 from praxis_prime.policy.dials import dial_ids
 from praxis_prime.router.settings import load_settings
+from praxis_prime.router.types import canonical_spec, parse_model_spec
 
 CLOUD_PROVIDERS = ("openai", "anthropic", "xai", "openai-compatible")
 LOCAL_PROVIDERS = ("ollama", "llamacpp", "vllm", "lmstudio", "openai-compatible")
@@ -309,7 +310,7 @@ class OnboardingService:
         if not provider or not model:
             return False
         spec = f"{provider}:{model}"
-        changing = bool(current) and current != spec
+        changing = bool(current) and not _same_model_spec(current, spec)
         return changing or self._replacing_key(provider, selection) or self._endpoint_changed(
             selection
         )
@@ -330,7 +331,7 @@ class OnboardingService:
         if not current:
             return False
         current_provider = current.split(":", 1)[0]
-        if provider and provider != current_provider:
+        if provider and _canonical_provider(provider) != _canonical_provider(current_provider):
             return True
         return self._endpoint_changed(selection)
 
@@ -441,7 +442,7 @@ class OnboardingService:
             self.config_dir,
             {
                 "ready": True,
-                "spec": f"{provider}:{model}",
+                "spec": _ready_spec(provider, model),
                 "provider": provider,
                 "model": model,
                 "lane": lane,
@@ -453,7 +454,7 @@ class OnboardingService:
                 "warnings": list(tested.get("warnings") or []),
                 "roles": {
                     "primary": {
-                        "spec": f"{provider}:{model}",
+                        "spec": _ready_spec(provider, model),
                         "tested_at": _now(),
                         "passed": True,
                     },
@@ -494,7 +495,7 @@ class OnboardingService:
                     warnings.append(f"{role} model {name} did not pass and was left unchanged")
                 continue
             saved[role] = {
-                "spec": f"{selection.provider.strip().lower()}:{name}",
+                "spec": _ready_spec(selection.provider.strip().lower(), name),
                 "tested_at": _now(),
                 "passed": True,
             }
@@ -702,6 +703,35 @@ def _secret_exists(config_directory: Path, env: Mapping[str, str], name: str) ->
     except OSError:
         return False
     return bool(values.get(name, "").strip())
+
+
+def _ready_spec(provider: str, model: str) -> str:
+    """Spec stored in provider-ready.json. Aliases fold to the adapter name."""
+    return canonical_spec(f"{provider}:{model}")
+
+
+def _same_model_spec(left: str, right: str) -> bool:
+    """True when both strings name the same provider and model after alias folding."""
+    one = left.strip()
+    other = right.strip()
+    if not one or not other:
+        return one == other
+    try:
+        return canonical_spec(one) == canonical_spec(other)
+    except ValueError:
+        return one == other
+
+
+def _canonical_provider(provider: str) -> str:
+    """Adapter id for a wizard provider or a ``provider:model`` spec."""
+    text = provider.strip().lower()
+    if not text:
+        return ""
+    spec = text if ":" in text else f"{text}:model"
+    try:
+        return parse_model_spec(spec).provider
+    except ValueError:
+        return text.split(":", 1)[0]
 
 
 def _base_url(provider: str, base_url: str, lane: str) -> str:

@@ -126,7 +126,7 @@ def onboarding_payload(
         )
     if kind == "onboarding.save":
         prepared, selection = _prepare_save(server, principal, payload)
-        return prepared.save(selection)
+        return _finish_save(server, prepared.save(selection))
     raise OnboardingError("unknown setup request", code="not_found")
 
 
@@ -249,7 +249,7 @@ def _dispatch(
             )
         if route == "/v1/onboarding/save":
             prepared, selection = _prepare_save(server, principal, payload)
-            return 200, prepared.save(selection)
+            return 200, _finish_save(server, prepared.save(selection))
         if route == "/v1/onboarding/dials":
             positions = payload.get("positions")
             if not isinstance(positions, dict):
@@ -654,6 +654,69 @@ def _audit_owner_created(data_root: Any, account: Any) -> None:
     finally:
         log.close()
         db.close()
+
+
+def _finish_save(server: Any, result: dict[str, object]) -> dict[str, object]:
+    """Reload the serving router after a save. Ask for a restart when that fails."""
+    if result.get("ok") is not True:
+        return result
+    body = dict(result)
+    body["restartRequired"] = not _refresh_serving_router(server)
+    return body
+
+
+def _refresh_serving_router(server: Any) -> bool:
+    """True when the process that serves chat is using the saved provider."""
+    runtime = getattr(getattr(server, "agent", None), "runtime", None)
+    if runtime is not None and getattr(runtime, "router", None) is not None:
+        return _reload_in_process(server, runtime)
+    if not getattr(server, "multi_profile", False):
+        return True
+    return _reload_running_workers(server)
+
+
+def _reload_in_process(server: Any, runtime: Any) -> bool:
+    if server.config_dir is None:
+        return False
+    from praxis_prime.runtime import reload_serving_router
+
+    env = getattr(server, "onboarding_env", None)
+    if env is None:
+        env = os.environ
+    lock = getattr(getattr(server, "agent", None), "_lock", None)
+    try:
+        reload_serving_router(
+            runtime,
+            env=env,
+            config_path=Path(server.config_dir) / "config.toml",
+            lock=lock,
+        )
+    except (OSError, ValueError, RuntimeError, sqlite3.Error):
+        return False
+    return True
+
+
+def _reload_running_workers(server: Any) -> bool:
+    """Reload workers that are already up. An idle profile loads the file when it starts."""
+    supervisor = getattr(server, "supervisor", None)
+    if supervisor is None or not hasattr(supervisor, "running"):
+        agent = getattr(server, "agent", None)
+        supervisor = getattr(agent, "supervisor", None)
+    if supervisor is None or not hasattr(supervisor, "running") or not hasattr(supervisor, "call"):
+        return False
+    try:
+        names = list(supervisor.running())
+    except (OSError, RuntimeError, ValueError):
+        return False
+    from praxis_prime.supervisor.ipc import IpcError
+    from praxis_prime.supervisor.supervisor import WorkerUnavailable
+
+    for name in names:
+        try:
+            supervisor.call(name, "runtime.reload", {}, timeout=10)
+        except (WorkerUnavailable, IpcError, OSError, RuntimeError, ValueError):
+            return False
+    return True
 
 
 _STEP_UP_MESSAGE = (

@@ -173,6 +173,41 @@ class Runtime:
         return session_id, loop
 
 
+def reload_serving_router(
+    runtime: Runtime,
+    *,
+    env: Mapping[str, str] | None,
+    config_path: Path,
+    lock: object | None = None,
+) -> None:
+    """Reload settings and swap the router. A failed build leaves the old one.
+
+    ``load_settings`` runs under ``lock`` so two saves cannot publish a stale
+    router. Profile dials already applied on ``runtime.settings`` are kept.
+    """
+
+    def apply() -> None:
+        fresh = load_settings(env, config_path=config_path)
+        fresh = replace(fresh, dials=dict(runtime.settings.dials))
+        router = build_router(fresh)
+        router.require_verified = True
+        router.verified_specs = set(fresh.verified_specs)
+        runtime.settings = fresh
+        runtime.router = router
+        runtime.policy.provider_flags = dict(fresh.provider_flags)
+        engine = runtime.engine
+        engine.router = router
+        judge = getattr(engine, "judge", None)
+        if judge is not None and hasattr(judge, "router"):
+            judge.router = router
+
+    if lock is None:
+        apply()
+        return
+    with lock:
+        apply()
+
+
 def build_runtime(
     *,
     env: Mapping[str, str] | None = None,

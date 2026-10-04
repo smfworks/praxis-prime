@@ -368,6 +368,7 @@ def _serve_workers(
         multi_profile=True,
         config_dir=config_directory,
     )
+    server.supervisor = supervisor  # type: ignore[attr-defined]
 
     def on_pending(item: dict[str, object]) -> None:
         server.publish(

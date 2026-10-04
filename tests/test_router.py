@@ -1,5 +1,6 @@
 """Router fallback and settings. No network."""
 
+import json
 from pathlib import Path
 
 from tests.fakes import ScriptedProvider
@@ -107,6 +108,43 @@ def test_settings_chain_does_not_guess_a_provider(tmp_path: Path):
     chain = [(ref.provider, ref.model) for ref in chosen.chain()]
     assert chain == [("anthropic", "claude-sonnet")]
     assert "sk-test-secret" not in repr(chosen)
+
+
+def test_alias_records_verify_the_canonical_spec(tmp_path: Path):
+    config = tmp_path / "config.toml"
+    config.write_text(
+        "\n".join(
+            [
+                "[models]",
+                'primary = "llamacpp:local-model"',
+                'fallback = ["vllm:other-model", "ollama:not-verified"]',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    ready = {
+        "ready": True,
+        "spec": "llamacpp:local-model",
+        "fallbacks": ["lmstudio:side"],
+        "roles": {"utility": {"spec": "vllm:other-model", "passed": True}},
+    }
+    (tmp_path / "provider-ready.json").write_text(
+        json.dumps(ready),
+        encoding="utf-8",
+    )
+    settings = load_settings({}, config_path=config)
+    assert settings.model_spec == "llamacpp:local-model"
+    assert settings.verified_specs == (
+        "openai-compatible:local-model",
+        "openai-compatible:side",
+        "openai-compatible:other-model",
+    )
+    assert settings.provider_ready() is True
+    assert [(ref.provider, ref.model) for ref in settings.chain()] == [
+        ("openai-compatible", "local-model"),
+        ("openai-compatible", "other-model"),
+    ]
 
 
 def test_model_spec_aliases_and_rejection():

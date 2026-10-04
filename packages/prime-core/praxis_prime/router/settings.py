@@ -20,7 +20,7 @@ from praxis_prime.paths import config_dir
 from praxis_prime.policy.boundary import absolute_config_paths, parse_fetch_allow
 from praxis_prime.policy.dials import default_positions
 from praxis_prime.router.http import normalize_base
-from praxis_prime.router.types import ModelRef, parse_model_spec
+from praxis_prime.router.types import ModelRef, canonical_spec, parse_model_spec, specs_cover
 
 _MODES = {"plan", "ask", "auto", "full"}
 _READY_NAME = "provider-ready.json"
@@ -86,11 +86,18 @@ class Settings:
                 refs.append(ref)
 
         add(self.model_spec)
-        verified = set(self.verified_specs)
         for spec in self.fallback_specs:
-            if spec in verified:
+            if specs_cover(spec, self.verified_specs):
                 add(spec)
         return refs
+
+    def provider_ready(self) -> bool:
+        """True when the configured primary passed a setup test.
+
+        ``llamacpp:m`` in the config and ``openai-compatible:m`` in the
+        verification record are the same provider.
+        """
+        return bool(self.model_spec.strip()) and specs_cover(self.model_spec, self.verified_specs)
 
 
 def load_settings(
@@ -256,8 +263,12 @@ def verified_specs_from(config_path: Path) -> tuple[str, ...]:
                 found.append(spec.strip())
     unique: list[str] = []
     for spec in found:
-        if spec not in unique:
-            unique.append(spec)
+        try:
+            canonical = canonical_spec(spec)
+        except ValueError:
+            continue
+        if canonical not in unique:
+            unique.append(canonical)
     return tuple(unique)
 
 

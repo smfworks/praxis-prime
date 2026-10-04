@@ -158,6 +158,37 @@ def parse_model_spec(spec: str) -> ModelRef:
     return ModelRef(provider, model)
 
 
+def canonical_spec(spec: str) -> str:
+    """``provider:model`` after alias folding. ``llamacpp:m`` is ``openai-compatible:m``."""
+    return parse_model_spec(spec).spec()
+
+
+def specs_cover(spec: str, verified: object) -> bool:
+    """True when ``spec`` and one verified entry name the same provider and model.
+
+    Both sides are normalized. A bad entry is skipped so one stale record
+    cannot break a load. An empty spec is not covered.
+    """
+    text = spec.strip()
+    if not text:
+        return False
+    try:
+        wanted = canonical_spec(text)
+    except ValueError:
+        return False
+    if not isinstance(verified, (list, tuple, set, frozenset)):
+        return False
+    for item in verified:
+        if not isinstance(item, str) or not item.strip():
+            continue
+        try:
+            if canonical_spec(item) == wanted:
+                return True
+        except ValueError:
+            continue
+    return False
+
+
 def parse_arguments(raw: object) -> dict[str, Any]:
     """Accept a JSON object or a JSON string of an object."""
     if isinstance(raw, str):

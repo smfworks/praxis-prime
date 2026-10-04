@@ -259,7 +259,7 @@ def run_system_doctor() -> list[Check]:
     from praxis_prime.router.settings import load_settings
 
     settings = load_settings()
-    ready = bool(settings.model_spec) and settings.model_spec in settings.verified_specs
+    ready = settings.provider_ready()
     return collect_checks(
         version_info=(sys.version_info.major, sys.version_info.minor, sys.version_info.micro),
         os_release_text=_read_text(Path("/etc/os-release")),
