@@ -4,7 +4,7 @@ Copyright (c) 2026 SMF Works. Praxis Prime itself is MIT; see LICENSE and NOTICE
 
 This file is the third-party notice named in the architecture blueprint
 (§24, §32). No upstream source tree is vendored in this pre-alpha skeleton.
-Two built-in themes ship subset WOFF2 fonts under the SIL Open Font License;
+The built-in themes ship subset WOFF2 fonts under the SIL Open Font License;
 see [Bundled fonts](#bundled-fonts). The entries below are the attribution
 record for code and assets that may be reused later, and the notices that
 must stay attached if they are.
@@ -137,7 +137,7 @@ No TypeSafe source is vendored in `praxis_prime.decide`.
 
 ## Bundled fonts
 
-`smf.praxis` and `smf.high-contrast` ship subset WOFF2 files built from the
+The built-in themes ship subset WOFF2 files built from the
 SIL Open Font License families in the `google/fonts` `ofl/` tree. The SPA
 serves them from the theme package. It does not request a font host. Each
 package keeps the upstream OFL 1.1 text in `assets/fonts/OFL.txt`. The
