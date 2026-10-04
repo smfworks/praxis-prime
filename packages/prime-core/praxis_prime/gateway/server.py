@@ -47,6 +47,7 @@ from praxis_prime.gateway.guard import (
     mutation_type_denial,
 )
 from praxis_prime.gateway.oidc import oidc_public, oidc_session
+from praxis_prime.gateway.onboarding import SetupFailures, handle_onboarding, onboarding_payload
 from praxis_prime.gateway.protocol import (
     CHAT_ROLES,
     OPERATOR_ONLY,
@@ -68,6 +69,7 @@ from praxis_prime.gateway.ws import (
 )
 from praxis_prime.host import Host, TurnResult
 from praxis_prime.observe import JsonLogger
+from praxis_prime.onboarding.service import OnboardingError
 from praxis_prime.statfile import StatKind, lstat_kind
 
 _APPROVAL_PATH = re.compile(r"^/v1/approvals/(ap_[0-9a-f]{8})$")
@@ -96,6 +98,7 @@ class GatewayServer:
         data_root: Path | None = None,
         bearer_enabled: bool = True,
         multi_profile: bool = False,
+        config_dir: Path | None = None,
     ) -> None:
         self.host = host
         self._port = port
@@ -109,6 +112,8 @@ class GatewayServer:
         self.data_root = data_root
         self.bearer_enabled = bearer_enabled
         self.multi_profile = multi_profile
+        self.config_dir = config_dir
+        self.setup_failures = SetupFailures()
         self.logger = logger
         self.socket_path = socket_path
         self._stopped = threading.Event()
@@ -350,6 +355,11 @@ class GatewayServer:
         public_factor = self._public_factor(method, route, headers, body, extras, peer)
         if public_factor is not None:
             return public_factor
+        onboarding = handle_onboarding(
+            self, method, route, headers, body, extras, peer, query
+        )
+        if onboarding is not None:
+            return onboarding
         principal = authenticate_http(
             self.accounts,
             headers,
@@ -867,6 +877,13 @@ class GatewayServer:
                 self._chat(frame, principal, outgoing, key, profile_name)
             elif kind == "model.set":
                 self._model(frame, outgoing, profile_name)
+            elif kind.startswith("onboarding."):
+                try:
+                    payload = onboarding_payload(self, kind, _payload(frame), principal.account_id)
+                except OnboardingError as exc:
+                    outgoing.put(_frame_error(frame_id, exc.code, str(exc)))
+                    return
+                outgoing.put({"type": "result", "id": frame_id, "ok": True, "payload": payload})
             elif kind == "session.drop":
                 session_id = frame.get("sessionId") or _payload(frame).get("sessionId")
                 try:
@@ -1585,6 +1602,8 @@ def _http_action(method: str, route: str) -> str:
 
 
 def _frame_action(kind: str) -> str:
+    if kind.startswith("onboarding."):
+        return "admin"
     if kind == "approvals.decide":
         return "approve"
     if kind in {"chat.send", "model.set", "session.drop"}:
