@@ -1,0 +1,76 @@
+schema = "praxis.theme/v1"
+id = "smf.education"
+name = "Education"
+version = "1.0.0"
+license = "MIT"
+authors = ["Praxis Prime"]
+description = "A large, rounded theme for staff and families. Lexend and Atkinson Hyperlegible."
+modes = ["light", "dark"]
+default_mode = "light"
+min_praxis = "0.1.0"
+contrast = "AA"
+
+[fonts.display]
+family = "Lexend"
+license = "OFL-1.1"
+fallback = "sans-serif"
+files = [
+  { path = "assets/fonts/Lexend.woff2", weight = "100 900", style = "normal" },
+]
+
+[fonts.body]
+family = "Atkinson Hyperlegible"
+license = "OFL-1.1"
+fallback = "sans-serif"
+files = [
+  { path = "assets/fonts/AtkinsonHyperlegible-Regular.woff2", weight = "400", style = "normal" },
+  { path = "assets/fonts/AtkinsonHyperlegible-Bold.woff2", weight = "700", style = "normal" },
+]
+
+[fonts.mono]
+family = "JetBrains Mono"
+license = "OFL-1.1"
+fallback = "monospace"
+files = [
+  { path = "assets/fonts/JetBrainsMono.woff2", weight = "100 800", style = "normal" },
+]
+
+[shape]
+radius = 10
+density = "comfortable"
+motion = "subtle"
+scale = 1.2
+baseSize = 17
+lineHeight = 1.5
+borderWidth = 1
+
+[tokens.light]
+bg = "#f8fafc"
+bgRaised = "#ffffff"
+fg = "#0f172a"
+fgMuted = "#475569"
+accent = "#1d4ed8"
+accentFg = "#ffffff"
+border = "#cbd5e1"
+borderStrong = "#475569"
+ring = "#1d4ed8"
+ok = "#15803d"
+warn = "#92400e"
+danger = "#b91c1c"
+
+[tokens.dark]
+bg = "#0f172a"
+bgRaised = "#1e293b"
+fg = "#f1f5f9"
+fgMuted = "#a3b1c6"
+accent = "#60a5fa"
+accentFg = "#0f172a"
+border = "#334155"
+borderStrong = "#a3b1c6"
+ring = "#60a5fa"
+ok = "#4ade80"
+warn = "#fbbf24"
+danger = "#f87171"
+
+[ornaments]
+watermarkOpacity = 0

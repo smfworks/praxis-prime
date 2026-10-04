@@ -159,6 +159,11 @@ fonts stay OFL-1.1 and are not relicensed.
 | IBM Plex Mono regular | `praxis_prime/ui_themes/smf.forensic/assets/fonts/IBMPlexMono-Regular.woff2` | Copyright 2017 IBM Corp. All rights reserved. | OFL-1.1 |
 | IBM Plex Mono bold | `praxis_prime/ui_themes/smf.forensic/assets/fonts/IBMPlexMono-Bold.woff2` | Copyright 2017 IBM Corp. All rights reserved. | OFL-1.1 |
 
+| Lexend (variable, weight 100–900) | `praxis_prime/ui_themes/smf.education/assets/fonts/Lexend.woff2` | Copyright 2019 The Lexend Project Authors (https://github.com/googlefonts/lexend) | OFL-1.1 |
+| Atkinson Hyperlegible regular | `praxis_prime/ui_themes/smf.education/assets/fonts/AtkinsonHyperlegible-Regular.woff2` | Copyright 2020 Braille Institute of America, Inc. | OFL-1.1 |
+| Atkinson Hyperlegible bold | `praxis_prime/ui_themes/smf.education/assets/fonts/AtkinsonHyperlegible-Bold.woff2` | Copyright 2020 Braille Institute of America, Inc. | OFL-1.1 |
+| JetBrains Mono (variable) | `praxis_prime/ui_themes/smf.education/assets/fonts/JetBrainsMono.woff2` | Copyright 2020 The JetBrains Mono Project Authors (https://github.com/JetBrains/JetBrainsMono) | OFL-1.1 |
+
 ## Runtime components that are not bundled
 
 These are not shipped here. If a release later vendors source, or if a
@@ -207,3 +212,7 @@ upstream licence, kept beside the fonts.
 | `praxis_prime/ui_themes/smf.forensic/assets/fonts/IBMPlexSans.woff2` | `google/fonts` `ofl/ibmplexsans` | Version 3.201; google/fonts 0b58fb370093f9a9f4ff785d94405710b79de67c (retrieved 2026-10) | OFL-1.1 | `smf.forensic/assets/fonts/OFL.txt` |
 | `praxis_prime/ui_themes/smf.forensic/assets/fonts/IBMPlexMono-Regular.woff2` | `google/fonts` `ofl/ibmplexmono` | Version 2.3; google/fonts 0b58fb370093f9a9f4ff785d94405710b79de67c (retrieved 2026-10) | OFL-1.1 | `smf.forensic/assets/fonts/OFL.txt` |
 | `praxis_prime/ui_themes/smf.forensic/assets/fonts/IBMPlexMono-Bold.woff2` | `google/fonts` `ofl/ibmplexmono` | Version 2.3; google/fonts 0b58fb370093f9a9f4ff785d94405710b79de67c (retrieved 2026-10) | OFL-1.1 | `smf.forensic/assets/fonts/OFL.txt` |
+| `praxis_prime/ui_themes/smf.education/assets/fonts/Lexend.woff2` | `google/fonts` `ofl/lexend` | Version 1.007; google/fonts e2332cf862ac3145c0ee5f24f04f4c1819b2410b (retrieved 2026-10) | OFL-1.1 | `smf.education/assets/fonts/OFL.txt` |
+| `praxis_prime/ui_themes/smf.education/assets/fonts/AtkinsonHyperlegible-Regular.woff2` | `google/fonts` `ofl/atkinsonhyperlegible` | Version 1.006; ttfautohint (v1.8.3) (retrieved 2026-10) | OFL-1.1 | `smf.education/assets/fonts/OFL.txt` |
+| `praxis_prime/ui_themes/smf.education/assets/fonts/AtkinsonHyperlegible-Bold.woff2` | `google/fonts` `ofl/atkinsonhyperlegible` | Version 1.006; ttfautohint (v1.8.3) (retrieved 2026-10) | OFL-1.1 | `smf.education/assets/fonts/OFL.txt` |
+| `praxis_prime/ui_themes/smf.education/assets/fonts/JetBrainsMono.woff2` | `google/fonts` `ofl/jetbrainsmono` | Version 2.211 (retrieved 2026-10) | OFL-1.1 | `smf.education/assets/fonts/OFL.txt` |
