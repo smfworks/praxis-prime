@@ -118,9 +118,11 @@ Scopes default to `openid email profile` and must include `openid`. `--preset go
 
 ## Setup
 
-`praxis-prime setup` is the first-run wizard. The web UI uses the same backend. Nothing is preselected. A fresh install has no provider, and chat answers with "No model provider is configured. Run `praxis-prime setup` or open the web UI." Rules and other non-LLM features keep working.
+`praxis-prime setup` is the first-run wizard. The web UI uses the same backend. Nothing is preselected. A fresh install has no provider, and chat answers with "No model provider is configured. Run `praxis-prime setup` or open the web UI." If `config.toml` already names a provider that has not passed the setup test, chat names that spec and tells you to run `praxis-prime setup`. Rules and other non-LLM features keep working.
 
-Interactive setup shows the current owner, provider, and dial positions and changes only what you confirm. Re-running it does not delete an account, a secret, an OIDC provider, or a Telegram binding. A config write copies `config.toml` to a timestamped mode-0600 backup first.
+Interactive setup shows the current owner, provider, and dial positions and changes only what you confirm. The owner password and the API key are read without echo. Re-running it does not delete an account, a secret, an OIDC provider, or a Telegram binding. A config write copies `config.toml` to a timestamped mode-0600 backup and keeps the newest five of those files.
+
+Creating the owner from the web UI runs the same profile migration as `praxis-prime setup`, including the backup and `profiles/.migration.json`. If an existing `prime.db` cannot be moved, the page tells you to stop the daemon and run `praxis-prime setup`. Changing a provider that is already configured in the browser asks you to confirm the replacement and to sign a step-up (account password, authenticator code, or passkey) before the save. A new base URL needs the API key typed again in that same request.
 
 ```bash
 praxis-prime setup
