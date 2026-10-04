@@ -68,16 +68,37 @@ def _zipped(files: dict[str, bytes]) -> bytes:
     return buffer.getvalue()
 
 
+_BUILTINS = (
+    "smf.classical",
+    "smf.dental",
+    "smf.education",
+    "smf.forensic",
+    "smf.high-contrast",
+    "smf.legal-office",
+    "smf.medical",
+    "smf.praxis",
+)
+_SVG_NAMESPACES = (
+    "http://www.w3.org/2000/svg",
+    "http://www.w3.org/1999/xlink",
+)
+_URL = re.compile(r"""url\(\s*(['"]?)([^)'"]+)\1\s*\)""", re.IGNORECASE)
+
+
 def test_builtin_themes_meet_their_contrast_levels():
-    praxis = validate_dir(_BUILTIN / "smf.praxis")
-    contrast = validate_dir(_BUILTIN / "smf.high-contrast")
-    assert praxis.theme_id == "smf.praxis"
-    assert praxis.contrast == "AA"
-    assert contrast_modes(praxis.modes, "AA") == []
-    assert contrast.contrast == "AAA"
-    assert contrast_modes(contrast.modes, "AAA") == []
-    assert contrast_modes(contrast.modes, "AA") == []
-    for package in (praxis, contrast):
+    found = sorted(
+        path.name
+        for path in _BUILTIN.iterdir()
+        if path.is_dir() and not path.name.startswith((".", "_"))
+    )
+    assert found == list(_BUILTINS)
+    for theme_id in _BUILTINS:
+        package = validate_dir(_BUILTIN / theme_id)
+        level = "AAA" if theme_id == "smf.high-contrast" else "AA"
+        assert package.theme_id == theme_id
+        assert package.contrast == level
+        assert contrast_modes(package.modes, level) == []
+        assert contrast_modes(package.modes, "AA") == []
         css = render_css(package, package_hash(package.files))
         assert "--pp-bg:" in css
         assert "--pp-ring:" in css
@@ -86,9 +107,56 @@ def test_builtin_themes_meet_their_contrast_levels():
         assert "http://" not in css
         assert "https://" not in css
         assert "assets/fonts/OFL.txt" in package.files
+        licence = package.files["assets/fonts/OFL.txt"].decode("utf-8")
+        assert "SIL Open Font License" in licence
         fonts = [package.files[path] for path in package.files if path.endswith(".woff2")]
         assert fonts
         assert all(blob.startswith(b"wOF2") for blob in fonts)
+
+
+def test_every_bundled_font_is_credited():
+    credits = (_ROOT / "CREDITS.md").read_text(encoding="utf-8")
+    third = (_ROOT / "THIRD_PARTY.md").read_text(encoding="utf-8")
+    copied = third.split("## Copied-file log", 1)[1]
+    fonts = sorted(_BUILTIN.rglob("*.woff2"))
+    assert len(fonts) >= 8
+    for path in fonts:
+        repo = path.relative_to(_ROOT).as_posix()
+        packaged = path.relative_to(_ROOT / "packages" / "prime-core").as_posix()
+        assert repo in credits, repo
+        assert f"`{packaged}`" in copied, packaged
+
+
+def test_builtin_theme_assets_have_no_remote_urls():
+    for path in _BUILTIN.rglob("*"):
+        if path.suffix not in {".toml", ".css", ".svg"} or not path.is_file():
+            continue
+        text = path.read_text(encoding="utf-8")
+        if path.suffix == ".svg":
+            for namespace in _SVG_NAMESPACES:
+                text = text.replace(namespace, "")
+        assert "://" not in text, path
+        assert not re.search(r"(?<!:)//[A-Za-z0-9]", text), path
+        for match in _URL.finditer(text):
+            target = match.group(2).strip()
+            assert target.startswith("#") or target.startswith("assets/"), (path, target)
+
+
+def test_new_ornaments_pass_the_sanitizer_unchanged():
+    fresh = {"rule.svg", "grid.svg", "capital.svg"}
+    seen = set()
+    for path in _BUILTIN.rglob("*.svg"):
+        raw = path.read_bytes()
+        once, issue = check_svg(path.name, raw)
+        assert issue is None, path
+        twice, again = check_svg(path.name, once)
+        assert again is None
+        assert once == twice
+        assert once.startswith(b"<?xml")
+        if path.name in fresh:
+            assert raw == once, path
+            seen.add(path.name)
+    assert seen == fresh
 
 
 def test_theme_css_rejects_active_content():
