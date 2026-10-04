@@ -6,8 +6,9 @@ immediate children, so a missed change is still visible on the next start.
 
 A watched directory is armed again after it is deleted or replaced. Every
 check still stats the path. An empty queue is not proof the file is
-unchanged, and a dirty path or a queue overflow is a change even when the
-stat token matches.
+unchanged. A dirty flag or a queue overflow means the caller should stat
+again. It is not itself a change to the file. Only watched paths and their
+parent directories are recorded as dirty.
 """
 
 from __future__ import annotations
@@ -51,8 +52,9 @@ _MASK = (
 _SELF_GONE = _IN_DELETE_SELF | _IN_MOVE_SELF | _IN_IGNORED
 _CHILD_SWAP = _IN_DELETE | _IN_MOVED_FROM | _IN_CREATE | _IN_MOVED_TO
 _HEADER = struct.Struct("iIII")
-# A noisy directory must not grow this set without bound. Past the cap the
-# watcher forgets individual paths and the next observe stats instead.
+# A noisy directory must not grow this set without bound. Only watched
+# paths and their parents are recorded. Past the cap the watcher forgets
+# individual paths and the next observe stats instead.
 _DIRTY_CAP = 1024
 
 
@@ -61,6 +63,21 @@ class _Event(NamedTuple):
     mask: int
     path: Path | None
     name: str
+
+
+class WatchObservation(NamedTuple):
+    """One check of a path.
+
+    ``token_changed`` is a new stat token. ``dirty`` and ``overflowed`` mean
+    the kernel reported activity, so the caller should stat again. A file
+    routine fires only when the token changes. The Omarchy adapter also
+    re-reads its cache when the watch is dirty or the queue overflowed.
+    """
+
+    token_changed: bool
+    dirty: bool
+    overflowed: bool
+    token: str
 
 
 def file_token(path: Path) -> str:
@@ -124,24 +141,27 @@ class DirectoryWatcher:
             if parent != watch_dir:
                 self._add_watch(parent)
 
-    def observe(self, path: Path, previous: str, *, startup: bool) -> tuple[bool, str]:
-        """Return whether ``path`` changed, and the token to store.
+    def observe(self, path: Path, previous: str, *, startup: bool) -> WatchObservation:
+        """Stat ``path`` and report the token, dirtiness, and overflow.
 
         ``startup`` is the scheduler's first tick. The directory watch is
         re-armed when it has gone away, and the path is statted on every
-        call. A matching token is still a change when the path is dirty
-        or the kernel queue overflowed.
+        call. The dirty flag for this path is cleared. A queue overflow
+        stays set until every watched path has been checked.
         """
         del startup
         with self._lock:
+            key = str(path)
+            # Register before draining so this path, not an unrelated name,
+            # is what a queued event can mark dirty.
+            self._watched.add(key)
             self.arm(path)
             self._drain()
             # A delete in the queue drops the watch. Arm the path that is there now.
             self.arm(path)
-            key = str(path)
-            self._watched.add(key)
             token = file_token(path)
-            signalled = key in self._dirty or self._overflow
+            dirty = key in self._dirty
+            overflowed = self._overflow
             self._dirty.discard(key)
             if self._overflow:
                 self._reconciled.add(key)
@@ -149,7 +169,12 @@ class DirectoryWatcher:
                     self._overflow = False
                     self._reconciled.clear()
             self._repair_map()
-            return signalled or token != previous, token
+            return WatchObservation(
+                token_changed=token != previous,
+                dirty=dirty,
+                overflowed=overflowed,
+                token=token,
+            )
 
     def _add_watch(self, watch_dir: Path) -> None:
         if self._fd is None or self._libc is None:
@@ -279,9 +304,19 @@ class DirectoryWatcher:
                 if watched == key or watched.startswith(prefix):
                     self._mark_dirty(watched)
 
+    def _is_relevant(self, key: str) -> bool:
+        if key in self._watched:
+            return True
+        prefix = key + os.sep
+        return any(watched.startswith(prefix) for watched in self._watched)
+
     def _mark_dirty(self, key: str) -> None:
         with self._lock:
             if self._overflow:
+                return
+            # Unrelated names in a watched directory are not recorded, so
+            # they cannot fill the cap and force every routine to stat.
+            if not self._is_relevant(key):
                 return
             if len(self._dirty) >= _DIRTY_CAP:
                 self._overflow = True

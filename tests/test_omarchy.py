@@ -364,6 +364,45 @@ def test_same_size_same_mtime_refusal_reloads_when_inotify_is_dirty(
     assert theme.package.modes["dark"]["bg"] == "#14110f"
 
 
+def test_dirty_or_overflow_bypasses_the_signature_cache(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    path = tmp_path / "praxis-prime.json"
+    _point(monkeypatch, path)
+    _write(path, _DARK)
+    assert installed() is not None
+    watcher = omarchy._watcher()
+    loads = {"n": 0}
+    real_load = omarchy._load
+
+    def wrapped(candidate: Path):
+        loads["n"] += 1
+        return real_load(candidate)
+
+    monkeypatch.setattr(omarchy, "_load", wrapped)
+    try:
+        watcher._overflow = False
+        watcher._dirty.add(str(path))
+        assert installed() is not None
+        assert loads["n"] == 1
+        assert installed() is not None
+        assert loads["n"] == 1
+
+        watcher._dirty.discard(str(path))
+        watcher._overflow = True
+        assert installed() is not None
+        assert loads["n"] == 2
+        watcher._overflow = False
+        watcher._reconciled.clear()
+        assert installed() is not None
+        assert loads["n"] == 2
+    finally:
+        watcher._overflow = False
+        watcher._dirty.discard(str(path))
+        watcher._reconciled.clear()
+
+
 def test_symlinked_parent_is_followed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     real = tmp_path / "real"
     real.mkdir()

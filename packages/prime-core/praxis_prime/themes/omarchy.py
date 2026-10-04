@@ -125,9 +125,13 @@ def installed(path: Path | None = None) -> InstalledTheme | None:
     with _LOCK:
         previous = _WATCH_TOKEN.get(key, "")
     try:
-        changed, token = _watcher().observe(source, previous, startup=not previous)
+        seen = _watcher().observe(source, previous, startup=not previous)
     except OSError:
         changed, token = True, previous
+    else:
+        # A dirty or overflowed watch bypasses the signature cache.
+        changed = seen.token_changed or seen.dirty or seen.overflowed
+        token = seen.token
     with _LOCK:
         _WATCH_TOKEN[key] = token
     signature = _signature(source)
