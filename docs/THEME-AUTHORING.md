@@ -43,7 +43,7 @@ A package is a directory. Packing it does not follow symlinks.
 
 Every other path is rejected. A name is one segment of letters, digits, `.`, `_`, and `-`. No `..`, no absolute path, no second slash inside `assets/fonts/` or `assets/ornaments/`. Script suffixes (`.js`, `.mjs`, `.cjs`, `.html`, `.htm`, `.wasm`) are rejected.
 
-`id` matches `^[a-z0-9][a-z0-9.-]{0,63}$`. Do not use `smf` or `smf.*`. Those ids are reserved for built-ins. `version` is `MAJOR.MINOR.PATCH`. `name` is at most 80 characters. `description` is at most 400 characters. `license` is one of the package licences above. `contrast` is `AA` (the default) or `AAA`. `modes` must list both `light` and `dark`. `default_mode` is `light`, `dark`, or `system`.
+`id` matches `^[a-z0-9][a-z0-9.-]{0,63}$`. Do not use `smf`, `smf.*`, or `omarchy.live`. `smf` and `smf.*` are reserved for built-ins. `omarchy.live` is reserved for the in-memory Omarchy stylesheet. `version` is `MAJOR.MINOR.PATCH`. `name` is at most 80 characters. `description` is at most 400 characters. `license` is one of the package licences above. `contrast` is `AA` (the default) or `AAA`. `modes` must list both `light` and `dark`. `default_mode` is `light`, `dark`, or `system`.
 
 ## Tokens
 
@@ -80,6 +80,8 @@ Lightness moves at most 0.25. If a derived colour cannot clear its pair inside t
 ### Colour formats
 
 `#rgb`, `#rgba`, `#rrggbb`, `#rrggbbaa`, or `oklch(L C H)` / `oklch(L C H / alpha)`. Nothing else. Named colours, `rgb()`, `hsl()`, `var()`, and `url()` are not colours.
+
+`bg`, `bgRaised`, and `codeBg` must be fully opaque in both modes. A translucent page colour is painted over the browser canvas. Dark mode sets `color-scheme: dark`, so that canvas is dark, and a check that composites alpha over white will pass a pair the page does not show. `bgRaised` and `selection` are composited over `bg` before their pairs are measured. Any other contrast background that is still translucent has to clear its pair on both a white page and a black page.
 
 ### Contrast
 
@@ -249,7 +251,23 @@ MIT License
 
 Copyright (c) 2026 the theme author
 
-Permission is hereby granted, free of charge, to any person obtaining a copy of this theme package to deal in the package without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the package, and to permit persons to whom the package is furnished to do so, subject to the license conditions. The package is provided as is, without warranty of any kind.
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 ```
 
 Lint that directory. Optional colours are derived. Both modes must come back clean before you pack.
