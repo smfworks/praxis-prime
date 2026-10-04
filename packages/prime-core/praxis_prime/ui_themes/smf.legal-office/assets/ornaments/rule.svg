@@ -1,0 +1,6 @@
+<?xml version='1.0' encoding='utf-8'?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 12" fill="none" stroke="#1f3a68" stroke-width="1" stroke-linecap="square" role="img" aria-hidden="true">
+  <title>Double rule</title>
+  <desc>A hairline double rule.</desc>
+  <path d="M0 4 H48 M0 8 H48" />
+</svg>

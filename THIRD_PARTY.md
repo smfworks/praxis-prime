@@ -151,6 +151,10 @@ fonts stay OFL-1.1 and are not relicensed.
 | JetBrains Mono (variable) | `…/smf.praxis/assets/fonts/JetBrainsMono.woff2` and `…/smf.high-contrast/assets/fonts/JetBrainsMono.woff2` | Copyright 2020 The JetBrains Mono Project Authors (https://github.com/JetBrains/JetBrainsMono) | OFL-1.1 |
 | Atkinson Hyperlegible (regular and bold) | `praxis_prime/ui_themes/smf.high-contrast/assets/fonts/AtkinsonHyperlegible-Regular.woff2` and `AtkinsonHyperlegible-Bold.woff2` | Copyright 2020 Braille Institute of America, Inc. | OFL-1.1 |
 
+| Libre Baskerville (variable, weight 400–700) | `praxis_prime/ui_themes/smf.legal-office/assets/fonts/LibreBaskerville.woff2` | Copyright 2012 The Libre Baskerville Project Authors (https://github.com/impallari/Libre-Baskerville) | OFL-1.1 |
+| Source Sans 3 (variable, weight 200–900) | `praxis_prime/ui_themes/smf.legal-office/assets/fonts/SourceSans3.woff2` | © 2023 Adobe (http://www.adobe.com/), with Reserved Font Name ‘Source’ | OFL-1.1 |
+| Source Code Pro (variable, weight 200–900) | `praxis_prime/ui_themes/smf.legal-office/assets/fonts/SourceCodePro.woff2` | © 2023 Adobe (http://www.adobe.com/), with Reserved Font Name ‘Source’ | OFL-1.1 |
+
 ## Runtime components that are not bundled
 
 These are not shipped here. If a release later vendors source, or if a
@@ -193,3 +197,6 @@ upstream licence, kept beside the fonts.
 | `praxis_prime/ui_themes/smf.high-contrast/assets/fonts/JetBrainsMono.woff2` | `google/fonts` `ofl/jetbrainsmono` | subset WOFF2, retrieved 2026-10 | OFL-1.1 | `smf.high-contrast/assets/fonts/OFL.txt` |
 | `praxis_prime/ui_themes/smf.high-contrast/assets/fonts/AtkinsonHyperlegible-Regular.woff2` | `google/fonts` `ofl/atkinsonhyperlegible` | subset WOFF2, retrieved 2026-10 | OFL-1.1 | `smf.high-contrast/assets/fonts/OFL.txt` |
 | `praxis_prime/ui_themes/smf.high-contrast/assets/fonts/AtkinsonHyperlegible-Bold.woff2` | `google/fonts` `ofl/atkinsonhyperlegible` | subset WOFF2, retrieved 2026-10 | OFL-1.1 | `smf.high-contrast/assets/fonts/OFL.txt` |
+| `praxis_prime/ui_themes/smf.legal-office/assets/fonts/LibreBaskerville.woff2` | `google/fonts` `ofl/librebaskerville` | Version 2.005; google/fonts b3d4b3ba7c4d54f15ed2be72d7f58b9097c3b252 (retrieved 2026-10) | OFL-1.1 | `smf.legal-office/assets/fonts/OFL.txt` |
+| `praxis_prime/ui_themes/smf.legal-office/assets/fonts/SourceSans3.woff2` | `google/fonts` `ofl/sourcesans3` | Version 3.052;hotconv 1.1.0;makeotfexe 2.6.0; google/fonts 914ec116571b1162d886aa402e715552221f0b77 (retrieved 2026-10) | OFL-1.1 | `smf.legal-office/assets/fonts/OFL.txt` |
+| `praxis_prime/ui_themes/smf.legal-office/assets/fonts/SourceCodePro.woff2` | `google/fonts` `ofl/sourcecodepro` | Version 1.026;hotconv 1.1.0;makeotfexe 2.6.0; google/fonts bd62bd8b4715f007af6905b0c9fd030f8410b289 (retrieved 2026-10) | OFL-1.1 | `smf.legal-office/assets/fonts/OFL.txt` |
