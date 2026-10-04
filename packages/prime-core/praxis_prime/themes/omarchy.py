@@ -12,8 +12,10 @@ through to ``smf.praxis``.
 
 The compiled package is kept in memory as ``omarchy.live``. It is not
 installed and it cannot be locked. Nothing here calls the network.
-``O_NOFOLLOW`` covers the final path component. A symlinked parent, such as
-Omarchy's ``current/theme``, is followed on purpose.
+``O_NOFOLLOW`` covers the final path component. Omarchy theme-set deletes
+the real directory ``current/theme`` and moves a new directory into its
+place. A symlinked parent is still followed. The watch is re-armed when
+that directory goes away, and every check stats the file and its parent.
 
 ARCHITECTURE §28.2. Addendum A §1.6.
 """
@@ -110,24 +112,22 @@ def live_theme(path: Path | None = None) -> str | None:
 def installed(path: Path | None = None) -> InstalledTheme | None:
     """The in-memory package for the current file, or None.
 
-    inotify on the parent directory decides when the kernel provides it.
-    A clean watch returns the cached package, including a cached refusal,
-    without reading the file again. A poll backend, a first sight, or an
-    overflowed watch stats inode, mtime, and size and recompiles on a change.
+    The watcher is armed on the theme directory and on its parent, and it
+    is re-armed when that directory is replaced. Every check still stats
+    the file inode, mtime, and size and the parent directory inode. A
+    cached package, including a cached refusal, is reused only when that
+    signature matches. An unchanged signature does not compile again.
     """
     source = theme_file(path)
     key = str(source)
     with _LOCK:
         previous = _WATCH_TOKEN.get(key, "")
     try:
-        changed, token = _watcher().observe(source, previous, startup=not previous)
+        _changed, token = _watcher().observe(source, previous, startup=not previous)
     except OSError:
-        changed, token = True, previous
+        token = previous
     with _LOCK:
         _WATCH_TOKEN[key] = token
-        cached = _CACHE.get(key)
-        if not changed and cached is not None:
-            return cached[1]
     signature = _signature(source)
     with _LOCK:
         cached = _CACHE.get(key)
@@ -164,14 +164,35 @@ def _watcher() -> DirectoryWatcher:
 
 
 def _signature(path: Path) -> str:
+    """File inode, mtime, and size, plus the parent directory inode.
+
+    A replaced ``current/theme`` is a new directory inode even when the
+    queue that was watching the old one has gone quiet. A symlinked parent
+    also records its target, so re-pointing it changes the signature.
+    """
+    parent = _parent_token(path)
     kind = lstat_kind(path)
     if kind is not StatKind.FILE:
-        return kind.value
+        return f"{kind.value}:{parent}"
     try:
         info = os.lstat(path)
     except OSError:
-        return "unreadable"
-    return f"f:{info.st_ino}:{info.st_mtime_ns}:{info.st_size}"
+        return f"unreadable:{parent}"
+    return f"f:{info.st_ino}:{info.st_mtime_ns}:{info.st_size}:{parent}"
+
+
+def _parent_token(path: Path) -> str:
+    try:
+        info = os.lstat(path.parent)
+    except OSError:
+        return "absent"
+    token = str(info.st_ino)
+    if stat.S_ISLNK(info.st_mode):
+        try:
+            token = f"{token}:{os.readlink(path.parent)}"
+        except OSError:
+            token = f"{token}:unread"
+    return token
 
 
 def _load(path: Path) -> InstalledTheme | None:

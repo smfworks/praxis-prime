@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import socket
 import time
 from datetime import UTC, datetime, timedelta
@@ -23,7 +24,14 @@ from praxis_prime.scheduler.cron import ScheduleError
 from praxis_prime.scheduler.runner import execute_routine
 from praxis_prime.scheduler.service import RoutineScheduler
 from praxis_prime.scheduler.store import Routine, RoutineRun, RoutineStore
-from praxis_prime.scheduler.watch import _DIRTY_CAP, DirectoryWatcher, file_token
+from praxis_prime.scheduler.watch import (
+    _DIRTY_CAP,
+    _IN_IGNORED,
+    _IN_Q_OVERFLOW,
+    DirectoryWatcher,
+    _Event,
+    file_token,
+)
 from praxis_prime.state import StateDB
 from praxis_prime.tools.registry import Risk, Tool, ToolContext, ToolRegistry
 
@@ -175,6 +183,91 @@ def test_dirty_set_is_bounded_and_overflow_stats(tmp_path: Path):
         assert token == file_token(path)
         changed, token = watcher.observe(path, token, startup=False)
         assert changed is False
+    finally:
+        watcher.close()
+
+
+def test_replaced_directory_is_watched_again(tmp_path: Path):
+    current = tmp_path / "current"
+    theme = current / "theme"
+    theme.mkdir(parents=True)
+    target = theme / "live.txt"
+    target.write_text("one")
+    watcher = DirectoryWatcher()
+    try:
+        changed, token = watcher.observe(target, "", startup=True)
+        assert changed
+        shutil.rmtree(theme)
+        incoming = current / "incoming"
+        incoming.mkdir()
+        (incoming / "live.txt").write_text("two")
+        incoming.rename(theme)
+        replaced = theme / "live.txt"
+        changed, token = watcher.observe(replaced, token, startup=False)
+        assert changed
+        if watcher.backend != "inotify":
+            return
+        assert str(theme) in watcher._armed
+        assert str(current) in watcher._armed
+        watcher._dirty.clear()
+        replaced.write_text("three")
+        watcher._drain()
+        assert str(replaced) in watcher._dirty
+    finally:
+        watcher.close()
+
+
+def test_repointed_symlink_is_noticed(tmp_path: Path):
+    current = tmp_path / "current"
+    current.mkdir()
+    first = tmp_path / "a"
+    second = tmp_path / "b"
+    first.mkdir()
+    second.mkdir()
+    (first / "live.txt").write_text("one")
+    (second / "live.txt").write_text("two")
+    link = current / "theme"
+    link.symlink_to(first, target_is_directory=True)
+    watcher = DirectoryWatcher()
+    try:
+        changed, token = watcher.observe(link / "live.txt", "", startup=True)
+        assert changed
+        link.unlink()
+        link.symlink_to(second, target_is_directory=True)
+        changed, _token = watcher.observe(link / "live.txt", token, startup=False)
+        assert changed
+        if watcher.backend != "inotify":
+            return
+        watcher._dirty.clear()
+        (second / "live.txt").write_text("three")
+        watcher._drain()
+        assert str(link / "live.txt") in watcher._dirty
+    finally:
+        watcher.close()
+
+
+def test_kernel_queue_overflow_is_dirty(tmp_path: Path):
+    path = tmp_path / "live.txt"
+    path.write_text("same")
+    watcher = DirectoryWatcher()
+    try:
+        watcher._watched.add(str(path))
+        watcher._apply(_Event(-1, _IN_Q_OVERFLOW, None, ""))
+        assert watcher._overflow
+        assert watcher._dirty == set()
+        changed, token = watcher.observe(path, "stale", startup=False)
+        assert changed
+        assert token == file_token(path)
+        assert watcher._overflow is False
+        ignored = tmp_path / "theme"
+        ignored.mkdir()
+        watcher._armed.add(str(ignored))
+        watcher._wd_path[7] = ignored
+        watcher._watched.add(str(ignored / "live.txt"))
+        watcher._apply(_Event(7, _IN_IGNORED, ignored, ""))
+        assert str(ignored) not in watcher._armed
+        assert 7 not in watcher._wd_path
+        assert str(ignored / "live.txt") in watcher._dirty
     finally:
         watcher.close()
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import threading
 import time
 from pathlib import Path
@@ -59,6 +60,21 @@ _LIGHT = {
     "ok": "#2f6b35",
     "warn": "#8a5a00",
     "danger": "#a3261d",
+}
+
+# Education's dark palette. A third distinct page colour for a directory swap.
+_NORD = {
+    "mode": "dark",
+    "bg": "#0f172a",
+    "bgRaised": "#1e293b",
+    "fg": "#f1f5f9",
+    "fgMuted": "#a3b1c6",
+    "accent": "#60a5fa",
+    "border": "#334155",
+    "ok": "#4ade80",
+    "warn": "#fbbf24",
+    "danger": "#f87171",
+    "selection": "#1e293b",
 }
 
 
@@ -498,7 +514,7 @@ def test_partial_dark_palette_fills_from_the_dark_praxis_palette(
     assert muted == base.package.modes["dark"]["fgMuted"]
 
 
-def test_unchanged_file_skips_the_stat_when_inotify_is_clean(
+def test_unchanged_signature_does_not_recompile(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -511,17 +527,25 @@ def test_unchanged_file_skips_the_stat_when_inotify_is_clean(
     watcher.backend = "inotify"
     watcher._dirty.clear()
     watcher._overflow = False
-    calls = {"n": 0}
-    real = omarchy._signature
+    signatures = {"n": 0}
+    loads = {"n": 0}
+    real_signature = omarchy._signature
+    real_load = omarchy._load
 
-    def wrapped(candidate: Path) -> str:
-        calls["n"] += 1
-        return real(candidate)
+    def wrapped_signature(candidate: Path) -> str:
+        signatures["n"] += 1
+        return real_signature(candidate)
 
-    monkeypatch.setattr(omarchy, "_signature", wrapped)
+    def wrapped_load(candidate: Path):
+        loads["n"] += 1
+        return real_load(candidate)
+
+    monkeypatch.setattr(omarchy, "_signature", wrapped_signature)
+    monkeypatch.setattr(omarchy, "_load", wrapped_load)
     try:
         assert installed() is not None
-        assert calls["n"] == 0
+        assert signatures["n"] == 1
+        assert loads["n"] == 0
     finally:
         watcher.backend = previous_backend
 
@@ -554,3 +578,158 @@ def test_hot_swap_is_audited_and_the_first_sight_is_not(
         assert payload["locked"] is False
     finally:
         db.close()
+
+
+def _replace_theme_dir(current: Path, payload: dict[str, object]) -> Path:
+    """Delete ``current/theme`` and move a new directory into its place.
+
+    This is what ``omarchy-theme-set`` does: the theme path is a real
+    directory, not a symlink that is re-pointed.
+    """
+    theme = current / "theme"
+    if theme.is_symlink():
+        theme.unlink()
+    elif theme.exists():
+        shutil.rmtree(theme)
+    incoming = current / "incoming"
+    if incoming.exists():
+        shutil.rmtree(incoming)
+    incoming.mkdir(parents=True)
+    _write(incoming / "praxis-prime.json", payload)
+    incoming.rename(theme)
+    return theme / "praxis-prime.json"
+
+
+def _serve(data_root: Path, bg: str) -> str:
+    theme = installed()
+    assert theme is not None
+    assert theme.package.modes["dark"]["bg"] == bg
+    css_path = f"/themes/{LIVE_ID}/{theme.package_hash}.css"
+    loaded = load_theme_asset(data_root, css_path)
+    assert loaded is not None
+    body, content_type = loaded
+    assert content_type.startswith("text/css")
+    assert bg.encode("ascii") in body
+    choice = resolve_theme(data_root, "default")
+    assert choice.theme_id == LIVE_ID
+    assert choice.installed.package.modes["dark"]["bg"] == bg
+    return css_path
+
+
+@pytest.mark.parametrize("backend", ["inotify", "poll"])
+def test_theme_directory_swaps_serve_each_palette(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    backend: str,
+):
+    current = tmp_path / "omarchy" / "current"
+    current.mkdir(parents=True)
+    json_path = _replace_theme_dir(current, _DARK)
+    _point(monkeypatch, json_path)
+    _choose(tmp_path)
+    watcher = omarchy._watcher()
+    if backend == "inotify" and watcher.backend != "inotify":
+        pytest.skip("this kernel has no inotify")
+    previous = watcher.backend
+    watcher.backend = backend
+    palettes = (_DARK, _LIGHT, _NORD, _DARK)
+    previous_css = ""
+    try:
+        for payload in palettes:
+            json_path = _replace_theme_dir(current, payload)
+            css_path = _serve(tmp_path, str(payload["bg"]))
+            if previous_css:
+                assert css_path != previous_css
+                assert load_theme_asset(tmp_path, previous_css) is None
+            previous_css = css_path
+        if backend != "inotify":
+            return
+        theme = current / "theme"
+        assert str(theme) in watcher._armed
+        assert str(current) in watcher._armed
+        watcher._dirty.clear()
+        json_path.write_text(json_path.read_text(encoding="utf-8"), encoding="utf-8")
+        watcher._drain()
+        assert str(json_path) in watcher._dirty
+    finally:
+        watcher.backend = previous
+
+
+@pytest.mark.parametrize("backend", ["inotify", "poll"])
+def test_refused_palette_recovers_on_the_next_directory_swap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    backend: str,
+):
+    current = tmp_path / "omarchy" / "current"
+    current.mkdir(parents=True)
+    refused = {
+        "bg": "#ffffff",
+        "bgRaised": "#ffffff",
+        "fg": "#ffffff",
+        "fgMuted": "#ffffff",
+        "accent": "#ffffff",
+        "border": "#ffffff",
+        "ok": "#ffffff",
+        "warn": "#ffffff",
+        "danger": "#ffffff",
+    }
+    json_path = _replace_theme_dir(current, refused)
+    _point(monkeypatch, json_path)
+    _choose(tmp_path)
+    watcher = omarchy._watcher()
+    if backend == "inotify" and watcher.backend != "inotify":
+        pytest.skip("this kernel has no inotify")
+    previous = watcher.backend
+    watcher.backend = backend
+    try:
+        assert installed() is None
+        choice = resolve_theme(tmp_path, "default")
+        assert choice.requested == "omarchy"
+        assert choice.theme_id == "smf.praxis"
+        for payload in (_DARK, _LIGHT, _NORD, _LIGHT):
+            _replace_theme_dir(current, payload)
+            _serve(tmp_path, str(payload["bg"]))
+    finally:
+        watcher.backend = previous
+
+
+@pytest.mark.parametrize("backend", ["inotify", "poll"])
+def test_repointed_theme_symlink_is_noticed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    backend: str,
+):
+    current = tmp_path / "omarchy" / "current"
+    current.mkdir(parents=True)
+    first = tmp_path / "themes" / "latte"
+    second = tmp_path / "themes" / "mocha"
+    first.mkdir(parents=True)
+    second.mkdir()
+    _write(first / "praxis-prime.json", _LIGHT)
+    _write(second / "praxis-prime.json", _DARK)
+    link = current / "theme"
+    link.symlink_to(first, target_is_directory=True)
+    _point(monkeypatch, link / "praxis-prime.json")
+    _choose(tmp_path)
+    watcher = omarchy._watcher()
+    if backend == "inotify" and watcher.backend != "inotify":
+        pytest.skip("this kernel has no inotify")
+    previous = watcher.backend
+    watcher.backend = backend
+    try:
+        _serve(tmp_path, "#f6f1e7")
+        link.unlink()
+        link.symlink_to(second, target_is_directory=True)
+        _serve(tmp_path, "#14110f")
+        if backend != "inotify":
+            return
+        watcher._dirty.clear()
+        (second / "praxis-prime.json").write_text(
+            (second / "praxis-prime.json").read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+        watcher._drain()
+        assert str(link / "praxis-prime.json") in watcher._dirty
+    finally:
+        watcher.backend = previous
