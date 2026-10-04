@@ -171,6 +171,10 @@ fonts stay OFL-1.1 and are not relicensed.
 | Inter (variable) | `praxis_prime/ui_themes/smf.medical/assets/fonts/Inter.woff2` | Copyright 2016 The Inter Project Authors (https://github.com/rsms/inter) | OFL-1.1 |
 | JetBrains Mono (variable) | `praxis_prime/ui_themes/smf.medical/assets/fonts/JetBrainsMono.woff2` | Copyright 2020 The JetBrains Mono Project Authors (https://github.com/JetBrains/JetBrainsMono) | OFL-1.1 |
 
+| Nunito (variable, weight 200–900) | `praxis_prime/ui_themes/smf.dental/assets/fonts/Nunito.woff2` | Copyright 2014 The Nunito Project Authors (https://github.com/googlefonts/nunito) | OFL-1.1 |
+| Figtree (variable, weight 300–900) | `praxis_prime/ui_themes/smf.dental/assets/fonts/Figtree.woff2` | Copyright 2022 The Figtree Project Authors (https://github.com/erikdkennedy/figtree) | OFL-1.1 |
+| JetBrains Mono (variable) | `praxis_prime/ui_themes/smf.dental/assets/fonts/JetBrainsMono.woff2` | Copyright 2020 The JetBrains Mono Project Authors (https://github.com/JetBrains/JetBrainsMono) | OFL-1.1 |
+
 ## Runtime components that are not bundled
 
 These are not shipped here. If a release later vendors source, or if a
@@ -228,3 +232,6 @@ upstream licence, kept beside the fonts.
 | `praxis_prime/ui_themes/smf.classical/assets/fonts/SourceCodePro.woff2` | `google/fonts` `ofl/sourcecodepro` | Version 1.026;hotconv 1.1.0;makeotfexe 2.6.0; google/fonts bd62bd8b4715f007af6905b0c9fd030f8410b289 (retrieved 2026-10) | OFL-1.1 | `smf.classical/assets/fonts/OFL.txt` |
 | `praxis_prime/ui_themes/smf.medical/assets/fonts/Inter.woff2` | `google/fonts` `ofl/inter` | Version 4.001;git-66647c0bb (retrieved 2026-10) | OFL-1.1 | `smf.medical/assets/fonts/OFL.txt` |
 | `praxis_prime/ui_themes/smf.medical/assets/fonts/JetBrainsMono.woff2` | `google/fonts` `ofl/jetbrainsmono` | Version 2.211 (retrieved 2026-10) | OFL-1.1 | `smf.medical/assets/fonts/OFL.txt` |
+| `praxis_prime/ui_themes/smf.dental/assets/fonts/Nunito.woff2` | `google/fonts` `ofl/nunito` | Version 3.602; google/fonts 8b0a1d0f5983c89bc2b93f1b5fb55f9e252744b5 (retrieved 2026-10) | OFL-1.1 | `smf.dental/assets/fonts/OFL.txt` |
+| `praxis_prime/ui_themes/smf.dental/assets/fonts/Figtree.woff2` | `google/fonts` `ofl/figtree` | Version 2.002; google/fonts a60a77e14f28abd4ef243a1b5dfc48df0cec5205 (retrieved 2026-10) | OFL-1.1 | `smf.dental/assets/fonts/OFL.txt` |
+| `praxis_prime/ui_themes/smf.dental/assets/fonts/JetBrainsMono.woff2` | `google/fonts` `ofl/jetbrainsmono` | Version 2.211 (retrieved 2026-10) | OFL-1.1 | `smf.dental/assets/fonts/OFL.txt` |
