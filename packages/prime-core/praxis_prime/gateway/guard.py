@@ -1,16 +1,19 @@
 """Host and Origin allowlist for the loopback gateway.
 
 A browser can be pointed at a public name that rebinds to 127.0.0.1.
-The gateway only accepts the names it actually bound: ``127.0.0.1`` and
-``localhost``. The check does not resolve DNS. A non-loopback listen
-address is still refused in ``parse_listen`` before the socket exists.
+The gateway only accepts the names it actually bound: ``127.0.0.1``,
+``localhost``, and bracketed IPv6 loopback. The check does not resolve
+DNS. A non-loopback listen address is still refused in ``parse_listen``
+before the socket exists.
 
 docs/blueprint-addendum-2026-09.md §4.2.
 """
 
 from __future__ import annotations
 
-_ALLOWED = frozenset({"127.0.0.1", "localhost"})
+import ipaddress
+
+_ALLOWED = frozenset({"127.0.0.1", "localhost", "::1"})
 _MUTATING = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 MAX_BODY = 1_000_000
 
@@ -104,7 +107,11 @@ def _origin_ok(origin: str, bound_port: int) -> bool:
 def _split_host(value: str) -> tuple[str, int | None] | None:
     if not value or len(value) > 253:
         return None
-    if any(ord(char) < 33 or char in "@\\/?#\"'[]" for char in value):
+    if any(ord(char) < 33 or char in "@\\/?#\"'" for char in value):
+        return None
+    if value.startswith("["):
+        return _split_bracket_host(value)
+    if any(char in value for char in "[]"):
         return None
     if value.count(":") > 1:
         return None
@@ -120,3 +127,35 @@ def _split_host(value: str) -> tuple[str, int | None] | None:
     if not host or host.endswith(".") or ":" in host:
         return None
     return host.casefold(), port
+
+
+def _split_bracket_host(value: str) -> tuple[str, int | None] | None:
+    """Accept bracketed loopback only. Other IPv6 hosts stay refused.
+
+    The check parses the address. It does not resolve DNS.
+    """
+    end = value.find("]")
+    if end < 2:
+        return None
+    inner = value[1:end]
+    rest = value[end + 1 :]
+    if not inner or any(char in inner for char in "[]"):
+        return None
+    port: int | None = None
+    if rest:
+        if not rest.startswith(":") or not rest[1:].isdigit():
+            return None
+        port = int(rest[1:])
+        if port > 65535:
+            return None
+    try:
+        address = ipaddress.ip_address(inner)
+    except ValueError:
+        return None
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+        address = address.ipv4_mapped
+    if not address.is_loopback:
+        return None
+    if address.version == 6:
+        return "::1", port
+    return str(address), port

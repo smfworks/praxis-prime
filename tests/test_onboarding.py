@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from praxis_prime.accounts.db import AccountError, AccountStore
+from praxis_prime.onboarding.configio import backup_config
 from praxis_prime.onboarding.messages import CLOUD_WARNING
 from praxis_prime.onboarding.probe import FetchResult, ProbeError, fetch
 from praxis_prime.onboarding.record import read_record
@@ -196,6 +197,84 @@ def test_allowlist_and_skip_and_dials(tmp_path: Path):
     assert service.status(owner_exists=True)["cloudWarning"] == CLOUD_WARNING
     again = service.set_dials({})
     assert again["hipaa"] == "monitor"
+
+
+def test_named_unverified_provider_says_to_run_setup(tmp_path: Path):
+    from praxis_prime.router.types import ChatRequest
+
+    config = tmp_path / "config.toml"
+    config.write_text('[models]\nprimary = "ollama:qwen3:32b"\n', encoding="utf-8")
+    runtime = build_runtime(
+        env={},
+        config_path=config,
+        data_path=tmp_path / "prime.db",
+        cwd=tmp_path,
+    )
+    try:
+        with pytest.raises(InferenceNotConfigured) as exc:
+            list(runtime.router.iter_stream(ChatRequest(model="x", messages=())))
+    finally:
+        runtime.close()
+    text = str(exc.value)
+    assert "ollama:qwen3:32b" in text
+    assert "praxis-prime setup" in text
+    assert text != INFERENCE_NOT_CONFIGURED
+
+
+def test_config_backups_keep_the_newest_five(tmp_path: Path):
+    path = tmp_path / "config.toml"
+    path.write_text("x = 1\n", encoding="utf-8")
+    made = [backup_config(path) for _ in range(7)]
+    assert all(item is not None for item in made)
+    left = sorted(path.parent.glob("config.toml.bak-*"))
+    assert left == sorted(item for item in made if item is not None)[-5:]
+    assert all((item.stat().st_mode & 0o777) == 0o600 for item in left)
+
+
+def test_stored_key_stays_on_its_base_url(tmp_path: Path):
+    seen: list[tuple[str, dict[str, str]]] = []
+    events: list[tuple[str, dict[str, object]]] = []
+
+    def fetch(method: str, url: str, **kwargs: object) -> FetchResult:
+        headers = kwargs.get("headers")
+        seen.append((url, dict(headers) if isinstance(headers, dict) else {}))
+        return _fetch(method, url, **kwargs)
+
+    service = OnboardingService(config_dir=tmp_path, data_dir=tmp_path / "data", fetcher=fetch)
+    service.audit = lambda kind, summary, payload: events.append((kind, payload))
+    service.save(
+        Selection(
+            lane="local",
+            provider="llamacpp",
+            model="local-model",
+            base_url="http://127.0.0.1:9",
+            api_key="sk-stored",
+        )
+    )
+    seen.clear()
+    events.clear()
+    with pytest.raises(OnboardingError, match="re-enter the API key") as moved:
+        service.test(provider="llamacpp", model="local-model", base_url="http://192.0.2.20:9")
+    assert moved.value.code == "usage"
+    assert seen == []
+    assert events[0][1]["host"] == "192.0.2.20"
+    assert "sk-stored" not in json.dumps(events)
+    with pytest.raises(OnboardingError, match="re-enter the API key"):
+        service.save(
+            Selection(
+                lane="local",
+                provider="vllm",
+                model="local-model",
+                base_url="http://192.0.2.21:9",
+                replace=True,
+            )
+        )
+    assert seen == []
+    seen.clear()
+    same = service.test(provider="llamacpp", model="local-model", base_url="http://127.0.0.1:9/")
+    assert same["ok"] is True
+    assert any(item[1].get("authorization") == "Bearer sk-stored" for item in seen)
+    assert any(payload.get("host") == "127.0.0.1" for _kind, payload in events)
 
 
 def test_probe_refuses_metadata_and_credential_urls():

@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
+import sqlite3
 import threading
 import time
 from typing import Any
 
-from praxis_prime.accounts.db import session_cookie
+from praxis_prime.accounts.db import AccountError, session_cookie
 from praxis_prime.accounts.factors import Factors
 from praxis_prime.accounts.oidc import OidcError, add_provider, get_provider, secret_name
 from praxis_prime.accounts.roles import sees_all_profiles
@@ -19,11 +21,13 @@ from praxis_prime.onboarding.record import inference_ready
 from praxis_prime.onboarding.service import OnboardingError, OnboardingService, Selection
 from praxis_prime.onboarding.token import HEADER_NAME, invalidate_first_run_token, token_matches
 from praxis_prime.paths import state_dir
-from praxis_prime.profiles.home import create_profile, list_profiles
 
 _WINDOW_SECONDS = 900.0
 _FAILURE_LIMIT = 5
+_OWNER_WAIT_SECONDS = 8.0
+_OWNER_WAIT_STEP = 0.05
 _LOOPBACK_PEERS = {"127.0.0.1", "::1"}
+_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
 
 
 class SetupFailures:
@@ -159,28 +163,23 @@ def _token_gate(
     peer: str,
 ) -> tuple[int, dict[str, object]] | None:
     host = _host_name(headers.get("host", ""))
-    if server.host != "127.0.0.1" or peer not in _LOOPBACK_PEERS or host not in {
-        "127.0.0.1",
-        "localhost",
-        "::1",
-    }:
+    if server.host != "127.0.0.1" or peer not in _LOOPBACK_PEERS or host not in _LOOPBACK_HOSTS:
         return 403, _error(
             "forbidden",
             "First-run setup from another machine is refused. Use `praxis-prime setup`.",
         )
     if server.config_dir is None:
         return 403, _error("forbidden", "Use `praxis-prime setup` from this computer.")
-    failures: SetupFailures = server.setup_failures
-    if failures.blocked(peer):
-        return 429, _error("rate_limited", "too many setup attempts; wait and try again")
     presented = headers.get(HEADER_NAME, "").strip()
     if not presented:
         return 401, _error("unauthorized", "first-run token required")
-    if not token_matches(server.config_dir, presented):
-        if failures.record(peer):
-            return 429, _error("rate_limited", "too many setup attempts; wait and try again")
-        return 401, _error("unauthorized", "first-run token was rejected")
-    return None
+    if token_matches(server.config_dir, presented):
+        return None
+    # ``peer`` is the socket address. X-Forwarded-For is not a peer.
+    failures: SetupFailures = server.setup_failures
+    if failures.blocked(peer) or failures.record(peer):
+        return 429, _error("rate_limited", "too many setup attempts; wait and try again")
+    return 401, _error("unauthorized", "first-run token was rejected")
 
 
 def _admin_status(server: Any) -> dict[str, object]:
@@ -267,6 +266,9 @@ def _create_owner(
     payload: dict[str, object],
     extras: list[tuple[str, str]],
 ) -> tuple[int, dict[str, object]]:
+    from praxis_prime.onboarding.owner import clear_discarded_owner, create_owner_account
+    from praxis_prime.profiles.migrate import MigrationBusy
+
     username = payload.get("username", "")
     password = payload.get("password", "")
     display = payload.get("displayName", "")
@@ -274,54 +276,124 @@ def _create_owner(
         return 400, _error("bad_request", "username and password must be strings")
     if not isinstance(display, str):
         display = ""
+    if server.data_root is None or server.config_dir is None:
+        return 400, _error("bad_request", "data directory is not set")
     store = server.accounts
+    _release_owned_database(server)
     try:
-        account = store.create_account(
-            username_text=username,
+        created = create_owner_account(
+            store,
+            server.data_root,
+            server.config_dir,
+            username=username,
             password=password,
             display_name=display or username,
-            role="owner",
+            daemon_running=lambda: False,
         )
-    except Exception as exc:
+    except MigrationBusy:
+        if _wait_for_owner(store):
+            invalidate_first_run_token(server.config_dir)
+            return 409, _error("conflict", "an owner account already exists")
+        return 503, _error(
+            "unavailable",
+            "prime.db is open, so this setup cannot move the existing data. "
+            "Stop praxis-primed and run `praxis-prime setup`.",
+        )
+    except AccountError as exc:
         message = str(exc)
         if "already exists" in message:
-            if server.config_dir is not None:
-                invalidate_first_run_token(server.config_dir)
-            code = "conflict" if "owner" in message else "conflict"
-            return 409, _error(code, message)
+            invalidate_first_run_token(server.config_dir)
+            return 409, _error("conflict", message)
         return 400, _error("bad_request", message)
-    if server.config_dir is not None:
-        invalidate_first_run_token(server.config_dir)
-    restart = False
-    if server.data_root is not None and not list_profiles(server.data_root):
-        home = create_profile(server.data_root, "default")
-        store.set_membership(account.id, home.profile_id, "owner")
-        restart = True
-    if server.audit is not None:
+    except OSError as exc:
+        return 503, _error("unavailable", str(exc))
+    account = created.account
+    try:
+        _audit_owner_created(server.data_root, account)
+    except (OSError, sqlite3.Error, RuntimeError, ValueError):
         try:
-            server.audit.append(
-                session_id=None,
-                kind="auth.login",
-                summary="owner created from first-run setup",
-                payload={
-                    "actor_account": account.id,
-                    "username": account.username,
-                    "role": account.role,
-                    "method": "setup",
-                },
-                actor_account=account.id,
-            )
-        except (OSError, RuntimeError):
-            store.discard_account(account.id)
-            return 503, _error("unavailable", "audit log is busy; the owner was not kept")
+            clear_discarded_owner(server.data_root, account.id)
+        except OSError:
+            pass
+        store.discard_account(account.id)
+        return 503, _error("unavailable", "audit log is busy; the owner was not kept")
+    invalidate_first_run_token(server.config_dir)
     issued = store.open_session(account)
     extras.append(("Set-Cookie", session_cookie(issued.token, max_age=issued.max_age)))
     return 201, {
         "ok": True,
         "account": account.public(),
         "csrfToken": issued.csrf_token,
-        "restartRequired": restart,
+        "restartRequired": not created.profiles_existed,
     }
+
+
+def _wait_for_owner(store: Any) -> bool:
+    """True when a peer finishes creating the owner while this call waits."""
+    deadline = time.monotonic() + _OWNER_WAIT_SECONDS
+    while time.monotonic() < deadline:
+        if store.has_accounts():
+            return True
+        time.sleep(_OWNER_WAIT_STEP)
+    return bool(store.has_accounts())
+
+
+def _release_owned_database(server: Any) -> None:
+    """Drop this process's flock on prime.db so the shared migration can move it."""
+    runtime = getattr(getattr(server, "agent", None), "runtime", None)
+    audit = getattr(server, "audit", None)
+    db = getattr(runtime, "db", None) if runtime is not None else None
+    if audit is not None:
+        try:
+            audit.close()
+        except (OSError, sqlite3.Error, RuntimeError, ValueError):
+            pass
+        server.audit = None
+        if runtime is not None and getattr(runtime, "audit", None) is audit:
+            runtime.audit = None
+        if db is None:
+            db = getattr(audit, "db", None)
+    if db is None:
+        return
+    try:
+        db.close()
+    except (OSError, sqlite3.Error, RuntimeError, ValueError):
+        release = getattr(db, "_release_lock", None)
+        if callable(release):
+            try:
+                release()
+            except (OSError, sqlite3.Error, RuntimeError, ValueError):
+                pass
+    if runtime is not None:
+        runtime.db = None
+
+
+def _audit_owner_created(data_root: Any, account: Any) -> None:
+    """Append the owner row where the profile reader looks after the move."""
+    from praxis_prime.audit.log import AuditLog
+    from praxis_prime.profiles.home import ProfileHome
+    from praxis_prime.state import StateDB
+
+    db = StateDB(ProfileHome(data_root, "default").db_path)
+    log = AuditLog(db)
+    try:
+        log.append(
+            session_id=None,
+            kind="auth.login",
+            summary="owner created from first-run setup",
+            payload={
+                "actor_account": account.id,
+                "username": account.username,
+                "role": account.role,
+                "method": "setup",
+                "profile": "default",
+            },
+            actor_account=account.id,
+            profile="default",
+        )
+    finally:
+        log.close()
+        db.close()
 
 
 def _require_step_up(server: Any, principal: Any, payload: dict[str, object]) -> None:
@@ -443,10 +515,22 @@ def _error(code: str, message: str) -> dict[str, object]:
 
 
 def _host_name(value: str) -> str:
-    """Hostname only. ``[::1]:port`` must not split on the inner colons."""
+    """Hostname only. Bracketed loopback normalizes to ``::1`` or ``127.0.0.1``.
+
+    The check parses the address. It does not resolve DNS.
+    """
     text = value.strip().lower()
     if text.startswith("["):
         end = text.find("]")
-        if end != -1:
-            return text[1:end]
-    return text.split(":", 1)[0]
+        text = text[1:end] if end != -1 else text
+    else:
+        text = text.split(":", 1)[0]
+    try:
+        address = ipaddress.ip_address(text)
+    except ValueError:
+        return text
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+        address = address.ipv4_mapped
+    if address.is_loopback:
+        return "::1" if address.version == 6 else "127.0.0.1"
+    return text

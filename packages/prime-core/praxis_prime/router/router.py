@@ -18,6 +18,7 @@ from praxis_prime.router.types import (
     ProviderUnreachable,
     RouterExhausted,
     StreamEvent,
+    unverified_provider_message,
 )
 
 
@@ -60,7 +61,7 @@ class ModelRouter:
         if not self.chain:
             raise InferenceNotConfigured()
         if self.require_verified and self.chain[0].spec() not in self.verified_specs:
-            raise InferenceNotConfigured()
+            raise InferenceNotConfigured(unverified_provider_message(self.chain[0].spec()))
         errors: list[ProviderUnreachable] = []
         for index, ref in enumerate(self.chain):
             provider = self.providers.get(ref.provider)

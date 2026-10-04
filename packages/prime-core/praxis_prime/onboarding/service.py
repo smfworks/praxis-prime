@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from praxis_prime.channels.secrets import secret_file, write_secret
 from praxis_prime.onboarding.configio import backup_config, load_document, write_document
@@ -158,7 +159,7 @@ class OnboardingService:
         if not provider_id or not model_name:
             raise OnboardingError("a provider and a model are required", code="usage")
         url = _base_url(provider_id, base_url, lane)
-        key = api_key.strip() or self._existing_key(provider_id)
+        key = self._key_for(provider_id, url, api_key)
         if provider_id in _REQUIRED_KEY and not key:
             raise OnboardingError(
                 f"{provider_id} needs an API key in the secrets file or --api-key-env",
@@ -236,6 +237,7 @@ class OnboardingService:
                 "provider": provider,
                 "model": model,
                 "lane": lane,
+                "host": _host_of(base),
                 "tested_at": _now(),
                 "actor": selection.actor,
             },
@@ -456,6 +458,49 @@ class OnboardingService:
             "ollama": "",
         }.get(provider, "")
 
+    def _key_for(self, provider: str, base: str, supplied: str) -> str:
+        """Use a stored key only with the base URL it was saved for.
+
+        A different host has to receive the key again in this request.
+        The stored value is never attached to that request.
+        """
+        if supplied.strip():
+            return supplied.strip()
+        stored = self._existing_key(provider).strip()
+        if not stored:
+            return ""
+        bound = self._bound_base(provider)
+        if bound and _normalize_base(base) == bound:
+            return stored
+        self._audit(
+            "provider.test",
+            "provider test refused",
+            {"provider": provider, "host": _host_of(base), "status": "refused"},
+        )
+        raise OnboardingError(
+            "re-enter the API key to use a different base URL",
+            code="usage",
+        )
+
+    def _bound_base(self, provider: str) -> str:
+        """Base URL the stored key may be sent to. Empty means never send it."""
+        key_name = KEY_NAMES.get(provider, "")
+        if not key_name:
+            return ""
+        record = read_record(self.config_dir)
+        record_provider = str(record.get("provider", "") or "").strip().lower()
+        record_base = str(record.get("base_url", "") or "").strip()
+        if record_base and KEY_NAMES.get(record_provider, "") == key_name:
+            return _normalize_base(record_base)
+        settings = self._settings()
+        if provider == "ollama":
+            return _normalize_base(settings.ollama_host)
+        if provider in {"llamacpp", "vllm", "lmstudio", "openai-compatible"}:
+            return _normalize_base(settings.openai_compatible_base_url)
+        if provider in CLOUD_BASES:
+            return _normalize_base(CLOUD_BASES[provider])
+        return ""
+
     def _reported_context(
         self,
         fetch: Fetcher,
@@ -556,6 +601,7 @@ class OnboardingService:
             {
                 "provider": provider,
                 "model": model,
+                "host": _host_of(url),
                 "tool_call": tools,
                 "status": result.status,
                 "tested_at": _now(),
@@ -607,6 +653,36 @@ def _base_url(provider: str, base_url: str, lane: str) -> str:
     if provider in defaults:
         return defaults[provider]
     raise OnboardingError("a base URL is required for this provider", code="usage")
+
+
+def _normalize_base(url: str) -> str:
+    """Compare scheme, host, port, and path. ``http`` and ``https`` stay distinct."""
+    text = url.strip()
+    if not text:
+        return ""
+    if "://" not in text:
+        text = "http://" + text
+    parts = urlsplit(text)
+    host = (parts.hostname or "").lower()
+    if not host:
+        return ""
+    if ":" in host:
+        host = f"[{host}]"
+    scheme = parts.scheme.lower()
+    port = parts.port
+    if (scheme == "http" and port == 80) or (scheme == "https" and port == 443):
+        port = None
+    netloc = host if port is None else f"{host}:{port}"
+    path = parts.path.rstrip("/")
+    query = f"?{parts.query}" if parts.query else ""
+    return f"{scheme}://{netloc}{path}{query}"
+
+
+def _host_of(url: str) -> str:
+    text = url.strip()
+    if text and "://" not in text:
+        text = "http://" + text
+    return (urlsplit(text).hostname or "").lower()
 
 
 def _locality(lane: str, base: str) -> str:

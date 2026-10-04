@@ -5,7 +5,9 @@ from __future__ import annotations
 import io
 import json
 from argparse import Namespace
+from contextlib import nullcontext
 from pathlib import Path
+from unittest import mock
 
 from praxis_prime.onboarding.cli import setup_command
 from praxis_prime.onboarding.probe import FetchResult
@@ -86,15 +88,31 @@ def _run(
     env: dict[str, str] | None = None,
     *,
     tty: bool = False,
+    prompts: list[str] | None = None,
 ) -> tuple[int, str]:
+    source = _Tty(stdin) if tty else io.StringIO(stdin)
     out = io.StringIO()
-    code = setup_command(
-        args,
-        stdin=_Tty(stdin) if tty else io.StringIO(stdin),
-        stdout=out,
-        env=env if env is not None else _env(tmp_path),
-        fetcher=_fetch,
-    )
+    recorded = prompts if prompts is not None else []
+
+    def fake_getpass(prompt: str = "", stream: io.TextIOBase | None = None) -> str:
+        recorded.append(prompt)
+        if stream is not None:
+            stream.write(prompt)
+            stream.flush()
+        line = source.readline()
+        if line == "":
+            raise EOFError
+        return line.rstrip("\n")
+
+    patch = mock.patch("getpass.getpass", fake_getpass) if tty else nullcontext()
+    with patch:
+        code = setup_command(
+            args,
+            stdin=source,
+            stdout=out,
+            env=env if env is not None else _env(tmp_path),
+            fetcher=_fetch,
+        )
     return code, out.getvalue()
 
 
@@ -234,12 +252,16 @@ def test_interactive_wizard_shows_current_values_and_creates_an_owner(tmp_path: 
             "",
         ]
     )
-    code, text = _run(tmp_path, _args(tmp_path), script, env, tty=True)
+    prompts: list[str] = []
+    code, text = _run(tmp_path, _args(tmp_path), script, env, tty=True, prompts=prompts)
     assert code == 0, text
     assert "(unset)" in text
     assert "nothing is preselected" in text
     assert "created owner ada" in text
     assert "Inference ready" in text
+    assert "Owner password: " in prompts
+    assert "API key (blank to keep the stored key): " in prompts
+    assert "correct-horse" not in text
     assert read_first_run_token(config) == ""
     settings = load_settings({}, config_path=config / "config.toml")
     assert settings.model_spec == "llamacpp:local-model"

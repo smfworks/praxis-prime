@@ -101,6 +101,14 @@ INFERENCE_NOT_CONFIGURED = (
 )
 
 
+def unverified_provider_message(spec: str) -> str:
+    """A config names a provider that has not passed the setup test."""
+    return (
+        f"{spec} is named in the config and has not been verified. "
+        "Run `praxis-prime setup` to test it and mark it ready."
+    )
+
+
 class InferenceNotConfigured(RuntimeError):
     """Chat was asked to run before the operator chose and verified a provider."""
 

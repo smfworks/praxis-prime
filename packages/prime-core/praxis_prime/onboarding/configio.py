@@ -10,6 +10,9 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from praxis_prime.config import default_config_document, dumps_toml
+from praxis_prime.statfile import StatKind, lstat_kind
+
+_BACKUP_KEEP = 5
 
 
 def load_document(path: Path) -> dict[str, object]:
@@ -32,7 +35,22 @@ def backup_config(path: Path) -> Path | None:
         suffix += 1
         dest = path.with_name(f"config.toml.bak-{stamp}-{suffix}")
     _write_private(dest, path.read_bytes())
+    _prune_backups(path)
     return dest
+
+
+def _prune_backups(path: Path) -> None:
+    """Keep the newest ``config.toml.bak-*`` files. Names sort by time."""
+    found = [
+        item
+        for item in path.parent.glob(f"{path.name}.bak-*")
+        if lstat_kind(item) is StatKind.FILE
+    ]
+    for item in sorted(found)[:-_BACKUP_KEEP]:
+        try:
+            item.unlink()
+        except OSError:
+            continue
 
 
 def write_document(path: Path, document: Mapping[str, object], *, previous: str = "") -> None:

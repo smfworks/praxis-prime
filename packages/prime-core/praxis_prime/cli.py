@@ -99,7 +99,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     commands.add_parser(
         "doctor",
-        help="Check Python, OS (Ubuntu, Arch, or Omarchy), Wayland vs X11, and Ollama.",
+        help="Check Python, OS (Ubuntu, Arch, or Omarchy), Wayland vs X11, and the model provider.",
     )
 
     config = commands.add_parser(

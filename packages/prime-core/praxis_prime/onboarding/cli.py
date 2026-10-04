@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
 import os
 import sys
@@ -178,7 +179,7 @@ def _interactive_owner(args, stdin, stdout, env) -> int:
         stdout.write("An owner account already exists. It was left in place.\n")
         return 0
     username = _ask(stdin, stdout, "Owner username: ")
-    password = _ask(stdin, stdout, "Owner password: ")
+    password = _secret(stdin, stdout, "Owner password: ")
     if not username or not password:
         stdout.write("Owner was not created.\n")
         return 2
@@ -206,7 +207,7 @@ def _interactive_models(service, stdin, stdout, status: dict[str, object]) -> No
     provider = _ask(stdin, stdout, "Provider id (for example ollama, openai, xai): ")
     model = _ask(stdin, stdout, "Primary model id: ")
     base = _ask(stdin, stdout, "Base URL (blank for the preset): ")
-    key = _ask(stdin, stdout, "API key (blank to keep the stored key): ")
+    key = _secret(stdin, stdout, "API key (blank to keep the stored key): ")
     utility = _ask(stdin, stdout, "Utility model (blank to skip): ")
     vision = _ask(stdin, stdout, "Vision model (blank to skip): ")
     judge = _ask(stdin, stdout, "Decision Engine judge (blank to skip): ")
@@ -278,7 +279,8 @@ def _create_scripted_owner(args, stdin, stdout, env: Mapping[str, str]) -> int:
 
 
 def _create_owner(args, env, username: str, password: str, stdout) -> int:
-    from praxis_prime.profiles.migrate import MigrationBusy, migrate_single_user, migrate_under_lock
+    from praxis_prime.onboarding.owner import create_owner_account
+    from praxis_prime.profiles.migrate import MigrationBusy
 
     root = _data(args, env)
     config = _config(args, env)
@@ -288,25 +290,14 @@ def _create_owner(args, env, username: str, password: str, stdout) -> int:
             invalidate_first_run_token(config)
             stdout.write("praxis-prime setup: an owner already exists. It was left in place.\n")
             return 0
-        result = migrate_under_lock(
+        create_owner_account(
+            store,
             root,
             config,
-            owner_account="",
+            username=username,
+            password=password,
             daemon_running=lambda: _daemon_running(env),
         )
-        account = store.create_account(
-            username_text=username,
-            password=password,
-            display_name=username,
-            role="owner",
-        )
-        result = migrate_single_user(
-            root,
-            config,
-            owner_account=account.id,
-            daemon_running=lambda: False,
-        )
-        store.set_membership(account.id, result.profile_id, "owner")
     except (AccountError, MigrationBusy, OSError) as exc:
         stdout.write(f"praxis-prime setup: {exc}\n")
         return 2
@@ -383,6 +374,18 @@ def _ask(stdin, stdout, prompt: str) -> str:
     if line == "":
         raise EOFError
     return line.rstrip("\n")
+
+
+def _secret(stdin, stdout, prompt: str) -> str:
+    """Read a secret. A terminal uses getpass so the value is not echoed."""
+    if not _isatty(stdin):
+        return _ask(stdin, stdout, prompt)
+    previous = sys.stdin
+    sys.stdin = stdin
+    try:
+        return getpass.getpass(prompt, stream=stdout)
+    finally:
+        sys.stdin = previous
 
 
 def _isatty(stdin) -> bool:
