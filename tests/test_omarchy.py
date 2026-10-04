@@ -14,7 +14,7 @@ import pytest
 from tests.test_web_api import _accounts, _raw, _raw_bytes
 
 from praxis_prime.gateway.themes import load_theme_asset
-from praxis_prime.profiles.home import create_profile
+from praxis_prime.profiles.home import ProfileHome, create_profile
 from praxis_prime.state import StateDB
 from praxis_prime.themes import omarchy
 from praxis_prime.themes.color import contrast_ratio, from_oklch, parse_color
@@ -578,6 +578,43 @@ def test_hot_swap_is_audited_and_the_first_sight_is_not(
         assert payload["locked"] is False
     finally:
         db.close()
+
+
+def test_select_omarchy_live_normalises_and_serves_css(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    path = tmp_path / "praxis-prime.json"
+    _point(monkeypatch, path)
+    _write(path, _DARK)
+    server, host, _runtime = _accounts(tmp_path, profile="default")
+    try:
+        port = server.bound_port
+        headers = {
+            "Authorization": "Bearer test-token",
+            "Content-Type": "application/json",
+            "X-Praxis-Profile": "default",
+        }
+        body = json.dumps(
+            {"id": "omarchy.live", "mode": "dark", "profile": "default"}
+        ).encode()
+        status, _headers, selected = _raw(
+            port, "POST", "/v1/themes/select", payload=body, extra=headers
+        )
+        assert status == 200
+        assert selected["requested"] == "omarchy"
+        assert selected["id"] == LIVE_ID
+        css = selected["css"]
+        assert isinstance(css, str)
+        status, _headers, raw = _raw_bytes(port, "GET", css)
+        assert status == 200
+        assert b"#14110f" in raw
+        stored = ProfileHome(tmp_path / "data", "default").config_path.read_text(encoding="utf-8")
+        assert 'id = "omarchy"' in stored
+        assert "omarchy.live" not in stored
+    finally:
+        server.shutdown()
+        host.close()
 
 
 def _replace_theme_dir(current: Path, payload: dict[str, object]) -> Path:

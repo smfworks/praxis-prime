@@ -3,9 +3,10 @@
 Precedence is admin lock, then the profile choice, then the device mode
 (``system``, which follows ``prefers-color-scheme`` in the stylesheet), then
 ``smf.praxis``. The Omarchy live theme is used only when the profile chose
-``omarchy`` and the rendered file compiles. A lock also wins on mode when
-the lock names one. Device preference is not a stored theme id. ``omarchy``
-and ``omarchy.live`` cannot be locked, because the file can change.
+``omarchy`` and the rendered file compiles. Selecting ``omarchy.live`` is
+stored as ``omarchy``. A lock also wins on mode when the lock names one.
+Device preference is not a stored theme id. ``omarchy`` and ``omarchy.live``
+cannot be locked, because the file can change.
 """
 
 from __future__ import annotations
@@ -150,6 +151,10 @@ def _audit_activate(data_root: Path, choice: ThemeChoice) -> None:
 
 
 def set_profile_theme(data_root: Path, profile: str, theme_id: str, mode: str) -> ThemeChoice:
+    # The stylesheet id is omarchy.live. The stored profile choice is omarchy,
+    # which is what the CSS gate counts. Saving the stylesheet id 404s that CSS.
+    if theme_id == LIVE_ID:
+        theme_id = "omarchy"
     if mode not in MODE_CHOICES:
         raise ThemeError(
             "unknown mode",
