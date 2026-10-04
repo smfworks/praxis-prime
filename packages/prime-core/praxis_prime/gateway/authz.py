@@ -253,8 +253,8 @@ def login(
             "mfaToken": token,
             "methods": ["totp", "recovery"],
         }, []
-    # Write the audit row before the session exists. A locked prime.db then
-    # returns 503 and does not leave an orphan session.
+    # Write the audit row before the session exists. A locked audit database
+    # then returns 503 and does not leave an orphan session.
     store.clear_failures(account.id)
     if not _audit_or_unavailable(
         audit,

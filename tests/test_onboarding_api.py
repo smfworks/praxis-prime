@@ -754,10 +754,17 @@ def test_web_owner_reopens_the_profile_database(tmp_path: Path):
             json.dumps({"username": "ada", "password": _PASSWORD}).encode(),
         )
         assert status == 200, logged
-        rows = runtime.db.conn.execute(
+        profile_rows = runtime.db.conn.execute(
             "SELECT kind, summary FROM audit_events WHERE kind = 'auth.login'"
         ).fetchall()
-        assert any(row["summary"] == "login" for row in rows)
+        assert any(row["summary"] == "owner created from first-run setup" for row in profile_rows)
+        assert all(row["summary"] != "login" for row in profile_rows)
+        assert server.audit is not runtime.audit
+        assert Path(server.audit.db.path) == data / "audit.db"
+        login_rows = server.audit._conn.execute(
+            "SELECT summary FROM audit_events WHERE kind = 'auth.login'"
+        ).fetchall()
+        assert any(row["summary"] == "login" for row in login_rows)
         status, routines, _extras = _call(
             server,
             "GET",
@@ -765,9 +772,71 @@ def test_web_owner_reopens_the_profile_database(tmp_path: Path):
             extra_headers=_bearer(server),
         )
         assert status == 200, routines
-        runtime.close()
     finally:
+        server.shutdown()
+        runtime.close()
         store.close()
+
+
+def test_owner_creation_pauses_other_requests_and_keeps_health(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from praxis_prime.onboarding import owner as owner_mod
+
+    config = tmp_path / "config"
+    store = AccountStore(tmp_path / "accounts.db")
+    server, runtime = _running(tmp_path, store, config)
+    entered = threading.Event()
+    release = threading.Event()
+    original = owner_mod.create_owner_account
+
+    def blocked(*args: object, **kwargs: object) -> object:
+        entered.set()
+        if not release.wait(5):
+            raise TimeoutError("owner creation was not released")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(owner_mod, "create_owner_account", blocked)
+    token = ensure_first_run_token(config)
+    box: dict[str, object] = {}
+
+    def create() -> None:
+        box["result"] = _call(
+            server, "POST", "/v1/onboarding/owner", _owner("ada"), token=token
+        )
+
+    thread = threading.Thread(target=create)
+    thread.start()
+    assert entered.wait(5)
+    try:
+        assert server.setup_in_progress is True
+        assert server.restart_required is False
+        status, health, extras = _call(server, "GET", "/health")
+        assert status == 200, health
+        assert health == {"ok": True, "service": "praxis-primed"}
+        assert extras == []
+        status, paused, extras = _call(server, "GET", "/v1/routines")
+        assert status == 503, paused
+        assert paused["error"]["message"] == "Setup is in progress. Retry shortly."
+        assert "Restart praxis-primed" not in str(paused["error"]["message"])
+        assert ("Retry-After", "1") in extras
+    finally:
+        release.set()
+        thread.join(timeout=5)
+    result = box["result"]
+    assert isinstance(result, tuple)
+    status, body, _extras = result
+    assert status == 201, body
+    assert body["restartRequired"] is False
+    assert server.setup_in_progress is False
+    assert server.restart_required is False
+    server.restart_required = True
+    status, blocked_health, _extras = _call(server, "GET", "/health")
+    assert status == 503, blocked_health
+    assert "Restart praxis-primed" in str(blocked_health["error"]["message"])
+    server.shutdown()
+    runtime.close()
+    store.close()
 
 
 def test_runtime_close_tolerates_a_missing_audit_log(tmp_path: Path):

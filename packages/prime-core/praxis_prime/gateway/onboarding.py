@@ -319,58 +319,61 @@ def _create_owner_holding_gate(
         if _holds_legacy_database(server):
             _release_owned_database(server)
             released = True
-            server.restart_required = True
-        created = create_owner_account(
-            store,
-            server.data_root,
-            server.config_dir,
-            username=username,
-            password=password,
-            display_name=display or username,
-            daemon_running=lambda: False,
-        )
-    except MigrationBusy:
-        _settle_database(server, released)
-        if _wait_for_owner(store):
-            return 409, _error("conflict", "an owner account already exists")
-        return 503, _error(
-            "unavailable",
-            "prime.db is open, so this setup cannot move the existing data. "
-            "Stop praxis-primed and run `praxis-prime setup`.",
-        )
-    except AccountError as exc:
-        _settle_database(server, released)
-        message = str(exc)
-        if "already exists" in message and store.has_accounts():
-            invalidate_first_run_token(server.config_dir)
-            return 409, _error("conflict", message)
-        return 400, _error("bad_request", message)
-    except OSError as exc:
-        _settle_database(server, released)
-        return 503, _error("unavailable", str(exc))
-    account = created.account
-    try:
-        _audit_owner_created(server.data_root, account)
-    except (OSError, sqlite3.Error, RuntimeError, ValueError):
+            server.setup_in_progress = True
         try:
-            clear_discarded_owner(server.data_root, account.id)
-        except OSError:
-            pass
-        store.discard_account(account.id)
-        _settle_database(server, released)
-        return 503, _error("unavailable", "audit log is busy; the owner was not kept")
-    invalidate_first_run_token(server.config_dir)
-    if released:
-        opened = _reopen_profile_database(server, actor=account.id)
-        server.restart_required = not opened
-    issued = store.open_session(account)
-    extras.append(("Set-Cookie", session_cookie(issued.token, max_age=issued.max_age)))
-    return 201, {
-        "ok": True,
-        "account": account.public(),
-        "csrfToken": issued.csrf_token,
-        "restartRequired": _process_needs_restart(server),
-    }
+            created = create_owner_account(
+                store,
+                server.data_root,
+                server.config_dir,
+                username=username,
+                password=password,
+                display_name=display or username,
+                daemon_running=lambda: False,
+            )
+        except MigrationBusy:
+            _settle_database(server, released)
+            if _wait_for_owner(store):
+                return 409, _error("conflict", "an owner account already exists")
+            return 503, _error(
+                "unavailable",
+                "prime.db is open, so this setup cannot move the existing data. "
+                "Stop praxis-primed and run `praxis-prime setup`.",
+            )
+        except AccountError as exc:
+            _settle_database(server, released)
+            message = str(exc)
+            if "already exists" in message and store.has_accounts():
+                invalidate_first_run_token(server.config_dir)
+                return 409, _error("conflict", message)
+            return 400, _error("bad_request", message)
+        except OSError as exc:
+            _settle_database(server, released)
+            return 503, _error("unavailable", str(exc))
+        account = created.account
+        try:
+            _audit_owner_created(server.data_root, account)
+        except (OSError, sqlite3.Error, RuntimeError, ValueError):
+            try:
+                clear_discarded_owner(server.data_root, account.id)
+            except OSError:
+                pass
+            store.discard_account(account.id)
+            _settle_database(server, released)
+            return 503, _error("unavailable", "audit log is busy; the owner was not kept")
+        invalidate_first_run_token(server.config_dir)
+        if released:
+            opened = _reopen_profile_database(server, actor=account.id)
+            server.restart_required = not opened
+        issued = store.open_session(account)
+        extras.append(("Set-Cookie", session_cookie(issued.token, max_age=issued.max_age)))
+        return 201, {
+            "ok": True,
+            "account": account.public(),
+            "csrfToken": issued.csrf_token,
+            "restartRequired": _process_needs_restart(server),
+        }
+    finally:
+        server.setup_in_progress = False
 
 
 def _wait_for_owner(store: Any) -> bool:
@@ -563,7 +566,11 @@ def _install_runtime_database(server: Any, path: Path, profile: str, *, actor: s
     ):
         if holder is not None and hasattr(holder, "audit"):
             holder.audit = log
-    server.audit = log
+    if profile:
+        _bind_gateway_audit(server, actor=actor, profile=profile)
+    else:
+        close_owned_gateway_audit(server)
+        server.audit = log
     scheduler = getattr(server, "scheduler", None)
     if scheduler is not None:
         scheduler.store = RoutineStore(db)
@@ -654,6 +661,64 @@ def _audit_owner_created(data_root: Any, account: Any) -> None:
     finally:
         log.close()
         db.close()
+
+
+def close_owned_gateway_audit(server: Any) -> None:
+    """Close ``audit.db`` when this process opened it after web owner creation.
+
+    The profile database stays open. A log that is the runtime log is left
+    for the runtime to close. A multi-profile daemon owns its own audit log
+    and does not set ``_owns_gateway_audit``.
+    """
+    if not getattr(server, "_owns_gateway_audit", False):
+        return
+    audit = getattr(server, "audit", None)
+    runtime = getattr(getattr(server, "agent", None), "runtime", None)
+    runtime_audit = getattr(runtime, "audit", None) if runtime is not None else None
+    runtime_db = getattr(runtime, "db", None) if runtime is not None else None
+    server._owns_gateway_audit = False
+    if audit is None or audit is runtime_audit:
+        return
+    db = getattr(audit, "db", None)
+    server.audit = None
+    try:
+        audit.close()
+    except (OSError, sqlite3.Error, RuntimeError, ValueError):
+        pass
+    if db is not None and db is not runtime_db:
+        try:
+            db.close()
+        except (OSError, sqlite3.Error, RuntimeError, ValueError):
+            pass
+
+
+def _bind_gateway_audit(server: Any, *, actor: str, profile: str) -> None:
+    """Point gateway auth rows at ``data/audit.db``, the file a restart uses."""
+    if server.data_root is None:
+        return
+    path = Path(server.data_root) / "audit.db"
+    try:
+        target = path.resolve()
+    except OSError:
+        target = path
+    current = getattr(server, "audit", None)
+    current_db = getattr(current, "db", None)
+    if current is not None and _database_path(current_db) == target:
+        current.bind(actor_account=actor, profile=profile)
+        server._owns_gateway_audit = True
+        return
+    from praxis_prime.audit.log import AuditLog
+    from praxis_prime.state import StateDB
+
+    db = StateDB(path)
+    try:
+        log = AuditLog(db)
+    except (OSError, sqlite3.Error, RuntimeError, ValueError):
+        db.close()
+        raise
+    log.bind(actor_account=actor, profile=profile)
+    server.audit = log
+    server._owns_gateway_audit = True
 
 
 def _finish_save(server: Any, result: dict[str, object]) -> dict[str, object]:

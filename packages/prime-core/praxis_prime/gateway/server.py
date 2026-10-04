@@ -47,7 +47,12 @@ from praxis_prime.gateway.guard import (
     mutation_type_denial,
 )
 from praxis_prime.gateway.oidc import oidc_public, oidc_session
-from praxis_prime.gateway.onboarding import SetupFailures, handle_onboarding, onboarding_payload
+from praxis_prime.gateway.onboarding import (
+    SetupFailures,
+    close_owned_gateway_audit,
+    handle_onboarding,
+    onboarding_payload,
+)
 from praxis_prime.gateway.protocol import (
     CHAT_ROLES,
     OPERATOR_ONLY,
@@ -114,6 +119,8 @@ class GatewayServer:
         self.multi_profile = multi_profile
         self.config_dir = config_dir
         self.restart_required = False
+        self.setup_in_progress = False
+        self._owns_gateway_audit = False
         self.scheduler = None
         self.setup_failures = SetupFailures()
         self.logger = logger
@@ -177,6 +184,18 @@ class GatewayServer:
                 os.unlink(self.socket_path)
             except OSError:
                 pass
+        close_owned_gateway_audit(self)
+
+    def _pause_message(self) -> str | None:
+        """Why ordinary requests are paused, or None when the gateway is open.
+
+        A restart blocks health. Setup-in-progress does not: ``/health`` stays ok.
+        """
+        if self.restart_required:
+            return _RESTART_MESSAGE
+        if self.setup_in_progress:
+            return _SETUP_MESSAGE
+        return None
 
     def publish(self, frame: dict[str, object]) -> None:
         """Fan out one event. Each socket is filtered by the principal it connected as.
@@ -324,12 +343,15 @@ class GatewayServer:
         peer: str = "",
     ) -> tuple[int, dict[str, object]]:
         route, _, query = path.partition("?")
-        if self.restart_required:
-            return 503, _error("unavailable", _RESTART_MESSAGE)
+        if method == "GET" and route == "/health" and not self.restart_required:
+            return 200, {"ok": True, "service": "praxis-primed"}
+        paused = self._pause_message()
+        if paused is not None:
+            if paused == _SETUP_MESSAGE:
+                extras.append(("Retry-After", "1"))
+            return 503, _error("unavailable", paused)
         if not route_allowed(method, route):
             return 404, _error("not_allowed", "route is not on the allowlist")
-        if method == "GET" and route == "/health":
-            return 200, {"ok": True, "service": "praxis-primed"}
         if method == "POST" and route == "/v1/auth/login":
             if self.accounts is None:
                 return 503, _error("unavailable", "accounts are not configured")
@@ -770,9 +792,10 @@ class GatewayServer:
         path: str,
         headers: dict[str, str],
     ) -> tuple[str, Principal] | None:
-        if self.restart_required:
-            frame_id = "" if frame is None else str(frame.get("id", ""))
-            outgoing.put(_frame_error(frame_id, "unavailable", _RESTART_MESSAGE))
+        frame_id = "" if frame is None else str(frame.get("id", ""))
+        paused = self._pause_message()
+        if paused is not None:
+            outgoing.put(_frame_error(frame_id, "unavailable", paused))
             return None
         if frame is None or frame.get("type") != "connect":
             frame_id = str((frame or {}).get("id", ""))
@@ -815,8 +838,9 @@ class GatewayServer:
     ) -> None:
         kind = str(frame.get("type", ""))
         frame_id = str(frame.get("id", ""))
-        if self.restart_required:
-            outgoing.put(_frame_error(frame_id, "unavailable", _RESTART_MESSAGE))
+        paused = self._pause_message()
+        if paused is not None:
+            outgoing.put(_frame_error(frame_id, "unavailable", paused))
             return
         if not frame_allowed(kind):
             outgoing.put(_frame_error(frame_id, "unknown_type", f"unknown frame {kind}"))
@@ -1595,6 +1619,7 @@ def _write_bytes(
 
 
 _RESTART_MESSAGE = "Restart praxis-primed to finish profile setup."
+_SETUP_MESSAGE = "Setup is in progress. Retry shortly."
 
 
 def _http_action(method: str, route: str) -> str:
