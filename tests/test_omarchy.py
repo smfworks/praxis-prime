@@ -571,6 +571,45 @@ def test_derived_bg_raised_moves_lighter_than_the_page(
     assert theme.package.modes["dark"]["bgRaised"] == "#1e1a17"
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"bg": "#1e1e2e", "fg": "#cdd6f4"},
+        {"bg": "#1e1e2e"},
+        {"bg": "#2e3440", "accent": "#88c0d0"},
+        {"bg": "#282828", "fg": "#ebdbb2"},
+        {"bg": "#14110f", "fg": "#efe7da", "accent": "#c08a3e"},
+    ],
+)
+def test_partial_dark_palette_without_bg_raised_still_compiles(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    payload: dict[str, str],
+):
+    path = tmp_path / "praxis-prime.json"
+    _point(monkeypatch, path)
+    _write(path, payload)
+    theme = installed()
+    assert theme is not None
+    assert theme.package.theme_id == LIVE_ID
+    colours = theme.package.modes["dark"]
+    bg_l = parse_color(colours["bg"]).oklch()[0]
+    raised_l = parse_color(colours["bgRaised"]).oklch()[0]
+    assert raised_l > bg_l
+    assert contrast_ratio(colours["danger"], colours["bg"]) >= 4.5
+    assert contrast_ratio(colours["danger"], colours["bgRaised"]) >= 4.5
+    assert contrast_ratio(colours["ok"], colours["bgRaised"]) >= 4.5
+    assert contrast_ratio(colours["warn"], colours["bgRaised"]) >= 4.5
+    assert contrast_ratio(colours["accent"], colours["bgRaised"]) >= 3.0
+    assert contrast_ratio(colours["info"], colours["bg"]) >= 4.5
+    assert contrast_ratio(colours["info"], colours["bgRaised"]) >= 4.5
+    if payload["bg"] == "#14110f":
+        base = builtin_theme("smf.praxis")
+        assert base is not None
+        assert colours["fgMuted"] == base.package.modes["dark"]["fgMuted"]
+        assert colours["danger"] == base.package.modes["dark"]["danger"]
+
+
 def test_partial_dark_palette_fills_from_the_dark_praxis_palette(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

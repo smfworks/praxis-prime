@@ -417,6 +417,7 @@ def _assemble(supplied: dict[str, str], seed: dict[str, str]) -> dict[str, str] 
             required[key] = value
     if "bgRaised" not in supplied:
         required["bgRaised"] = _raised_above(required["bg"], required["bgRaised"])
+    _retint_status(required, supplied)
     derived = _derive(required)
     if derived is None:
         return None
@@ -429,6 +430,35 @@ def _assemble(supplied: dict[str, str], seed: dict[str, str]) -> dict[str, str] 
         if key in supplied:
             full[key] = supplied[key]
     return full
+
+
+def _retint_status(required: dict[str, str], supplied: dict[str, str]) -> None:
+    """Move unsupplied status colours onto the page and the raised surface.
+
+    Lifting ``bgRaised`` can put the dark seed's danger, warning, or success
+    under 4.5:1. Those colours are not in the file, so the 0.25 budget does
+    not apply. ``info`` is derived afterwards against the same two surfaces.
+    A supplied colour is left for that budget.
+    """
+    backgrounds = (parse_color(required["bg"]), parse_color(required["bgRaised"]))
+    pairs = (
+        ("ok", TEXT_AA),
+        ("warn", TEXT_AA),
+        ("danger", TEXT_AA),
+        ("accent", UI_AA),
+    )
+    for name, minimum in pairs:
+        if name in supplied:
+            continue
+        adjusted = adjust_lightness(
+            parse_color(required[name]),
+            backgrounds,
+            minimum,
+            max_delta=0.4,
+        )
+        if adjusted is None:
+            continue
+        required[name] = adjusted.to_hex()
 
 
 def _raised_above(background: str, raised: str) -> str:
