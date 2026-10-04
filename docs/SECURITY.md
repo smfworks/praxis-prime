@@ -161,11 +161,35 @@ Content-Security-Policy: default-src 'self'; style-src 'self'; font-src 'self'; 
 
 There is no `unsafe-inline` and no `unsafe-eval`.
 
-A browser `Sec-Fetch-Site: cross-site` is 403, except `GET /v1/auth/oidc/callback`. A mutating request whose content type is not `application/json` is 415. A body over 1 MB (1,000,000 bytes) is 413 and is not read. The CLI and Telegram do not send `Sec-Fetch-Site`. They use the WebSocket, so those two HTTP checks do not apply to them.
+A browser `Sec-Fetch-Site: cross-site` is 403, except `GET /v1/auth/oidc/callback`. A mutating request whose content type is not `application/json` is 415, except `POST /v1/themes/install` and `POST /v1/themes/preview`, which accept `application/zip` or `application/octet-stream` up to 5 MiB. Every other body over 1 MB (1,000,000 bytes) is 413 and is not read. The CLI and Telegram do not send `Sec-Fetch-Site`. They use the WebSocket, so those two HTTP checks do not apply to them.
 
 `ui/dist` is the loopback web app: password, the TOTP step, a `Sign in with <provider>` button when a provider is configured, and the chat client. Linked identities, link, and unlink are on the Security section. The chat client in `ui/src` streams a turn over the gateway WebSocket. The page loads the hashed files named in `ui/dist/index.html` (`/assets/index-*.js` and `/assets/index-*.css`). It has no inline script or style. After an OIDC redirect the page reads `GET /v1/auth/session` for `csrfToken`. The password `mfaToken` stays in page memory. When the redirect is `/?oidc=mfa`, the page shows the code form and posts an empty `mfaToken`. The server reads `pp_mfa`.
 
 `GET /v1/auth/session` returns that session's `csrfToken` so a reload can keep sending `x-csrf-token`. The cookie stays `HttpOnly`. `GET /v1/memory`, `GET /v1/skills`, and `GET /v1/routines` require a membership on the profile they read. A single-process daemon has one profile, the one that process opened. An omitted `x-praxis-profile` on those routes means that profile. Naming a different profile is 403, and this process's catalog is not read. There is no second worker on that path. When the daemon supervises profile workers, the request goes to the named profile's worker. A missing membership is 403 and that call is not made. `GET /v1/approvals` with no profile is the caller's visible cards: owner and admin see every card this process can show, and a member sees only profiles they belong to. Naming a profile still refuses a different runtime and a missing membership. Memory, skills, and routines stay scoped. `GET /v1/memory` leaves out episodic rows and does not include `session_id`. `GET /v1/admin/directory` is owner and admin only and leaves out email and secrets. A web approval is `POST /v1/approvals/<id>` with `allow_once`, `allow_session`, or `deny`. A second decide for that id fails. The turn writes the same approval audit row it writes for a Telegram decision.
+
+## Themes
+
+A theme package changes appearance only. It cannot add a control, run a script, or contact the network. The SPA paints from a compiled stylesheet. Authors do not inject CSS into the page.
+
+The daemon compiles each accepted package to `GET /themes/<id>/<hash>.css` and serves package fonts and ornaments at `GET /themes/<id>/<hash>/assets/…`. Those responses send the same Content-Security-Policy as the SPA, including `style-src 'self'` and `font-src 'self'`, and `X-Content-Type-Options: nosniff`. The hash is the package hash. A path that does not match the installed hash, leaves `assets/`, or uses another extension is 404. The SPA swaps `<link id="pp-theme">`. There is no inline style.
+
+`GET /themes/…` and `GET /v1/themes/active` are readable without a session so the sign-in page can paint. Without a session, active is the admin lock, or `smf.praxis`. The daemon still binds loopback. Listing themes, installing, removing, locking, and selecting stay on the authenticated allowlist.
+
+Install, remove, and lock require an owner or admin. A profile choice follows the account roles: an owner or admin may set any profile; an operator may set a profile where their membership is owner or operator; a viewer or an auditor cannot. An admin lock wins. While it is set, a non-admin select is 403. The CLI is the local data-directory owner, the same trust boundary as `packs install`. The daemon is where those roles are enforced.
+
+`POST /v1/themes/preview` checks a zip and stages it under `theme-stage/<packageHash>` for 15 minutes. The stage is not a stylesheet route. `POST /v1/themes/install` with `{"packageHash"}` commits that stage, or the same route accepts the zip in one shot. Install appends `theme.install`. Select and lock append `theme.activate`. Both rows include `packageHash`. Remove is not an audit event.
+
+The validator (`praxis-prime theme lint`, and the same function on install) refuses a package that fails any of these:
+
+- WCAG 2.2 AA for every text pair (4.5:1) and for `borderStrong`, `ring`, and the UI-component pairs (3:1), in both modes. `contrast = "AAA"` raises that floor to 7:1 and 4.5:1. `scripts/contrast_check.py` uses the same ratio function for the palette cores in the addendum.
+- A bundled font is WOFF2 and names an allowlisted licence. OFL-1.1 requires `OFL.txt` in the package.
+- `theme.css` is parsed with tinycss2. The only rules are `--pp-*` custom properties on `:root` or `[data-mode]`, and a fixed property list on `.pp-ornament-*`, `.pp-header-band`, `.pp-sidebar-texture`, and `.pp-divider`. `@import`, `@font-face`, `@namespace`, remote `url()`, `content`, `display`, `visibility`, `opacity`, `position`, `z-index`, `transform`, `pointer-events`, `clip*`, `filter`, `!important`, attribute selectors, `:has()`, and any selector aimed at `.pp-approval*`, `.pp-dial*`, or `.pp-audit*` are rejected. Every `url()` must name a file in the package.
+- SVG ornaments are refused when they contain a script, an event handler, `foreignObject`, an external reference, or an element outside the ornament allowlist. The file is not rewritten and then accepted.
+- A zip is at most 5 MiB compressed, 15 MiB expanded, and 200 files, with each file at most 4 MiB (an ornament 256 KiB, `theme.css` 32 KiB). Members are read one by one. Absolute paths, `..`, symlinks, and encrypted entries are refused.
+
+`theme lint --json` and the HTTP error body use `{"ok": false, "error": {"code": "theme_invalid", "message", "issues"}}`.
+
+A legacy pack hint (`accent`, `panel` → `bgRaised`, `ok`, `warn`) is applied to `smf.praxis` and run through that contrast check. Lightness may move by at most 0.25 in OKLCH. Past that the hint is refused and the pack still installs. Choosing `smf.praxis` explicitly does not apply the hint.
 
 ## Shell and the data directory
 

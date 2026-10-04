@@ -150,7 +150,7 @@ Condensed from [ARCHITECTURE §29](docs/ARCHITECTURE.md) and [Blueprint Addendum
 | **M0** | Packs ship in the wheel. Legacy `pack.json` loader ignores `ollama-cloud` model pins and pack dashboard JavaScript. | MVP completion (v0.2–0.3) |
 | **M1** | Web shell, accounts, and profiles. Loopback only. **M1a** accounts, roles, and profiles (merged). **M1b** passkeys + TOTP (local enrollment and sign-in on the loopback daemon). **M1c** per-profile workers and supervisor (in the tree; see [SECURITY.md](docs/SECURITY.md)). **M1d** SPA (sign-in, chat, approvals, profile picker, factors, read-only catalog). **M1e** OIDC sign-in (in the tree; see [SECURITY.md](docs/SECURITY.md)). | MVP completion (v0.2–0.3) |
 | **M2** | First-run wizard (in the tree). No default provider. `praxis-prime setup` and the web wizard share one backend. | MVP completion (v0.2–0.3) |
-| **M3** | Theme packages and seven built-in themes. | MVP completion (v0.2–0.3) |
+| **M3** | Theme packages. **M3a** engine, validator, install/select/lock, legacy hints, `smf.praxis`, and High Contrast (in the tree). **M3b** the other six themes, the Omarchy adapter, theme authoring, and the AI round-trip. | MVP completion (v0.2–0.3) |
 | **M4** | Local sandbox and agent computer: T1 bubblewrap (data-root mask and denylist) for shell, T2 rootless Podman for builds and the virtual desktop. | v0.5 |
 | **M5a** / **M5b** | Ubuntu and Omarchy installers, then a WSL2 supported beta. | v0.5 |
 | **M6** | Opt-in remote access and a PWA. Loopback stays the default. | v0.5 |
