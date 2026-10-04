@@ -127,6 +127,92 @@ def test_every_bundled_font_is_credited():
         assert repo in credits, repo
         assert f"`{packaged}`" in copied, packaged
 
+# OFL section 3: a modified font may not use a Reserved Font Name.
+_FAMILY_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}$")
+_RFN = re.compile(
+    r"""Reserved Font Name\s+(?:["“']([^"”']+)["”']|([A-Za-z][^.\n]{0,80}?))(?=\.|$)""",
+    re.MULTILINE,
+)
+_NEW_THEMES = (
+    "smf.legal-office",
+    "smf.forensic",
+    "smf.education",
+    "smf.classical",
+    "smf.medical",
+    "smf.dental",
+)
+_NAMED_RFN = {
+    "smf.legal-office": {"Libre Baskerville", "Source"},
+    "smf.classical": {"Source"},
+    "smf.forensic": {"Plex"},
+    "smf.education": {"RevReading Lexend"},
+    "smf.medical": set(),
+    "smf.dental": set(),
+}
+
+
+def _reserved_font_names(text: str) -> set[str]:
+    found: set[str] = set()
+    for match in _RFN.finditer(text):
+        name = (match.group(1) or match.group(2) or "").strip()
+        if name:
+            found.add(name)
+    return found
+
+
+def test_subset_fonts_drop_reserved_names():
+    """A subset drops a Reserved Font Name. Lexend's reserved name is longer."""
+    ttlib = pytest.importorskip("fontTools.ttLib")
+    import tomllib
+
+    third = (_ROOT / "THIRD_PARTY.md").read_text(encoding="utf-8")
+    table = third.split("## Copied-file log", 1)[0]
+    for theme_id in _NEW_THEMES:
+        root = _BUILTIN / theme_id
+        licence = (root / "assets" / "fonts" / "OFL.txt").read_text(encoding="utf-8")
+        reserved = _reserved_font_names(licence)
+        assert reserved == _NAMED_RFN[theme_id], theme_id
+        meta = tomllib.loads((root / "theme.toml").read_text(encoding="utf-8"))
+        for path in sorted((root / "assets" / "fonts").glob("*.woff2")):
+            font = ttlib.TTFont(path)
+            try:
+                by_id: dict[int, list[str]] = {}
+                for record in font["name"].names:
+                    if record.nameID not in {0, 1, 4, 6, 16}:
+                        continue
+                    by_id.setdefault(record.nameID, []).append(record.toUnicode())
+            finally:
+                font.close()
+            shown = [
+                value
+                for name_id in (1, 4, 6, 16)
+                for value in by_id.get(name_id, [])
+            ]
+            for reserved_name in reserved:
+                kept = [value for value in shown if reserved_name in value]
+                assert not kept, (path.name, reserved_name, kept)
+            family = by_id[1][0]
+            assert _FAMILY_NAME.fullmatch(family), family
+            packaged = path.relative_to(_ROOT / "packages" / "prime-core").as_posix()
+            row = next(line for line in table.splitlines() if f"`{packaged}`" in line)
+            cells = [cell.strip() for cell in row.strip("|").split("|")]
+            assert cells[2] == by_id[0][0], packaged
+            rel = path.relative_to(root).as_posix()
+            declared = [
+                str(slot["family"])
+                for slot in meta["fonts"].values()
+                if any(face.get("path") == rel for face in slot.get("files", []))
+            ]
+            assert declared, rel
+            assert all(_FAMILY_NAME.fullmatch(name) for name in declared)
+            if family.startswith("Praxis "):
+                assert set(by_id[16]) == {family}
+                assert set(declared) == {family}
+                assert family in cells[0]
+            if path.name == "Lexend.woff2":
+                assert family == "Lexend"
+                assert declared == ["Lexend"]
+
 
 def test_builtin_theme_assets_have_no_remote_urls():
     for path in _BUILTIN.rglob("*"):

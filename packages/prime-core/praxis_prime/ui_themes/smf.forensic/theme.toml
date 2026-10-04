@@ -11,7 +11,7 @@ min_praxis = "0.1.0"
 contrast = "AA"
 
 [fonts.display]
-family = "IBM Plex Sans"
+family = "Praxis Forensic Sans Subset"
 license = "OFL-1.1"
 fallback = "sans-serif"
 files = [
@@ -19,7 +19,7 @@ files = [
 ]
 
 [fonts.body]
-family = "IBM Plex Sans"
+family = "Praxis Forensic Sans Subset"
 license = "OFL-1.1"
 fallback = "sans-serif"
 files = [
@@ -27,7 +27,7 @@ files = [
 ]
 
 [fonts.mono]
-family = "IBM Plex Mono"
+family = "Praxis Forensic Mono Subset"
 license = "OFL-1.1"
 fallback = "monospace"
 files = [

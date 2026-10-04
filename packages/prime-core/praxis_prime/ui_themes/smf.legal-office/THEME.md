@@ -14,7 +14,7 @@ Contrast level is WCAG 2.2 AA in both modes. Optional tokens are derived by the 
 
 ## Fonts
 
-Display is Libre Baskerville. Body is Source Sans 3. Code is Source Code Pro. Each file is a Latin subset WOFF2 from the `ofl/` tree of github.com/google/fonts. Each family is SIL Open Font License 1.1. The licence text is `assets/fonts/OFL.txt`. The package does not load fonts from a network.
+Display is Praxis Legal Display Subset, a Latin subset of Libre Baskerville. Body is Praxis Office Sans Subset, a Latin subset of Source Sans 3. Code is Praxis Office Mono Subset, a Latin subset of Source Code Pro. Those upstream names are Reserved Font Names, so the subset files do not use them. Each file is from the `ofl/` tree of github.com/google/fonts. Each family is SIL Open Font License 1.1. The licence text is `assets/fonts/OFL.txt`. The package does not load fonts from a network.
 
 ## Ornaments
 

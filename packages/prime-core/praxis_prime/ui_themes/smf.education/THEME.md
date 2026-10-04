@@ -14,7 +14,7 @@ Contrast level is WCAG 2.2 AA in both modes. Optional tokens are derived by the 
 
 ## Fonts
 
-Display is Lexend. Body is Atkinson Hyperlegible, regular and bold, the same subset files as High Contrast, copied into this package so the package stands alone. Code is JetBrains Mono, copied the same way. All three are SIL Open Font License 1.1, from the `ofl/` tree of github.com/google/fonts. The licence text is `assets/fonts/OFL.txt`. The package does not load fonts from a network.
+Display is Lexend. Its OFL reserved name is "RevReading Lexend", which this subset does not use, so the family name stays Lexend. Body is Atkinson Hyperlegible, regular and bold, the same subset files as High Contrast, copied into this package so the package stands alone. Code is JetBrains Mono, copied the same way. All three are SIL Open Font License 1.1, from the `ofl/` tree of github.com/google/fonts. The licence text is `assets/fonts/OFL.txt`. The package does not load fonts from a network.
 
 ## Shape
 

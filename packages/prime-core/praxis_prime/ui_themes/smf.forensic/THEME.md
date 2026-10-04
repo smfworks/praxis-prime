@@ -1,6 +1,6 @@
 # Forensic Engineering
 
-A lab bench. Light mode is a cool grey page with blueprint blue. Dark mode is graphite with safety amber. Measurements and chain-of-custody identifiers use IBM Plex Mono, which is monospaced, so the figures line up. The IBM Plex Sans file from the google/fonts `ofl/` tree does not include an OpenType `tnum` feature, so body text is not forced into tabular figures.
+A lab bench. Light mode is a cool grey page with blueprint blue. Dark mode is graphite with safety amber. Measurements and chain-of-custody identifiers use Praxis Forensic Mono Subset, a subset of IBM Plex Mono. It is monospaced, so the figures line up. The IBM Plex Sans source has no OpenType `tnum` feature, so body text is not forced into tabular figures.
 
 ## Colours
 
@@ -14,7 +14,7 @@ Contrast level is WCAG 2.2 AA in both modes. Optional tokens are derived by the 
 
 ## Fonts
 
-Display and body are IBM Plex Sans (one variable WOFF2, weight 100–700). Code is IBM Plex Mono regular and bold. Latin subsets from the `ofl/` tree of github.com/google/fonts. SIL Open Font License 1.1. The licence text is `assets/fonts/OFL.txt`. The package does not load fonts from a network.
+Display and body are Praxis Forensic Sans Subset (one variable WOFF2, weight 100–700), a Latin subset of IBM Plex Sans. Code is Praxis Forensic Mono Subset regular and bold, a Latin subset of IBM Plex Mono. Plex is a Reserved Font Name, so the subset files do not use it. The sources are the `ofl/` tree of github.com/google/fonts. SIL Open Font License 1.1. The licence text is `assets/fonts/OFL.txt`. The package does not load fonts from a network.
 
 ## Ornaments
 

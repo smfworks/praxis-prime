@@ -19,7 +19,7 @@ files = [
 ]
 
 [fonts.body]
-family = "Source Sans 3"
+family = "Praxis Office Sans Subset"
 license = "OFL-1.1"
 fallback = "sans-serif"
 files = [
@@ -27,7 +27,7 @@ files = [
 ]
 
 [fonts.mono]
-family = "Source Code Pro"
+family = "Praxis Office Mono Subset"
 license = "OFL-1.1"
 fallback = "monospace"
 files = [

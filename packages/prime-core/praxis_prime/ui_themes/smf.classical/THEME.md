@@ -1,6 +1,6 @@
 # Classical
 
-Great books and lamplight, in the WisdomForge line. Dark mode is the default: ground `#0a0a0f`, antique gold `#c9a96e`. Display is Fraunces. Body is Source Sans 3. Code is Source Code Pro. The Socratic prompt style belongs to a pack or a persona, not to this theme.
+Great books and lamplight, in the WisdomForge line. Dark mode is the default: ground `#0a0a0f`, antique gold `#c9a96e`. Display is Fraunces. Body is Praxis Office Sans Subset, a subset of Source Sans 3. Code is Praxis Office Mono Subset, a subset of Source Code Pro. The Socratic prompt style belongs to a pack or a persona, not to this theme.
 
 ## Colours
 
@@ -14,7 +14,7 @@ Contrast level is WCAG 2.2 AA in both modes. Optional tokens are derived by the 
 
 ## Fonts
 
-Latin subset WOFF2 files from the `ofl/` tree of github.com/google/fonts. SIL Open Font License 1.1. The licence text is `assets/fonts/OFL.txt`. The package does not load fonts from a network. Source Sans 3 and Source Code Pro are the same subset bytes as Legal Office, copied here so this package stands alone.
+Latin subset WOFF2 files from the `ofl/` tree of github.com/google/fonts. SIL Open Font License 1.1. The licence text is `assets/fonts/OFL.txt`. The package does not load fonts from a network. Fraunces has no Reserved Font Name, so the subset keeps that family name. Praxis Office Sans Subset and Praxis Office Mono Subset are the Legal Office subset files copied here so this package stands alone. Source is a Reserved Font Name, so those copies do not use it.
 
 ## Ornaments
 
