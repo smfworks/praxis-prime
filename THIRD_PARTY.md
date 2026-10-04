@@ -168,6 +168,9 @@ fonts stay OFL-1.1 and are not relicensed.
 | Source Sans 3 (variable, weight 200–900) | `praxis_prime/ui_themes/smf.classical/assets/fonts/SourceSans3.woff2` | © 2023 Adobe (http://www.adobe.com/), with Reserved Font Name ‘Source’ | OFL-1.1 |
 | Source Code Pro (variable, weight 200–900) | `praxis_prime/ui_themes/smf.classical/assets/fonts/SourceCodePro.woff2` | © 2023 Adobe (http://www.adobe.com/), with Reserved Font Name ‘Source’ | OFL-1.1 |
 
+| Inter (variable) | `praxis_prime/ui_themes/smf.medical/assets/fonts/Inter.woff2` | Copyright 2016 The Inter Project Authors (https://github.com/rsms/inter) | OFL-1.1 |
+| JetBrains Mono (variable) | `praxis_prime/ui_themes/smf.medical/assets/fonts/JetBrainsMono.woff2` | Copyright 2020 The JetBrains Mono Project Authors (https://github.com/JetBrains/JetBrainsMono) | OFL-1.1 |
+
 ## Runtime components that are not bundled
 
 These are not shipped here. If a release later vendors source, or if a
@@ -223,3 +226,5 @@ upstream licence, kept beside the fonts.
 | `praxis_prime/ui_themes/smf.classical/assets/fonts/Fraunces.woff2` | `google/fonts` `ofl/fraunces` | Version 1.000;[b76b70a41]; google/fonts 4024282d9b0cffcdb8e3024560862746178d741f (retrieved 2026-10) | OFL-1.1 | `smf.classical/assets/fonts/OFL.txt` |
 | `praxis_prime/ui_themes/smf.classical/assets/fonts/SourceSans3.woff2` | `google/fonts` `ofl/sourcesans3` | Version 3.052;hotconv 1.1.0;makeotfexe 2.6.0; google/fonts 914ec116571b1162d886aa402e715552221f0b77 (retrieved 2026-10) | OFL-1.1 | `smf.classical/assets/fonts/OFL.txt` |
 | `praxis_prime/ui_themes/smf.classical/assets/fonts/SourceCodePro.woff2` | `google/fonts` `ofl/sourcecodepro` | Version 1.026;hotconv 1.1.0;makeotfexe 2.6.0; google/fonts bd62bd8b4715f007af6905b0c9fd030f8410b289 (retrieved 2026-10) | OFL-1.1 | `smf.classical/assets/fonts/OFL.txt` |
+| `praxis_prime/ui_themes/smf.medical/assets/fonts/Inter.woff2` | `google/fonts` `ofl/inter` | Version 4.001;git-66647c0bb (retrieved 2026-10) | OFL-1.1 | `smf.medical/assets/fonts/OFL.txt` |
+| `praxis_prime/ui_themes/smf.medical/assets/fonts/JetBrainsMono.woff2` | `google/fonts` `ofl/jetbrainsmono` | Version 2.211 (retrieved 2026-10) | OFL-1.1 | `smf.medical/assets/fonts/OFL.txt` |
