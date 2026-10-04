@@ -43,6 +43,8 @@ from praxis_prime.themes.tokens import MODE_CHOICES
 from praxis_prime.themes.validate import validate_zip
 
 _CSS = re.compile(r"^/themes/([a-z0-9][a-z0-9.-]{0,63})/([0-9a-f]{64})\.css$")
+# preview.png and preview.webp are the only gallery names. The validator
+# checks their magic bytes and the 1 MiB cap. CSS does not reference them.
 _ASSET = re.compile(
     r"^/themes/([a-z0-9][a-z0-9.-]{0,63})/([0-9a-f]{64})/"
     r"(assets/(?:fonts/[A-Za-z0-9._-]{1,80}|ornaments/[A-Za-z0-9._-]{1,80}|preview\.(?:png|webp)))$"

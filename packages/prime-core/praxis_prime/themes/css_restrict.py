@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 import tinycss2
 from tinycss2.ast import AtRule, ParseError, QualifiedRule
 
+from praxis_prime.themes.archive import PREVIEW_FILES
 from praxis_prime.themes.color import parse_color
 from praxis_prime.themes.errors import ThemeIssue
 from praxis_prime.themes.tokens import (
@@ -357,9 +358,51 @@ def _decor_limit_issues(prop: str, tokens: list[object]) -> list[ThemeIssue]:
         return _shadow_issues(tokens)
     if prop == "background-position":
         return _bounded_issues(tokens, low=-_LENGTH_MAX, high=_LENGTH_MAX)
+    if prop == "background":
+        return _background_size_issues(tokens)
     if prop in _CAPPED:
         return _bounded_issues(tokens, low=0, high=_LENGTH_MAX)
     return []
+
+
+def _background_size_issues(tokens: list[object]) -> list[ThemeIssue]:
+    """Cap the size after ``/`` in the ``background`` shorthand. Same 0–16px rule."""
+    issues: list[ThemeIssue] = []
+    in_size = False
+    for token in tokens:
+        kind = getattr(token, "type", "")
+        if kind == "literal":
+            mark = getattr(token, "value", "")
+            if mark == "/":
+                in_size = True
+                continue
+            if mark == ",":
+                in_size = False
+                continue
+        if not in_size:
+            continue
+        if kind == "function":
+            name = getattr(token, "lower_name", "")
+            if name == "oklch":
+                continue
+            issues.extend(
+                _bounded_issues(getattr(token, "arguments", []), low=0, high=_LENGTH_MAX)
+            )
+            continue
+        if kind in {"() block", "[] block", "{} block"}:
+            issues.extend(_bounded_issues(getattr(token, "content", []), low=0, high=_LENGTH_MAX))
+            continue
+        if kind == "ident":
+            word = str(getattr(token, "lower_value", "") or getattr(token, "value", "")).casefold()
+            if word in {"padding-box", "border-box", "content-box"}:
+                in_size = False
+            continue
+        if kind not in {"dimension", "percentage", "number"}:
+            continue
+        message = _length_message(token, low=0, high=_LENGTH_MAX)
+        if message:
+            issues.append(_issue("css_property", message, "theme.css"))
+    return issues
 
 
 def _bounded_issues(tokens: list[object], *, low: float, high: float) -> list[ThemeIssue]:
@@ -465,6 +508,11 @@ def _value_issues(tokens: list[object], assets: set[str], *, allow_url: bool) ->
     return issues
 
 
+def _is_preview(text: str) -> bool:
+    relative = text[2:] if text.startswith("./") else text
+    return relative in PREVIEW_FILES
+
+
 def _one_url(value: str, assets: set[str], *, allow_url: bool) -> list[ThemeIssue]:
     text = value.strip().strip("\"'")
     lowered = text.casefold()
@@ -478,6 +526,8 @@ def _one_url(value: str, assets: set[str], *, allow_url: bool) -> list[ThemeIssu
         return [_issue("css_url", "Remote or data URLs are not allowed.", "theme.css")]
     if ".." in text.split("/"):
         return [_issue("css_url", "Theme URLs cannot contain '..'.", "theme.css")]
+    if _is_preview(text):
+        return [_issue("css_url", "Preview images cannot be used in CSS.", "theme.css")]
     if not allow_url:
         return [_issue("css_url", "url() is only allowed on decorative hooks.", "theme.css")]
     relative = text[2:] if text.startswith("./") else text

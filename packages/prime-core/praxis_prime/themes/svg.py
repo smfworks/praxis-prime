@@ -4,14 +4,19 @@ ElementTree does not resolve external entities on Python 3.12. A DOCTYPE,
 comment, or ``ENTITY`` is still refused before parsing. Processing
 instructions other than one leading XML declaration are refused from the
 raw text, because the parser drops them. Attribute checks run on the
-entity-decoded values. A clean SVG is written back from the parsed tree so
-the bytes that are stored are the bytes that were checked.
+entity-decoded values. The root must be an ``svg`` element in the SVG
+namespace, and every other element must be in that namespace too. A
+backslash in an attribute value is refused. Paint values are parsed with
+tinycss2 after CSS unescaping. A clean SVG is written back from the parsed
+tree so the bytes that are stored are the bytes that were checked.
 """
 
 from __future__ import annotations
 
 import re
 import xml.etree.ElementTree as ET
+
+import tinycss2
 
 from praxis_prime.themes.errors import ThemeIssue
 
@@ -85,10 +90,26 @@ _XML_DECL = re.compile(
     r"""(?:\s+encoding\s*=\s*(['"])[A-Za-z0-9._-]+\2)?"""
     r"""(?:\s+standalone\s*=\s*(['"])(?:yes|no)\3)?\s*\?>"""
 )
-_LOCAL_URL = re.compile(
-    r"""url\(\s*(['"]?)#([^'")\s]+)\1\s*\)""",
-    re.IGNORECASE,
+# Presentation attributes whose value is CSS. marker-* is the marker-start,
+# marker-mid, and marker-end family. Any other value that could carry CSS
+# is parsed too.
+_PAINT_ATTRS = frozenset(
+    {
+        "fill",
+        "stroke",
+        "stop-color",
+        "flood-color",
+        "lighting-color",
+        "color",
+        "clip-path",
+        "mask",
+        "filter",
+        "cursor",
+        "marker",
+    }
 )
+_BANNED_FUNCS = frozenset({"image-set", "src"})
+_FRAGMENT_BAD = set(" \t\r\n\"'\\/:?#()")
 
 
 def check_svg(path: str, data: bytes) -> tuple[bytes, ThemeIssue | None]:
@@ -109,7 +130,7 @@ def check_svg(path: str, data: bytes) -> tuple[bytes, ThemeIssue | None]:
         root = ET.fromstring(text)
     except ET.ParseError as exc:
         return b"", _issue(path, f"SVG is not well-formed XML ({exc})")
-    found = _walk(path, root)
+    found = _walk(path, root, root=True)
     if found is not None:
         return b"", found
     payload = ET.tostring(root, encoding="utf-8", xml_declaration=True)
@@ -133,21 +154,35 @@ def _processing_instruction(path: str, text: str) -> ThemeIssue | None:
     return None
 
 
-def _walk(path: str, node: ET.Element) -> ThemeIssue | None:
-    tag = _local(node.tag)
+def _walk(path: str, node: ET.Element, *, root: bool = False) -> ThemeIssue | None:
+    namespace, tag = _split_name(node.tag)
+    if root:
+        if tag != "svg" or namespace != _SVG_NS:
+            return _issue(path, "SVG root must be an svg element in the SVG namespace")
+    elif namespace != _SVG_NS:
+        return _issue(path, f"SVG element <{tag}> is not in the SVG namespace")
     if tag in _BANNED_ELEMENTS:
         return _issue(path, f"SVG element <{tag}> is not allowed")
     if tag not in _ELEMENTS:
         return _issue(path, f"SVG element <{tag}> is not on the ornament allowlist")
     for key, value in node.attrib.items():
-        name = _local(key)
+        attr_ns, name = _split_name(key)
+        if attr_ns not in {"", _SVG_NS, _XLINK_NS}:
+            return _issue(path, f"SVG attribute {name} uses a foreign namespace")
+        qualified = f"xlink:{name}" if attr_ns == _XLINK_NS else name
         if name.startswith("on"):
             return _issue(path, f"SVG event handler {name} is not allowed")
-        if name not in _ATTRS and not name.startswith("aria-"):
-            return _issue(path, f"SVG attribute {name} is not on the ornament allowlist")
-        if name == "style":
+        if "\\" in value:
+            return _issue(path, "SVG attribute values cannot contain a backslash")
+        if _css_attribute(qualified, value):
+            paint = _paint_problem(value)
+            if paint:
+                return _issue(path, paint)
+        if qualified not in _ATTRS and not qualified.startswith("aria-"):
+            return _issue(path, f"SVG attribute {qualified} is not on the ornament allowlist")
+        if qualified == "style":
             return _issue(path, "SVG style attributes are not allowed")
-        bad = _bad_value(name, value)
+        bad = _bad_value(qualified, value)
         if bad:
             return _issue(path, bad)
     for child in list(node):
@@ -161,16 +196,80 @@ def _bad_value(name: str, value: str) -> str:
     compact = "".join(char for char in value if char > " " and ord(char) != 127).casefold()
     if "javascript:" in compact or "data:" in compact:
         return "SVG must not contain a javascript or data URL"
-    stripped = _LOCAL_URL.sub("", value)
-    if "url(" in stripped.casefold():
-        return "SVG url() must be a local url(#id)"
-    for match in _LOCAL_URL.finditer(value):
-        ident = match.group(2)
-        if any(char in ident for char in ":/\\"):
-            return "SVG url() must be a local url(#id)"
     if name in {"href", "xlink:href"} and not _fragment(value):
         return "SVG references must be fragments inside the file"
     return ""
+
+
+def _css_attribute(name: str, value: str) -> bool:
+    """Paint attributes, plus any other value that could be a CSS reference."""
+    if name in _PAINT_ATTRS or name.startswith("marker-"):
+        return True
+    folded = value.casefold()
+    return "url" in folded or "image-set" in folded or "src(" in folded or "@" in folded
+
+
+def _paint_problem(value: str) -> str:
+    """Reject a remote url() after CSS unescaping. Comparison is case-insensitive."""
+    try:
+        tokens = tinycss2.parse_component_value_list(value, skip_comments=True)
+    except ValueError:
+        return "SVG url() must be a local url(#id)"
+    return _tokens_problem(tokens)
+
+
+def _tokens_problem(tokens: list[object]) -> str:
+    for token in tokens:
+        kind = getattr(token, "type", "")
+        if kind == "error":
+            return "SVG url() must be a local url(#id)"
+        if kind == "url":
+            if not _same_document(str(getattr(token, "value", ""))):
+                return "SVG url() must be a local url(#id)"
+            continue
+        if kind == "at-keyword" or (kind == "literal" and getattr(token, "value", "") == "@"):
+            return "SVG paint values cannot contain @import"
+        if kind == "ident" and str(getattr(token, "value", "")).casefold().startswith("@"):
+            return "SVG paint values cannot contain @import"
+        if kind == "function":
+            name = str(getattr(token, "lower_name", ""))
+            if name == "src" or name.endswith("image-set"):
+                return f"SVG {name}() is not allowed"
+            if name == "url":
+                target = _url_target(getattr(token, "arguments", []))
+                if target is None or not _same_document(target):
+                    return "SVG url() must be a local url(#id)"
+                continue
+            nested = _tokens_problem(getattr(token, "arguments", []))
+            if nested:
+                return nested
+            continue
+        if kind in {"() block", "[] block", "{} block"}:
+            nested = _tokens_problem(getattr(token, "content", []))
+            if nested:
+                return nested
+    return ""
+
+
+def _url_target(arguments: list[object]) -> str | None:
+    """The unescaped target of ``url("...")``. Whitespace around it is ignored."""
+    parts = [token for token in arguments if getattr(token, "type", "") != "whitespace"]
+    if len(parts) != 1 or getattr(parts[0], "type", "") != "string":
+        return None
+    return str(getattr(parts[0], "value", ""))
+
+
+def _same_document(value: str) -> bool:
+    """True when the CSS-unescaped target is a same-document ``#id``."""
+    text = value.strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'":
+        text = text[1:-1].strip()
+    if len(text) < 2 or not text.startswith("#"):
+        return False
+    ident = text[1:]
+    if not ident:
+        return False
+    return all(char not in _FRAGMENT_BAD and ord(char) > 32 and ord(char) != 127 for char in ident)
 
 
 def _fragment(value: str) -> bool:
@@ -178,10 +277,11 @@ def _fragment(value: str) -> bool:
     return text.startswith("#") and ":" not in text and "//" not in text and "\\" not in text
 
 
-def _local(tag: str) -> str:
-    if tag.startswith("{"):
-        tag = tag.split("}", 1)[-1]
-    return tag.lower()
+def _split_name(tag: str) -> tuple[str, str]:
+    if tag.startswith("{") and "}" in tag:
+        namespace, local = tag[1:].split("}", 1)
+        return namespace, local.lower()
+    return "", tag.lower()
 
 
 def _issue(path: str, message: str) -> ThemeIssue:

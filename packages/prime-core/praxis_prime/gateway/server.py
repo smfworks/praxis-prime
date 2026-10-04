@@ -66,6 +66,7 @@ from praxis_prime.gateway.routes import (
     route_allowed,
 )
 from praxis_prime.gateway.themes import (
+    MAX_THEME_BODY,
     active_response,
     handle_themes,
     load_theme_asset,
@@ -297,7 +298,9 @@ class GatewayServer:
             denied = host_origin_denial(headers, bound_port=self.bound_port)
             if denied is not None:
                 status, code, message = denied
-                _write_http(conn, status, _error(code, message))
+                _reject_theme_upload(
+                    conn, buffer, method, route_only, headers, status, code, message
+                )
                 if self.logger is not None:
                     self.logger.warning("host_rejected", code=code)
                 return
@@ -308,7 +311,9 @@ class GatewayServer:
                 site = fetch_site_denial(headers)
                 if site is not None:
                     status, code, message = site
-                    _write_http(conn, status, _error(code, message))
+                    _reject_theme_upload(
+                        conn, buffer, method, route_only, headers, status, code, message
+                    )
                     return
             if static_route(method, route_only):
                 self._static(conn, route_only)
@@ -1568,6 +1573,43 @@ def _parse_head(raw: bytes) -> tuple[str, str, dict[str, str]]:
             headers["x-duplicate-host"] = "1"
         headers[key] = value.strip()
     return parts[0].upper(), parts[1], headers
+
+
+_THEME_POSTS = frozenset({"/v1/themes/install", "/v1/themes/preview"})
+
+
+def _reject_theme_upload(
+    conn: socket.socket,
+    buffer: ByteBuffer,
+    method: str,
+    route: str,
+    headers: dict[str, str],
+    status: int,
+    code: str,
+    message: str,
+) -> None:
+    """Refuse the request, reading a theme upload body first.
+
+    Origin and ``Sec-Fetch-Site: cross-site`` are decided before the body
+    is read. Closing then, with the zip still in the socket buffer, resets
+    the connection. The client sees a network error instead of the status.
+    """
+    if method == "POST" and route in _THEME_POSTS:
+        _drain_declared_body(buffer, headers, MAX_THEME_BODY)
+    _write_http(conn, status, _error(code, message))
+
+
+def _drain_declared_body(buffer: ByteBuffer, headers: dict[str, str], limit: int) -> None:
+    raw = headers.get("content-length", "")
+    if not raw:
+        return
+    try:
+        length = int(raw)
+    except ValueError:
+        return
+    if length <= 0 or length > limit:
+        return
+    buffer.read_exact(length)
 
 
 def _content_length(headers: dict[str, str]) -> int:

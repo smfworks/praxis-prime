@@ -15,7 +15,7 @@ import tinycss2
 from tinycss2.ast import URLToken
 from tinycss2.serializer import serialize_string_value
 
-from praxis_prime.themes.archive import FONT_PATH
+from praxis_prime.themes.archive import FONT_PATH, PREVIEW_FILES
 from praxis_prime.themes.model import ThemePackage
 from praxis_prime.themes.tokens import MODES
 
@@ -255,9 +255,10 @@ def _package_url(raw: str, prefix: str) -> str:
     text = raw.strip()
     if text.startswith("./"):
         text = text[2:]
-    if _SAFE_ASSET.fullmatch(text):
-        return prefix + text
-    return ""
+    # The gallery image is served on its own route. It is not a CSS url.
+    if text in PREVIEW_FILES or _SAFE_ASSET.fullmatch(text) is None:
+        return ""
+    return prefix + text
 
 
 def _safe_value(text: str) -> str:

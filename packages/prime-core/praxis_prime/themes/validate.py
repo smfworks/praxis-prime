@@ -10,7 +10,14 @@ import re
 import tomllib
 from collections.abc import Mapping
 
-from praxis_prime.themes.archive import FONT_PATH, ORNAMENT_PATH, _check_layout, read_dir, read_zip
+from praxis_prime.themes.archive import (
+    FONT_PATH,
+    ORNAMENT_PATH,
+    PREVIEW_FILES,
+    _check_layout,
+    read_dir,
+    read_zip,
+)
 from praxis_prime.themes.color import contrast_ratio, parse_color
 from praxis_prime.themes.css_restrict import check_theme_css
 from praxis_prime.themes.errors import ThemeError, ThemeIssue
@@ -617,10 +624,12 @@ def _binaries(files: dict[str, bytes], issues: list[ThemeIssue]) -> None:
                 issues.append(found)
             elif cleaned:
                 files[path] = cleaned
-        elif path.endswith(".png") and not payload.startswith(_PNG):
-            issues.append(_fix("file_type", f"{path} is not a PNG.", path, "Export a PNG."))
-        elif path.endswith(".webp") and not _webp(payload):
-            issues.append(_fix("file_type", f"{path} is not a WebP.", path, "Export a WebP."))
+            continue
+        if path in PREVIEW_FILES or path.endswith(".png") or path.endswith(".webp"):
+            if path.endswith(".png") and not payload.startswith(_PNG):
+                issues.append(_fix("file_type", f"{path} is not a PNG.", path, "Export a PNG."))
+            elif path.endswith(".webp") and not _webp(payload):
+                issues.append(_fix("file_type", f"{path} is not a WebP.", path, "Export a WebP."))
 
 
 def _text(files: Mapping[str, bytes], name: str, issues: list[ThemeIssue]) -> str:

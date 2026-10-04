@@ -45,6 +45,8 @@ _SCRIPT_SUFFIXES = frozenset({".js", ".mjs", ".cjs", ".html", ".htm", ".wasm"})
 _ASSET_PATH = re.compile(r"^assets/(fonts|ornaments)/[A-Za-z0-9._-]+$")
 FONT_PATH = re.compile(r"^assets/fonts/[A-Za-z0-9._-]+\.woff2$")
 ORNAMENT_PATH = re.compile(r"^assets/ornaments/[A-Za-z0-9._-]+\.(?:svg|png|webp)$")
+# Gallery images. Fixed names only. They are not CSS urls.
+PREVIEW_FILES = frozenset({"assets/preview.png", "assets/preview.webp"})
 _FONT_SIDECAR = frozenset({"OFL.txt", "LICENSE", "LICENSE.txt"})
 
 
@@ -273,8 +275,8 @@ def _check_layout(files: Mapping[str, bytes]) -> None:
 
 
 def _allowed(path: str) -> bool:
-    """Fixed top-level files, or one safe name under assets/fonts or assets/ornaments."""
-    if path in _ROOT_FILES:
+    """Fixed top-level files, the gallery image, or one name under fonts or ornaments."""
+    if path in _ROOT_FILES or path in PREVIEW_FILES:
         return True
     if _ASSET_PATH.fullmatch(path) is None:
         return False
@@ -290,7 +292,7 @@ def _size_limit(path: str) -> int:
         return MAX_CSS_BYTES
     if path.startswith("assets/ornaments/"):
         return MAX_ORNAMENT_BYTES
-    if path.startswith("assets/preview."):
+    if path in PREVIEW_FILES:
         return MAX_PREVIEW_BYTES
     return MAX_FILE_BYTES
 

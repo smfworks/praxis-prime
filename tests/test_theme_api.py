@@ -319,3 +319,87 @@ def test_user_smf_copy_does_not_win_and_a_tampered_theme_is_404(tmp_path: Path):
     finally:
         server.shutdown()
         host.close()
+
+
+def test_cross_site_theme_upload_is_403_not_a_reset(tmp_path: Path):
+    server, host, _runtime = _accounts(tmp_path, profile="default")
+    try:
+        payload = b"Z" * 65536
+        refused = (
+            {"Content-Type": "application/zip", "Sec-Fetch-Site": "cross-site"},
+            {"Content-Type": "application/zip", "Origin": "https://evil.example"},
+        )
+        for extra in refused:
+            status, _headers, body = _raw(
+                server.bound_port,
+                "POST",
+                "/v1/themes/install",
+                payload=payload,
+                extra=extra,
+            )
+            assert status == 403, extra
+            assert body["error"]["code"] == "forbidden"
+        cookie, _csrf, _session = _login(server.bound_port, "ada", _PASSWORD)
+        status, _headers, body = _raw(
+            server.bound_port,
+            "POST",
+            "/v1/themes/preview",
+            payload=payload,
+            extra={
+                "Content-Type": "application/zip",
+                "Cookie": f"pp_session={cookie}",
+                "x-csrf-token": "not-the-token",
+            },
+        )
+        assert status == 403
+        assert body["error"]["code"] == "forbidden"
+        assert "csrf" in str(body["error"]["message"]).casefold()
+    finally:
+        server.shutdown()
+        host.close()
+
+
+def test_preview_png_is_served_under_the_csp_and_not_in_css(tmp_path: Path):
+    files = read_builtin_files("smf.praxis")
+    text = files["theme.toml"].decode("utf-8").replace('id = "smf.praxis"', 'id = "lab.api"', 1)
+    text = text.replace('name = "Praxis"', 'name = "Lab"', 1)
+    files["theme.toml"] = text.encode("utf-8")
+    png = b"\x89PNG\r\n\x1a\n"
+    files["assets/preview.png"] = png
+    payload = io.BytesIO()
+    with zipfile.ZipFile(payload, "w") as archive:
+        for name, blob in files.items():
+            archive.writestr(name, blob)
+    server, host, _runtime = _accounts(tmp_path, profile="default")
+    try:
+        status, _headers, body = _raw(
+            server.bound_port,
+            "POST",
+            "/v1/themes/install",
+            payload=payload.getvalue(),
+            extra={"Authorization": "Bearer test-token", "Content-Type": "application/zip"},
+        )
+        assert status == 200, body
+        css_path = str(body["theme"]["css"])
+        status, _headers, raw = _raw_bytes(server.bound_port, "GET", css_path)
+        assert status == 200
+        assert b"preview" not in raw
+        preview = css_path[: -len(".css")] + "/assets/preview.png"
+        status, headers, raw = _raw_bytes(server.bound_port, "GET", preview)
+        assert status == 200
+        assert raw == png
+        assert headers.get("content-type", "").startswith("image/png")
+        policy = headers.get("content-security-policy", "")
+        assert "default-src 'self'" in policy
+        assert "img-src 'self'" in policy
+        for suffix in ("/assets/preview.jpg", "/assets/gallery.png"):
+            status, _headers, missing = _raw(
+                server.bound_port,
+                "GET",
+                css_path[: -len(".css")] + suffix,
+            )
+            assert status == 404
+            assert missing["error"]["code"] == "not_allowed"
+    finally:
+        server.shutdown()
+        host.close()

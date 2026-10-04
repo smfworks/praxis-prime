@@ -19,7 +19,7 @@ from praxis_prime.packs.model import ThemeHint
 from praxis_prime.profiles.home import create_profile, org_policy_path
 from praxis_prime.profiles.policy import load_layer
 from praxis_prime.state import StateDB
-from praxis_prime.themes.archive import read_dir, write_zip
+from praxis_prime.themes.archive import MAX_PREVIEW_BYTES, read_dir, write_zip
 from praxis_prime.themes.cli import dispatch_theme
 from praxis_prime.themes.cssgen import render_css
 from praxis_prime.themes.errors import ThemeError
@@ -296,7 +296,7 @@ def test_manifest_paths_must_match_the_schema():
     assert "bad_color" in _codes(caught.value)
 
     preview = _clone()
-    preview["assets/preview.png"] = b"\x89PNG\r\n\x1a\n"
+    preview["assets/not-a-preview.png"] = b"\x89PNG\r\n\x1a\n"
     with pytest.raises(ThemeError) as caught:
         validate_files(preview)
     assert "file_type" in _codes(caught.value)
@@ -363,10 +363,13 @@ def test_unquoted_package_urls_are_rewritten_and_breakouts_are_dropped():
 def test_decorative_lengths_are_capped():
     good = _clone()
     good["theme.css"] = (
-        b".pp-header-band { border-bottom: 16px solid #7a1f1f; box-shadow: 0 0 4px 0 #7a1f1f; }\n"
+        b".pp-header-band { border-bottom: 16px solid #7a1f1f; "
+        b"box-shadow: 0 0 4px 0 #7a1f1f; background: 0 0/16px; }\n"
     )
     package = validate_files(good)
-    assert "16px" in render_css(package, package_hash(package.files))
+    rendered = render_css(package, package_hash(package.files))
+    assert "16px" in rendered
+    assert "0 0/16px" in rendered or "0 0 / 16px" in rendered
     refused = {
         "wide": ".pp-header-band { border-bottom: 3000px solid #7a1f1f; }\n",
         "viewport": ".pp-header-band { background-size: 100vh; }\n",
@@ -374,6 +377,7 @@ def test_decorative_lengths_are_capped():
         "var": ".pp-header-band { border-radius: var(--pp-radius); }\n",
         "negative": ".pp-header-band { letter-spacing: -2px; }\n",
         "percent": ".pp-header-band { background-position: 50%; }\n",
+        "shorthand": ".pp-header-band { background: 0 0/9999px; }\n",
     }
     expected = {
         "wide": "css_property",
@@ -382,6 +386,7 @@ def test_decorative_lengths_are_capped():
         "var": "css_rejected",
         "negative": "css_property",
         "percent": "css_property",
+        "shorthand": "css_property",
     }
     for name, css in refused.items():
         files = _clone()
@@ -435,6 +440,118 @@ def test_svg_external_references_are_rejected_and_clean_svg_is_stable():
     assert again is None
     assert once == twice
     assert once.startswith(b"<?xml")
+
+
+def test_svg_css_escaped_paint_urls_are_rejected():
+    paints = [
+        r'fill="u\72l(https://evil.example/x#p)"',
+        r'fill="\75 rl(https://evil.example/x#p)"',
+        r'stroke="ur\6c(https://evil.example/x#p)"',
+        'fill="URL(https://evil.example/x#p)"',
+        'fill="uRl(https://evil.example/x#p)"',
+        'fill="url( https://evil.example/x )"',
+        'fill="url(/*x*/https://evil.example/x)"',
+        'stroke="url( /* c */ https://evil.example/x#p )"',
+        'fill="image-set(url(https://evil.example/x) 1x)"',
+        'fill="SRC(https://evil.example/x)"',
+        "fill=\"@import 'https://evil.example/x'\"",
+    ]
+    for paint in paints:
+        _reject_svg(f'<path {paint} d="M0 0 H1"/>', paint)
+
+    allowed, issue = check_svg(
+        "assets/ornaments/meander.svg",
+        b'<svg xmlns="http://www.w3.org/2000/svg"><defs>'
+        b'<linearGradient id="id"><stop offset="0" stop-color="#111111"/></linearGradient>'
+        b'</defs><rect width="4" height="4" fill="url( &quot;#id&quot; )"/></svg>',
+    )
+    assert issue is None
+    assert b"#id" in allowed
+
+
+def test_svg_root_must_be_in_the_svg_namespace():
+    refused = [
+        b'<svg xmlns="http://www.w3.org/1999/xhtml"><path d="M0 0 H1"/></svg>',
+        b'<svg><path d="M0 0 H1"/></svg>',
+        b'<html xmlns="http://www.w3.org/1999/xhtml">'
+        b'<svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0 H1"/></svg></html>',
+        b'<svg xmlns="http://www.w3.org/2000/svg">'
+        b'<g xmlns="http://www.w3.org/1999/xhtml"><rect width="1" height="1"/></g></svg>',
+        b'<svg xmlns="http://www.w3.org/2000/svg" xmlns:e="http://evil.example/" e:fill="#111">'
+        b'<path d="M0 0 H1"/></svg>',
+    ]
+    for blob in refused:
+        _issue = check_svg("assets/ornaments/meander.svg", blob)[1]
+        assert _issue is not None and _issue.code == "svg_rejected", blob
+
+    allowed, issue = check_svg(
+        "assets/ornaments/meander.svg",
+        b'<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">'
+        b'<use xlink:href="#a"/></svg>',
+    )
+    assert issue is None
+    assert b"#a" in allowed
+
+
+def test_preview_images_are_fixed_names_with_magic_bytes():
+    png = b"\x89PNG\r\n\x1a\n"
+    webp = b"RIFF\x04\x00\x00\x00WEBP"
+    package = _clone()
+    package["assets/preview.png"] = png
+    accepted = validate_files(package)
+    assert accepted.files["assets/preview.png"] == png
+    css = render_css(accepted, package_hash(accepted.files))
+    assert "preview.png" not in css
+    assert "preview.webp" not in css
+
+    web = _clone()
+    web["assets/preview.webp"] = webp
+    assert validate_files(web).files["assets/preview.webp"] == webp
+
+    mismatched = _clone()
+    mismatched["assets/preview.png"] = webp
+    with pytest.raises(ThemeError) as caught:
+        validate_files(mismatched)
+    assert "file_type" in _codes(caught.value)
+
+    swapped = _clone()
+    swapped["assets/preview.webp"] = png
+    with pytest.raises(ThemeError) as caught:
+        validate_files(swapped)
+    assert "file_type" in _codes(caught.value)
+
+    for name in (
+        "assets/preview.jpg",
+        "assets/preview.jpeg",
+        "assets/Preview.png",
+        "assets/gallery.png",
+        "assets/preview.png.bak",
+        "preview.png",
+    ):
+        other = _clone()
+        other[name] = png
+        with pytest.raises(ThemeError) as caught:
+            validate_files(other)
+        assert "file_type" in _codes(caught.value), name
+
+    huge = _clone()
+    huge["assets/preview.png"] = png + b"\x00" * MAX_PREVIEW_BYTES
+    with pytest.raises(ThemeError) as caught:
+        validate_files(huge)
+    assert "file_too_large" in _codes(caught.value)
+
+    styled = _clone()
+    styled["assets/preview.png"] = png
+    styled["theme.css"] = b'.pp-divider { background-image: url("assets/preview.png"); }\n'
+    with pytest.raises(ThemeError) as caught:
+        validate_files(styled)
+    assert "css_url" in _codes(caught.value)
+
+
+def _reject_svg(inner: str, label: str) -> None:
+    blob = ('<svg xmlns="http://www.w3.org/2000/svg">' + inner + "</svg>").encode("utf-8")
+    _issue = check_svg("assets/ornaments/meander.svg", blob)[1]
+    assert _issue is not None and _issue.code == "svg_rejected", label
 
 
 def test_damaged_and_duplicate_zips_are_rejected():
