@@ -5,7 +5,8 @@ Reads the rendered file ``~/.local/state/omarchy/current/theme/praxis-prime.json
 The file is untrusted: size is capped, only the template's keys are read,
 and a colour must be ``#rgb`` or ``#rrggbb``. Missing required tokens are
 derived in OKLCH from the dark ``smf.praxis`` palette when ``bg`` is dark,
-otherwise from the light palette. The result goes through the same contrast
+otherwise from the light palette. A seeded ``bgRaised`` that is not already
+lighter than ``bg`` is lifted. The result goes through the same contrast
 check as a package. Lightness may move by at most 0.25 in total. If it still
 fails AA, the adapter logs the reason and returns nothing, so selection falls
 through to ``smf.praxis``.
@@ -413,6 +414,8 @@ def _assemble(supplied: dict[str, str], seed: dict[str, str]) -> dict[str, str] 
     for key, value in supplied.items():
         if key in required:
             required[key] = value
+    if "bgRaised" not in supplied:
+        required["bgRaised"] = _raised_above(required["bg"], required["bgRaised"])
     derived = _derive(required)
     if derived is None:
         return None
@@ -425,6 +428,21 @@ def _assemble(supplied: dict[str, str], seed: dict[str, str]) -> dict[str, str] 
         if key in supplied:
             full[key] = supplied[key]
     return full
+
+
+def _raised_above(background: str, raised: str) -> str:
+    """Lift a seeded raised surface when it is not already lighter than the page.
+
+    Both Praxis palettes raise that surface. A mid-grey page is dark enough
+    to seed from the dark palette, whose raised colour is then darker than
+    the page. A supplied ``bgRaised`` is not passed here.
+    """
+    page_l = parse_color(background).oklch()[0]
+    surface = parse_color(raised)
+    if surface.oklch()[0] > page_l + 0.015:
+        return raised
+    step = 0.06 if page_l >= 0.5 else 0.04
+    return surface.with_lightness(min(1.0, page_l + step)).to_hex()
 
 
 def _derive(required: dict[str, str]) -> dict[str, str] | None:

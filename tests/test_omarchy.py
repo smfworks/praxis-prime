@@ -497,6 +497,46 @@ def test_refused_palette_compiles_quickly(tmp_path: Path, monkeypatch: pytest.Mo
     assert time.perf_counter() - started < 2.0
 
 
+def test_derived_bg_raised_moves_lighter_than_the_page(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    path = tmp_path / "praxis-prime.json"
+    _point(monkeypatch, path)
+
+    def lifted(payload: dict[str, object]) -> tuple[float, float, str]:
+        _write(path, payload)
+        theme = installed()
+        assert theme is not None
+        colours = theme.package.modes["dark"]
+        bg_l = parse_color(colours["bg"]).oklch()[0]
+        raised_l = parse_color(colours["bgRaised"]).oklch()[0]
+        return bg_l, raised_l, colours["bgRaised"]
+
+    mid = dict(_DARK)
+    del mid["bgRaised"]
+    mid["bg"] = "#5a5a5a"
+    bg_l, raised_l, _raised = lifted(mid)
+    assert bg_l < 0.5
+    assert raised_l > bg_l
+
+    light = dict(_LIGHT)
+    del light["bgRaised"]
+    bg_l, raised_l, _raised = lifted(light)
+    assert bg_l >= 0.5
+    assert raised_l > bg_l
+
+    dark = dict(_DARK)
+    del dark["bgRaised"]
+    bg_l, raised_l, _raised = lifted(dark)
+    assert raised_l > bg_l
+
+    _write(path, _DARK)
+    theme = installed()
+    assert theme is not None
+    assert theme.package.modes["dark"]["bgRaised"] == "#1e1a17"
+
+
 def test_partial_dark_palette_fills_from_the_dark_praxis_palette(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
