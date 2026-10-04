@@ -1398,9 +1398,9 @@ def _request(
     last = len(addresses) - 1
     unreachable: OidcError | None = None
     for index, pinned in enumerate(addresses):
+        # Retry only while the connection is still being established. A token
+        # POST that already left this process must not be sent to the next address.
         connection: http.client.HTTPConnection | None = None
-        response: http.client.HTTPResponse | None = None
-        payload = b""
         try:
             tls = ssl.create_default_context() if scheme == "https" else None
             connection = _BoundConnection(
@@ -1410,30 +1410,33 @@ def _request(
                 pinned=pinned,
                 tls=tls,
             )
+            connection.connect()
+        except OidcError:
+            if connection is not None:
+                connection.close()
+            raise
+        except OSError as exc:
+            if connection is not None:
+                connection.close()
+            if index != last and time.monotonic() < deadline:
+                unreachable = OidcError("provider_unreachable")
+                continue
+            raise OidcError("provider_unreachable") from exc
+        response: http.client.HTTPResponse | None = None
+        payload = b""
+        try:
             connection.request(method, path, body=body, headers=headers)
             response = connection.getresponse()
             if response.status in {301, 302, 303, 307, 308}:
                 _read_bounded(response, connection, 1024, deadline)
                 raise OidcError("redirect_refused")
             payload = _read_bounded(response, connection, limit + 1, deadline)
-        except OidcError as exc:
-            retry = (
-                exc.reason == "provider_unreachable"
-                and index != last
-                and time.monotonic() < deadline
-            )
-            if retry:
-                unreachable = exc
-                continue
+        except OidcError:
             raise
-        except (ssl.SSLError, TimeoutError, OSError, http.client.HTTPException) as exc:
-            if index != last and time.monotonic() < deadline:
-                unreachable = OidcError("provider_unreachable")
-                continue
+        except (OSError, http.client.HTTPException) as exc:
             raise OidcError("provider_unreachable") from exc
         finally:
-            if connection is not None:
-                connection.close()
+            connection.close()
         if len(payload) > limit:
             raise OidcError("response_too_large")
         if response is None or response.status != 200:
