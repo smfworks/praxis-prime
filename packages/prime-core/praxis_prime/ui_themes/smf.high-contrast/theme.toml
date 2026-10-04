@@ -1,0 +1,78 @@
+schema = "praxis.theme/v1"
+id = "smf.high-contrast"
+name = "High Contrast"
+version = "1.0.0"
+license = "MIT"
+authors = ["Praxis Prime"]
+description = "Black and white surfaces, Atkinson Hyperlegible, and a yellow focus ring."
+modes = ["light", "dark"]
+default_mode = "light"
+min_praxis = "0.1.0"
+contrast = "AAA"
+
+[fonts.display]
+family = "Atkinson Hyperlegible"
+license = "OFL-1.1"
+fallback = "sans-serif"
+files = [
+  { path = "assets/fonts/AtkinsonHyperlegible-Regular.woff2", weight = "400", style = "normal" },
+  { path = "assets/fonts/AtkinsonHyperlegible-Bold.woff2", weight = "700", style = "normal" },
+]
+
+[fonts.body]
+family = "Atkinson Hyperlegible"
+license = "OFL-1.1"
+fallback = "sans-serif"
+files = [
+  { path = "assets/fonts/AtkinsonHyperlegible-Regular.woff2", weight = "400", style = "normal" },
+  { path = "assets/fonts/AtkinsonHyperlegible-Bold.woff2", weight = "700", style = "normal" },
+]
+
+[fonts.mono]
+family = "JetBrains Mono"
+license = "OFL-1.1"
+fallback = "monospace"
+files = [
+  { path = "assets/fonts/JetBrainsMono.woff2", weight = "100 800", style = "normal" },
+]
+
+[shape]
+radius = 2
+density = "comfortable"
+motion = "none"
+scale = 1.2
+baseSize = 18
+lineHeight = 1.5
+borderWidth = 2
+
+[tokens.light]
+bg = "#ffffff"
+bgRaised = "#ffffff"
+fg = "#000000"
+fgMuted = "#000000"
+accent = "#000000"
+accentFg = "#ffffff"
+border = "#000000"
+borderStrong = "#000000"
+ring = "#847022"
+ok = "#1a6323"
+warn = "#715008"
+danger = "#a3282a"
+
+[tokens.dark]
+bg = "#000000"
+bgRaised = "#000000"
+fg = "#ffffff"
+fgMuted = "#ffffff"
+accent = "#ffffff"
+accentFg = "#000000"
+border = "#ffffff"
+borderStrong = "#ffffff"
+ring = "#ffff00"
+ok = "#5dca73"
+warn = "#e0b04a"
+danger = "#e97871"
+
+[ornaments]
+divider = "assets/ornaments/meander.svg"
+watermarkOpacity = 0

@@ -28,6 +28,7 @@ dependencies = [
   "cryptography>=49,<51",
   "joserfc>=1.6,<2",
   "pyotp>=2.9.0,<3",
+  "tinycss2>=1.4,<2",
   "webauthn>=3.0.0,<4",
 ]
 

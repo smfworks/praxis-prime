@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none" stroke="#7a1f1f" stroke-width="1.5" stroke-linejoin="round" role="img" aria-hidden="true">
+  <title>Laurel and shield</title>
+  <desc>A geometric laurel and shield. No eagle.</desc>
+  <path d="M32 8 L44 16 V32 C44 44 32 54 32 54 C32 54 20 44 20 32 V16 Z"/>
+  <path d="M18 42 C12 34 12 22 18 14"/>
+  <path d="M46 42 C52 34 52 22 46 14"/>
+  <path d="M14 36 C8 30 8 22 14 16"/>
+  <path d="M50 36 C56 30 56 22 50 16"/>
+</svg>

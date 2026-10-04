@@ -27,6 +27,7 @@ from praxis_prime.onboarding.cli import add_setup_parser, setup_command
 from praxis_prime.packs.cli import add_packs_parsers, dispatch_packs
 from praxis_prime.profiles.cli import add_profile_parser, profile_command
 from praxis_prime.state import MigrationInProgress
+from praxis_prime.themes.cli import add_theme_parser, dispatch_theme
 from praxis_prime.user_commands import add_user_commands, dispatch_user_command
 
 
@@ -77,6 +78,9 @@ def _main(argv: list[str] | None = None) -> int:
     if args.command == "profile":
         return profile_command(args)
     handled = dispatch_packs(args)
+    if handled is not None:
+        return handled
+    handled = dispatch_theme(args)
     if handled is not None:
         return handled
     handled = dispatch_compliance(args)
@@ -200,6 +204,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_profile_parser(commands)
     add_mcp_parser(commands)
     add_packs_parsers(commands)
+    add_theme_parser(commands)
     add_compliance_parsers(commands)
     add_user_commands(commands)
     return parser

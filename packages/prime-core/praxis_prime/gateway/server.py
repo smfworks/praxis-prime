@@ -65,6 +65,15 @@ from praxis_prime.gateway.routes import (
     ids_agree,
     route_allowed,
 )
+from praxis_prime.gateway.themes import (
+    active_response,
+    handle_themes,
+    load_theme_asset,
+    theme_asset_headers,
+    theme_asset_route,
+    theme_upload,
+    theme_zip_denial,
+)
 from praxis_prime.gateway.web import CSP, load_asset, static_route
 from praxis_prime.gateway.ws import (
     ByteBuffer,
@@ -304,6 +313,23 @@ class GatewayServer:
             if static_route(method, route_only):
                 self._static(conn, route_only)
                 return
+            if theme_asset_route(method, route_only):
+                self._theme_asset(conn, route_only)
+                return
+            if theme_upload(method, route_only, headers):
+                denial = theme_zip_denial(headers)
+                if denial is not None:
+                    status, code, message = denial
+                    _write_http(conn, status, _error(code, message))
+                    return
+                length = int(headers.get("content-length", "0") or "0")
+                body = buffer.read_exact(length) if length else b""
+                extras = []
+                status, payload = self._http(
+                    method, path, headers, body, extras, _peer_host(conn)
+                )
+                _write_http(conn, status, payload, extras)
+                return
             if headers.get("upgrade", "").lower() == "websocket":
                 self._handle_ws(conn, buffer, headers, path)
                 return
@@ -352,6 +378,18 @@ class GatewayServer:
             return 503, _error("unavailable", paused)
         if not route_allowed(method, route):
             return 404, _error("not_allowed", "route is not on the allowlist")
+        if method == "GET" and route == "/v1/themes/active":
+            return active_response(
+                accounts=self.accounts,
+                headers=headers,
+                query=query,
+                data_root=self.data_root,
+                token=self.token,
+                bearer_enabled=self.bearer_enabled,
+                profile_exists=self._profile_exists,
+                runtime_profile=self._runtime_profile(),
+                multi_profile=self.multi_profile,
+            )
         if method == "POST" and route == "/v1/auth/login":
             if self.accounts is None:
                 return 503, _error("unavailable", "accounts are not configured")
@@ -500,6 +538,20 @@ class GatewayServer:
             if self.accounts is not None:
                 extras.extend(_client_cookie(self.accounts, headers))
             return 200, body_out
+        themed = handle_themes(
+            method=method,
+            route=route,
+            headers=headers,
+            body=body,
+            query=query,
+            principal=principal,
+            profile=profile_name,
+            data_root=self.data_root,
+            audit=self.audit,
+            accounts=self.accounts,
+        )
+        if themed is not None:
+            return themed
         if method == "GET" and route == "/v1/memory":
             return self._profile_catalog("list_memory", "entries", profile_name)
         if method == "GET" and route == "/v1/skills":
@@ -652,6 +704,14 @@ class GatewayServer:
                 ("Cache-Control", cache),
             ],
         )
+
+    def _theme_asset(self, conn: socket.socket, route: str) -> None:
+        loaded = load_theme_asset(self.data_root, route)
+        if loaded is None:
+            _write_http(conn, 404, _error("not_found", "theme asset is not available"))
+            return
+        body, content_type = loaded
+        _write_bytes(conn, 200, body, content_type, theme_asset_headers())
 
     def _profile_catalog(
         self,
@@ -1637,6 +1697,13 @@ def _http_action(method: str, route: str) -> str:
         return "chat"
     if method == "GET" and route == "/v1/audit":
         return "audit"
+    if method == "POST" and route in {
+        "/v1/themes/install",
+        "/v1/themes/preview",
+        "/v1/themes/remove",
+        "/v1/themes/lock",
+    }:
+        return "admin"
     return "read"
 
 
