@@ -13,7 +13,6 @@ How to add an entry (people and agents alike):
 - Where it lives: the file or folder in this repo, in backticks.
 - Commit / version: a tag, release or full commit SHA if you know it. Otherwise
   write "unknown". Never guess a SHA.
-- Delete the EXAMPLE row once you add your first real entry.
 -->
 
 | Source (name, handle) | Link | License | What we used | Where it lives here | Commit / version |
@@ -26,5 +25,7 @@ this tree. Their notices are in [THIRD_PARTY.md](THIRD_PARTY.md).
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) is the blueprint's name for
 that inventory. The web app's build dependencies are declared in
 `ui/package.json`; `ui/dist` is the build output, not vendored source.
+Design credits for Hermes Agent, OpenClaw, Omarchy and SMF Swarm are in
+[NOTICE](NOTICE).
 No upstream source file is copied in (the copied-file log in THIRD_PARTY.md is
 empty), and no OFL font is bundled.

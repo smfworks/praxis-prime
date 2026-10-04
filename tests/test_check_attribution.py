@@ -24,6 +24,7 @@ BASE_FILES = {
         "| Source | Link | License | What | Where | Version |\n|---|---|---|---|---|---|\n"
         "| Alpha Dev (@alpha), alpha-lib | https://github.com/alpha/alpha-lib | MIT | parser | `src/parse.py` | v1.0 |\n"
         "| Beta Org (@beta), beta-kit | https://github.com/beta/beta-kit | Apache-2.0 | icons | `assets/icons/` | unknown |\n"
+        "| **EXAMPLE (not a real entry):** Jane Example | https://example.com | MIT | example | `example.py` | unknown |\n"
     ),
     "src/app.py": "print('hi')\n",
 }
@@ -117,12 +118,19 @@ class AttributionCheck(unittest.TestCase):
 
     def test_pass_credits_reordered(self):
         lines = BASE_FILES["CREDITS.md"].splitlines(keepends=True)
-        reordered = "".join(lines[:4] + [lines[5], lines[4]])
+        reordered = "".join(lines[:4] + [lines[5], lines[4], lines[6]])
         code, _ = self.scenario("pass-reorder", body("none"), [("CREDITS.md", reordered)])
         self.assertEqual(code, 0)
 
-    def test_pass_credits_removal_with_label(self):
+    def test_pass_example_row_removed(self):
         trimmed = "".join(BASE_FILES["CREDITS.md"].splitlines(keepends=True)[:-1])
+        code, out = self.scenario("pass-example-removed", body("none"),
+                                  [("CREDITS.md", trimmed)])
+        self.assertEqual(code, 0); self.assertNotIn("credits-edit-ok", out)
+
+    def test_pass_credits_removal_with_label(self):
+        lines = BASE_FILES["CREDITS.md"].splitlines(keepends=True)
+        trimmed = "".join(lines[:-2] + lines[-1:])
         code, out = self.scenario("pass-label", body("none"), [("CREDITS.md", trimmed)],
                                   labels=["credits-edit-ok"])
         self.assertEqual(code, 0); self.assertIn("allowed by the 'credits-edit-ok' label", out)
@@ -172,7 +180,8 @@ class AttributionCheck(unittest.TestCase):
         self.assertEqual(code, 1); self.assertIn("renamed", out)
 
     def test_fail_credits_line_removed(self):
-        trimmed = "".join(BASE_FILES["CREDITS.md"].splitlines(keepends=True)[:-1])
+        lines = BASE_FILES["CREDITS.md"].splitlines(keepends=True)
+        trimmed = "".join(lines[:-2] + lines[-1:])
         code, out = self.scenario("fail-credits-removed", body("none"), [("CREDITS.md", trimmed)])
         self.assertEqual(code, 1); self.assertIn("credits-edit-ok", out)
 
@@ -205,6 +214,65 @@ class AttributionCheck(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("LICENSE was renamed to docs/old.txt", out)
         self.assertIn("license-removal-ok", out)
+
+    # ---- header matching: only real header lines count (regression for the
+    # false positives on the kit's own docstring and test fixture)
+    def test_no_warn_copyright_mentioned_in_prose_or_string(self):
+        prose = ('"""Helper.\n\n  * warns when a file carries a copyright or SPDX header\n"""\n'
+                 'FIXTURE = "# Copyright (c) 2021 Gamma Co\\n# SPDX-License-Identifier: BSD-3-Clause\\n"\n'
+                 'msg = f"copyright header for {holder}"  # see SPDX-License-Identifier: docs\n')
+        code, out = self.scenario("no-warn-prose", body("none"), [("src/prose.py", prose)])
+        self.assertEqual(code, 0); self.assertNotIn("is a new file", out)
+
+    def test_no_warn_kit_files_themselves(self):
+        with open(SCRIPT, encoding="utf-8") as fh:
+            script = fh.read()
+        with open(os.path.abspath(__file__), encoding="utf-8") as fh:
+            tests = fh.read()
+        code, out = self.scenario("no-warn-kit-files", body("none"),
+                                  [("scripts/check_attribution.py", script),
+                                   ("tests/test_check_attribution.py", tests)])
+        self.assertEqual(code, 0); self.assertNotIn("is a new file", out)
+
+    def test_warn_header_styles_still_detected(self):
+        cases = [("src/a.py", '"""Copyright (c) 2021 Gamma Co\n"""\n', "'Gamma Co'"),
+                 ("src/b.html", "<!-- Copyright 2020 Delta Ltd -->\n", "'Delta Ltd'"),
+                 ("src/c.sql", "-- SPDX-FileCopyrightText: 2022 Epsilon Inc\n", "'Epsilon Inc'"),
+                 ("src/d.c", " * Copyright \u00a9 2018 Zeta GmbH\n", "'Zeta GmbH'"),
+                 ("src/e.ts", "/*\n * SPDX-License-Identifier: MPL-2.0\n */\n", "'MPL-2.0'")]
+        code, out = self.scenario("warn-header-styles", body("none"), [(p, t) for p, t, _ in cases])
+        self.assertEqual(code, 0)
+        for _, _, expected in cases:
+            self.assertIn(expected, out)
+
+
+class WorkflowCommandEscapingTests(unittest.TestCase):
+    def load(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("check_attribution_under_test", SCRIPT)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_annotation_values_are_escaped(self):
+        mod = self.load()
+        self.assertEqual(mod._gha_data("50%\r\n::error::x"), "50%25%0D%0A::error::x")
+        self.assertEqual(mod._gha_prop("a,b:c\n::error::x"), "a%2Cb%3Ac%0A%3A%3Aerror%3A%3Ax")
+
+    def test_newline_in_file_name_cannot_fake_an_annotation(self):
+        import contextlib
+        import io
+        from unittest import mock
+        mod = self.load()
+        rep = mod.Report()
+        rep.warn("odd file", "src/x\n::error::forged.py")
+        buf = io.StringIO()
+        with mock.patch.dict(os.environ, {"GITHUB_ACTIONS": "true", "GITHUB_STEP_SUMMARY": ""}), \
+                contextlib.redirect_stdout(buf):
+            mod.emit(rep)
+        lines = buf.getvalue().splitlines()
+        self.assertFalse(any(line.startswith("::error::") for line in lines))
+        self.assertTrue(lines[0].startswith("::warning file=src/x%0A%3A%3Aerror%3A%3Aforged.py::"))
 
 
 if __name__ == "__main__":

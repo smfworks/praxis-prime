@@ -8,9 +8,9 @@ Fails when:
   * the PR body has no "Sources" section, or it is empty;
   * Sources lists something other than "none" but CREDITS.md was not changed;
   * a LICENSE / NOTICE / COPYING file is deleted, renamed away or emptied unless the PR has license-removal-ok;
-  * lines are removed from CREDITS.md and the PR lacks the label credits-edit-ok.
+  * non-example lines are removed from CREDITS.md and the PR lacks the label credits-edit-ok.
 Warns (does not fail) when:
-  * an added file carries a copyright or SPDX header that CREDITS.md doesn't cover;
+  * an added file starts a line with a copyright or SPDX header that CREDITS.md doesn't cover;
   * a link listed in Sources doesn't appear in CREDITS.md;
   * a LICENSE / NOTICE / COPYING file is removed with the license-removal-ok label.
 
@@ -28,15 +28,20 @@ import sys
 from collections import Counter
 
 OVERRIDE_LABEL = "credits-edit-ok"
+EXAMPLE_MARKER = "**EXAMPLE"  # marker used by the EXAMPLE row in CREDITS.md.template
 LICENSE_REMOVAL_OVERRIDE = "license-removal-ok"
 LICENSE_NAME_RE = re.compile(r"^(licen[cs]e|notice|copying)([.\-_].*)?$", re.IGNORECASE)
 SOURCES_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s*sources\b.*$", re.IGNORECASE)
 ANY_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s")
 HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
 URL_RE = re.compile(r"https?://[^\s<>()\[\]`'\"|]+")
-SPDX_COPYRIGHT_RE = re.compile(r"SPDX-FileCopyrightText:\s*(.+)", re.IGNORECASE)
-COPYRIGHT_RE = re.compile(r"\bcopyright\b\s*(?:\(c\)|©)?\s*(.+)", re.IGNORECASE)
-SPDX_LICENSE_RE = re.compile(r"SPDX-License-Identifier:\s*([A-Za-z0-9.+\-() ]+)")
+# Header lines only: the keyword must start the line, after optional comment or
+# quote marks (#, //, /*, *, <!--, --, ;, %, """). Prose or string literals that
+# mention "copyright" mid-line are not headers.
+HEADER_PREFIX = r"^[\s#/*;!%<>{}()\-\"'.]*"
+SPDX_COPYRIGHT_RE = re.compile(HEADER_PREFIX + r"SPDX-FileCopyrightText:\s*(.+)", re.IGNORECASE)
+COPYRIGHT_RE = re.compile(HEADER_PREFIX + r"copyright\b\s*(?:\(c\)|©)?\s*(.+)", re.IGNORECASE)
+SPDX_LICENSE_RE = re.compile(HEADER_PREFIX + r"SPDX-License-Identifier:\s*([A-Za-z0-9.+\-() ]+)")
 HEADER_LINES = 40          # how far into a new file we look for headers
 MAX_READ = 256 * 1024      # bytes read per file
 
@@ -237,6 +242,8 @@ def run(event: dict, repo: str, credits_file: str, own_holders: list[str], own_s
             elif line.startswith("+") and line[1:].strip():
                 added[line[1:].strip()] += 1
         really_removed = removed - added   # lines that were only moved don't count
+        really_removed = Counter({line: count for line, count in really_removed.items()
+                                  if EXAMPLE_MARKER not in line})
         if really_removed:
             n = sum(really_removed.values())
             if OVERRIDE_LABEL in labels:
@@ -269,15 +276,25 @@ def run(event: dict, repo: str, credits_file: str, own_holders: list[str], own_s
     return rep
 
 
+def _gha_data(value: str) -> str:
+    """Escape a workflow-command message so a file name can't fake an annotation."""
+    return value.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+
+
+def _gha_prop(value: str) -> str:
+    """Escape a workflow-command property value (e.g. file=)."""
+    return _gha_data(value).replace(":", "%3A").replace(",", "%2C")
+
+
 def emit(rep: Report) -> None:
     gha = os.environ.get("GITHUB_ACTIONS") == "true"
     for msg, path in rep.warnings:
         if gha:
-            print(f"::warning{' file=' + path if path else ''}::{msg}")
+            print(f"::warning{' file=' + _gha_prop(path) if path else ''}::{_gha_data(msg)}")
         else:
             print(f"WARNING: {msg}")
     for msg in rep.errors:
-        print(f"::error::{msg}" if gha else f"ERROR: {msg}")
+        print(f"::error::{_gha_data(msg)}" if gha else f"ERROR: {msg}")
     verdict = "failed" if rep.errors else "passed"
     print(f"Attribution check {verdict}: {len(rep.errors)} error(s), {len(rep.warnings)} warning(s).")
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
