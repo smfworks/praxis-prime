@@ -242,6 +242,10 @@ praxis-prime/
 
 The kernel subpackages (`loop`, `gateway`, `decide`, `swarm`, and the rest) match [ARCHITECTURE §24](docs/ARCHITECTURE.md). Each one points at the blueprint section that will fill it in. Upstream trees are not vendored.
 
+## Credits
+
+Work reused or adapted from other people is listed in [CREDITS.md](CREDITS.md).
+
 ## License
 
 MIT. Copyright (c) 2026 SMF Works. See [LICENSE](LICENSE).
