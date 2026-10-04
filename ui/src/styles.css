@@ -1,31 +1,48 @@
 @import "tailwindcss";
 
 @theme {
-  --font-sans: var(--pp-font);
+  --font-sans: var(--pp-fontBody);
+  --font-mono: var(--pp-fontMono);
   --color-canvas: var(--pp-bg);
   --color-ink: var(--pp-fg);
-  --color-muted: var(--pp-muted);
-  --color-line: var(--pp-line);
-  --color-card: var(--pp-card);
+  --color-muted: var(--pp-fgMuted);
+  --color-line: var(--pp-border);
+  --color-card: var(--pp-bgRaised);
   --color-accent: var(--pp-accent);
-  --color-accent-fg: var(--pp-accent-fg);
+  --color-accent-fg: var(--pp-accentFg);
   --color-danger: var(--pp-danger);
-  --color-danger-fg: var(--pp-danger-fg);
-  --color-focus: var(--pp-focus);
+  --color-danger-fg: var(--pp-dangerFg);
+  --color-focus: var(--pp-ring);
+  --color-ok: var(--pp-ok);
+  --color-warn: var(--pp-warn);
 }
 
+/* First paint matches smf.praxis light. The theme <link> replaces these. */
 :root {
-  --pp-bg: #f6f3ec;
-  --pp-fg: #1a1814;
-  --pp-muted: #4a453c;
-  --pp-line: #d5cfc3;
-  --pp-card: #fffdf8;
-  --pp-accent: #16382c;
-  --pp-accent-fg: #f6f3ec;
-  --pp-danger: #7a1f1f;
-  --pp-danger-fg: #fffdf8;
-  --pp-focus: #0b57d0;
-  --pp-font: "Segoe UI", "Noto Sans", "Liberation Sans", sans-serif;
+  --pp-bg: #f6f1e7;
+  --pp-bgRaised: #fffdf8;
+  --pp-fg: #231c17;
+  --pp-fgMuted: #5e5247;
+  --pp-accent: #7a1f1f;
+  --pp-accentFg: #fff8ee;
+  --pp-danger: #a3261d;
+  --pp-dangerFg: #fffdf8;
+  --pp-ok: #2f6b35;
+  --pp-warn: #8a5a00;
+  --pp-border: #d8ccb8;
+  --pp-borderStrong: #5e5247;
+  --pp-ring: #7a1f1f;
+  --pp-fontDisplay: "Cinzel", serif;
+  --pp-fontBody: "Inter", sans-serif;
+  --pp-fontMono: "JetBrains Mono", monospace;
+  --pp-baseSize: 16px;
+  --pp-lineHeight: 1.5;
+  --pp-radius: 6px;
+  --pp-borderWidth: 1px;
+  --pp-ornamentHeader: none;
+  --pp-ornamentDivider: none;
+  --pp-watermark: none;
+  --pp-watermarkOpacity: 0;
 }
 
 @layer base {
@@ -37,12 +54,27 @@
   body {
     margin: 0;
     min-height: 100vh;
-    font-family: var(--pp-font);
-    line-height: 1.45;
+    font-family: var(--pp-fontBody), sans-serif;
+    font-size: var(--pp-baseSize);
+    line-height: var(--pp-lineHeight);
+  }
+
+  h1,
+  h2,
+  h3,
+  .pp-wordmark {
+    font-family: var(--pp-fontDisplay), serif;
+    letter-spacing: 0.04em;
+  }
+
+  code,
+  pre,
+  kbd {
+    font-family: var(--pp-fontMono), monospace;
   }
 
   :focus-visible {
-    outline: 3px solid var(--pp-focus);
+    outline: 3px solid var(--pp-ring);
     outline-offset: 2px;
   }
 
@@ -51,15 +83,46 @@
   }
 }
 
+.pp-app {
+  position: relative;
+}
+
+.pp-app::before {
+  content: "";
+  position: fixed;
+  top: 4.5rem;
+  right: 1rem;
+  width: 6rem;
+  height: 6rem;
+  background: var(--pp-watermark) center / contain no-repeat;
+  opacity: var(--pp-watermarkOpacity);
+  pointer-events: none;
+}
+
+.pp-header-band {
+  background-image: var(--pp-ornamentHeader);
+  background-repeat: repeat-x;
+  background-position: center bottom;
+  background-size: auto 8px;
+}
+
+.pp-divider {
+  height: 12px;
+  background-image: var(--pp-ornamentDivider);
+  background-repeat: repeat-x;
+  background-position: center;
+  background-size: auto 12px;
+}
+
 .skip {
   position: absolute;
   left: 0.75rem;
   top: 0.75rem;
   transform: translateY(-200%);
-  background: var(--pp-card);
+  background: var(--pp-bgRaised);
   color: var(--pp-fg);
   padding: 0.4rem 0.7rem;
-  border: 1px solid var(--pp-line);
+  border: var(--pp-borderWidth) solid var(--pp-borderStrong);
 }
 
 .skip:focus {
@@ -68,37 +131,39 @@
 
 .field {
   width: 100%;
-  border: 1px solid var(--pp-line);
-  background: var(--pp-card);
+  border: var(--pp-borderWidth) solid var(--pp-borderStrong);
+  background: var(--pp-bgRaised);
   color: var(--pp-fg);
-  border-radius: 0.375rem;
+  border-radius: var(--pp-radius);
   padding: 0.45rem 0.6rem;
+  font: inherit;
 }
 
 .btn,
 .btn-quiet,
 .btn-danger {
-  border-radius: 0.375rem;
+  border-radius: var(--pp-radius);
   padding: 0.45rem 0.8rem;
   cursor: pointer;
+  font: inherit;
 }
 
 .btn {
   background: var(--pp-accent);
-  color: var(--pp-accent-fg);
-  border: 1px solid var(--pp-accent);
+  color: var(--pp-accentFg);
+  border: var(--pp-borderWidth) solid var(--pp-accent);
 }
 
 .btn-quiet {
-  background: var(--pp-card);
+  background: var(--pp-bgRaised);
   color: var(--pp-fg);
-  border: 1px solid var(--pp-line);
+  border: var(--pp-borderWidth) solid var(--pp-borderStrong);
 }
 
 .btn-danger {
   background: var(--pp-danger);
-  color: var(--pp-danger-fg);
-  border: 1px solid var(--pp-danger);
+  color: var(--pp-dangerFg);
+  border: var(--pp-borderWidth) solid var(--pp-danger);
 }
 
 .btn:disabled,
@@ -106,6 +171,35 @@
 .btn-danger:disabled {
   opacity: 0.6;
   cursor: not-allowed;
+}
+
+.pp-approval {
+  border-width: var(--pp-borderWidth);
+  border-color: var(--pp-borderStrong);
+}
+
+@media (max-width: 639px) {
+  .pp-nav {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 20;
+    display: flex;
+    gap: 0.75rem;
+    overflow-x: auto;
+    background: var(--pp-bgRaised);
+    border-top: var(--pp-borderWidth) solid var(--pp-borderStrong);
+    padding: 0.55rem 0.75rem calc(0.55rem + env(safe-area-inset-bottom));
+  }
+
+  .pp-nav a {
+    white-space: nowrap;
+  }
+
+  #main {
+    padding-bottom: 5rem;
+  }
 }
 
 .sr-only {

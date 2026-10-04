@@ -71,6 +71,11 @@ def test_wheel_and_sdist_ship_compliance_packs(tmp_path: Path):
         archived = set(archive.namelist())
     for filename in expected:
         assert f"praxis_prime/_data/packs/compliance/{filename}" in archived
+    assert "praxis_prime/ui_themes/smf.praxis/theme.toml" in archived
+    assert "praxis_prime/ui_themes/smf.high-contrast/theme.toml" in archived
+    assert any(name.endswith("assets/fonts/OFL.txt") and "ui_themes" in name for name in archived)
+    assert any(name.endswith(".woff2") and "ui_themes" in name for name in archived)
+    assert any(name.endswith("meander.svg") and "ui_themes" in name for name in archived)
 
     target = tmp_path / "installed"
     subprocess.run(

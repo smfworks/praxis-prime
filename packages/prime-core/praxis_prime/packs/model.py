@@ -50,7 +50,12 @@ class MappedRule:
 
 @dataclass(frozen=True, slots=True)
 class ThemeHint:
-    """Author theme tokens. Not applied until the theme engine exists."""
+    """Author colour hints. Applied by the theme engine onto smf.praxis.
+
+    ``accent``, ``panel`` (``bgRaised``), ``ok``, and ``warn`` are checked
+    for WCAG contrast. A hint that cannot pass after a small lightness
+    change is refused. The pack still installs.
+    """
 
     suggested_theme_id: str
     token_overrides: tuple[tuple[str, str], ...]

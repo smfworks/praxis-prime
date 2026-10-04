@@ -1,0 +1,77 @@
+schema = "praxis.theme/v1"
+id = "smf.praxis"
+name = "Praxis"
+version = "1.0.0"
+license = "MIT"
+authors = ["Praxis Prime"]
+description = "Marble, oxblood, and bronze. The default Praxis Prime theme."
+modes = ["light", "dark"]
+default_mode = "light"
+min_praxis = "0.1.0"
+contrast = "AA"
+
+[fonts.display]
+family = "Cinzel"
+license = "OFL-1.1"
+fallback = "serif"
+files = [
+  { path = "assets/fonts/Cinzel.woff2", weight = "400 900", style = "normal" },
+]
+
+[fonts.body]
+family = "Inter"
+license = "OFL-1.1"
+fallback = "sans-serif"
+files = [
+  { path = "assets/fonts/Inter.woff2", weight = "100 900", style = "normal" },
+]
+
+[fonts.mono]
+family = "JetBrains Mono"
+license = "OFL-1.1"
+fallback = "monospace"
+files = [
+  { path = "assets/fonts/JetBrainsMono.woff2", weight = "100 800", style = "normal" },
+]
+
+[shape]
+radius = 6
+density = "cozy"
+motion = "subtle"
+scale = 1.2
+baseSize = 16
+lineHeight = 1.5
+borderWidth = 1
+
+[tokens.light]
+bg = "#f6f1e7"
+bgRaised = "#fffdf8"
+fg = "#231c17"
+fgMuted = "#5e5247"
+accent = "#7a1f1f"
+accentFg = "#fff8ee"
+border = "#d8ccb8"
+borderStrong = "#5e5247"
+ring = "#7a1f1f"
+ok = "#2f6b35"
+warn = "#8a5a00"
+danger = "#a3261d"
+
+[tokens.dark]
+bg = "#14110f"
+bgRaised = "#1e1a17"
+fg = "#efe7da"
+fgMuted = "#b3a894"
+accent = "#c08a3e"
+accentFg = "#14110f"
+border = "#3a322b"
+borderStrong = "#b3a894"
+ring = "#c08a3e"
+ok = "#6fbf73"
+warn = "#e0b04a"
+danger = "#e0655a"
+
+[ornaments]
+divider = "assets/ornaments/meander.svg"
+watermark = "assets/ornaments/laurel.svg"
+watermarkOpacity = 0.04

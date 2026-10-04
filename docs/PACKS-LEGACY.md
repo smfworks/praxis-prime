@@ -35,7 +35,7 @@ praxis-prime packs info law_firm
 | `tools[]` | An allowlist. `read_file`, `list_dir`, `fetch_url`, `search_web`, `query_knowledge`, and `save_private_note` map to Prime tools. Every other name is listed as unavailable. |
 | `riskPolicy` | Recorded rules: dual approval, autonomous classes, egress check, injection check, approval TTL. |
 | `complianceMode: enforced` | A suggestion only. Related dials, when known, are suggested at `monitor`. Nothing is written to config. Old `enforced` is not Praxis `enforce`. |
-| `theme` | Hex token hints (`accent`, `panel` → `bgRaised`, `ok`, `warn`) and a suggested built-in theme id. Not applied yet. |
+| `theme` | Hex token hints (`accent`, `panel` → `bgRaised`, `ok`, `warn`) and a suggested built-in theme id. Applied to `smf.praxis` (or to that built-in when it is installed) through the theme contrast check. |
 | `model`, `provider` | Ignored. Logged as a warning and shown as the author's suggestion. `selected model` stays none. |
 
 ## What is refused
@@ -57,5 +57,5 @@ Bundled dial packs in `packs/compliance/*.toml` are installed with the wheel at 
 - Enforce the tool allowlist per profile, and apply suggested dials only after an admin confirms them.
 - Place the pack persona under the live safety preamble when profiles exist. It is stored on the loaded pack today and is not inserted into the chat prompt.
 - Feed pack knowledge into the semantic memory collection when a profile enables the pack.
-- Apply theme hints after the theme engine exists, including the contrast check.
+- Theme hints run through the theme engine. Lightness may move by at most 0.25 in OKLCH. A hint that still misses WCAG 2.2 AA is refused, and the pack still installs. `praxis-prime packs install` writes `pack.<name>` when the hint passes. `install_pack` does not. Choosing `smf.praxis` itself does not apply the hint. The six suggested built-ins other than the default are M3b; until they ship, a hint for one of those ids uses the `smf.praxis` palette.
 - Replace dashboard JavaScript with declarative panels rendered by the Praxis UI.

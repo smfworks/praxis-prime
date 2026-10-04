@@ -88,7 +88,7 @@ praxis-theme-legal-office/
 │   │   ├── LibreBaskerville-Regular.woff2
 │   │   └── OFL.txt
 │   ├── ornaments/      # optional: SVG (sanitized) or PNG/WebP, ≤ 256 KiB each
-│   └── preview.png     # optional: 1200×750 screenshot for the gallery
+│   └── preview.png     # optional: exactly assets/preview.png or assets/preview.webp (magic bytes, ≤ 1 MiB, not used in CSS)
 └── theme.css           # optional: restricted CSS (§1.4); rejected if it breaks any rule
 ```
 

@@ -382,6 +382,38 @@ praxis-prime mcp tools notes
 
 `praxis-prime mcp serve` exposes `decide`, `recall`, and `skills_list` on stdio for other agents. It is off unless you run that command. The daemon does not start it. Bearer tokens for HTTP servers come from the environment or `secrets.env`. Full OAuth 2.1 is not implemented.
 
+## Themes
+
+A theme changes colours, type, and a few decorative hooks. It does not add controls, run code, or call the network.
+
+Two themes ship in the wheel. `smf.praxis` is the default (Cinzel, Inter, and JetBrains Mono). `smf.high-contrast` is WCAG 2.2 AAA, with Atkinson Hyperlegible for text and JetBrains Mono for code. The other six built-in themes, the Omarchy live-theme adapter, and the authoring guide are the next part of this milestone.
+
+```bash
+praxis-prime theme list
+praxis-prime theme lint ./my-theme
+praxis-prime theme lint ./my-theme --json
+praxis-prime theme pack ./my-theme
+praxis-prime theme install ./my-theme-1.0.0.praxis-theme.zip
+praxis-prime theme set smf.high-contrast --mode dark --profile default
+praxis-prime theme set smf.praxis --lock --mode light
+praxis-prime theme set --unlock
+praxis-prime theme remove lab.sample
+```
+
+`theme pack` writes `<id>-<version>.praxis-theme.zip` in the current directory, or at `-o`. `theme lint --json` prints `{"ok": true, "id", "version", "contrast"}` or `{"ok": false, "error": {"code": "theme_invalid", "message", "issues"}}`. Each issue has `code`, `message`, `path`, and `fix`.
+
+Install writes `theme.lock.json` beside the package. The lock lists the SHA-256 of every file and a package hash. The lock file itself is outside that hash. Loading and serving a user or system theme checks those hashes. A mismatch is skipped on the list, and the stylesheet URL is 404. Built-ins are read from the wheel at `praxis_prime/ui_themes` with `importlib.resources` and have no lock file. User themes go in `$XDG_DATA_HOME/praxis-prime/themes/<id>/<version>/` (or `--data-dir`). `--system` on `install` and `remove` uses `/var/lib/praxis-prime/themes`. The same id resolves user, then system, then built-in, except `smf` and `smf.*`, which stay the built-in. A user or system package cannot take those ids. Inside one source the highest `MAJOR.MINOR.PATCH` wins. A built-in cannot be removed.
+
+Selection order is the admin lock, then the profile choice, then device preference, then the Omarchy live theme, then `smf.praxis`. `--mode system` follows `prefers-color-scheme` in the stylesheet. A lock also sets the mode when the lock names one. The Omarchy hook returns no theme until that adapter lands, so an unset profile paints `smf.praxis`.
+
+The CLI writes the data directory the same way `packs install` does. Account roles are enforced by the daemon. `theme install` and `theme set` (including `--lock`) append `theme.install` and `theme.activate` when that runtime's `prime.db` already exists. `theme remove` appends `theme.remove` for each removed version, with `id`, `version`, and `packageHash`. A missing database is left uncreated.
+
+In the web UI, open Settings → Appearance. The page lists themes and sets light, dark, or system. An owner or admin can install a `.zip` (the file is checked, then you confirm Install), remove a user or system theme, and lock or unlock the theme for every profile. An owner or admin can set any profile. An operator can set a profile where their membership is owner or operator. A viewer or an auditor cannot change the theme. While a lock is set, a non-admin select is refused.
+
+A legacy pack `theme` hint (`accent`, `panel` as `bgRaised`, `ok`, `warn`) is checked against `smf.praxis`, or against the suggested built-in when that theme is installed. Lightness may move by at most 0.25 in OKLCH so each pair clears WCAG 2.2 AA. Past that the hint is refused and the pack still installs. `praxis-prime packs install` writes `pack.<name>` when the hint passes. Choosing `smf.praxis` itself leaves the hint off. See [PACKS-LEGACY.md](PACKS-LEGACY.md).
+
+The package schema is `praxis.theme/v1`, published at `schemas/theme.v1.json`. Optional `theme.css` may set `--pp-*` custom properties on `:root` and `[data-mode]`, plus the decorative hooks `.pp-ornament-*`, `.pp-header-band`, `.pp-sidebar-texture`, and `.pp-divider`. The validator folds those custom properties into the token maps. The served stylesheet uses the compiled values for light, dark, system-light, and system-dark, and does not replay the author `:root` rules. The validator rejects `@import`, remote `url()`, scripts, rules aimed at approval, dial, or audit controls, and decorative lengths outside about 16px. Package paths are `assets/fonts/<name>.woff2` and `assets/ornaments/<name>.svg` (or png or webp), with a name of letters, digits, `.`, `_`, and `-`, plus exactly `assets/preview.png` or `assets/preview.webp`. Both modes are checked for contrast before install, and the served CSS resolves to those same colours.
+
 ## Browser
 
 Headless browsing is optional:
@@ -395,4 +427,4 @@ The `browser` tool can navigate, snapshot, click, type, screenshot, extract text
 
 ## Not in this milestone
 
-A coding-mode embedding index of the repo, regulatory dial enforcement beyond redaction and retention windows, and the TUI are still stubs. The loopback page in `ui/dist` covers password, TOTP, configured OIDC providers, and chat. The chat client in `ui/src` streams a turn over the gateway WebSocket. ONNX classifiers, parallel jury calls, nightly recalibration, and the decision eval suites are not in this build. Per-hunk diff review, the `auto` coding classifier, background cloud coding, Ed25519 device pairing, an approval Edit button, and channels other than Telegram are not either. Natural-language cron, FTS5, sqlite-vec, skill security grading, and a skill hub lockfile are later work. Full MCP OAuth 2.1, an MCP security grade, a remote egress proxy, a browser vision loop, and driving the user's signed-in browser are later work too. See [ARCHITECTURE.md](ARCHITECTURE.md) §29 for the rest of the roadmap.
+A coding-mode embedding index of the repo, regulatory dial enforcement beyond redaction and retention windows, and the TUI are still stubs. The loopback page in `ui/dist` covers password, TOTP, configured OIDC providers, chat, and Settings → Appearance. The chat client in `ui/src` streams a turn over the gateway WebSocket. ONNX classifiers, parallel jury calls, nightly recalibration, and the decision eval suites are not in this build. Per-hunk diff review, the `auto` coding classifier, background cloud coding, Ed25519 device pairing, an approval Edit button, and channels other than Telegram are not either. Natural-language cron, FTS5, sqlite-vec, skill security grading, and a skill hub lockfile are later work. Full MCP OAuth 2.1, an MCP security grade, a remote egress proxy, a browser vision loop, and driving the user's signed-in browser are later work too. See [ARCHITECTURE.md](ARCHITECTURE.md) §29 for the rest of the roadmap.

@@ -3,11 +3,20 @@
 
 Reproduces the pairs in docs/blueprint-addendum-2026-09.md §1.7 and Appendix B.
 Text pairs must be at least 4.5:1. The decorative border pair is reported only.
+Ratios come from ``praxis_prime.themes.color``, the same math the theme
+validator uses.
 
 Run: python scripts/contrast_check.py
 """
 
 from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+_CORE = Path(__file__).resolve().parents[1] / "packages" / "prime-core"
+if str(_CORE) not in sys.path:
+    sys.path.insert(0, str(_CORE))
 
 PALETTES: dict[str, dict[str, str]] = {
     "praxis-dark": {
@@ -195,29 +204,10 @@ PAIRS: tuple[tuple[str, str, str, float], ...] = (
 )
 
 
-def relative_luminance(hex_color: str) -> float:
-    """sRGB relative luminance from a #rrggbb colour (WCAG 2.x)."""
-    digits = hex_color.lstrip("#")
-    red, green, blue = (int(digits[index : index + 2], 16) / 255 for index in (0, 2, 4))
-
-    def linearize(channel: float) -> float:
-        if channel <= 0.03928:
-            return channel / 12.92
-        return ((channel + 0.055) / 1.055) ** 2.4
-
-    return 0.2126 * linearize(red) + 0.7152 * linearize(green) + 0.0722 * linearize(blue)
-
-
-def contrast_ratio(left: str, right: str) -> float:
-    """WCAG contrast ratio, lighter over darker."""
-    lighter, darker = sorted(
-        (relative_luminance(left), relative_luminance(right)),
-        reverse=True,
-    )
-    return (lighter + 0.05) / (darker + 0.05)
-
-
 def main() -> int:
+    # Imported after the path insert above so the script runs without an install.
+    from praxis_prime.themes.color import contrast_ratio
+
     failures = 0
     for name, palette in PALETTES.items():
         parts: list[str] = []

@@ -3,9 +3,11 @@
 Copyright (c) 2026 SMF Works. Praxis Prime itself is MIT; see LICENSE and NOTICE.
 
 This file is the third-party notice named in the architecture blueprint
-(§24, §32). No upstream source is vendored in this pre-alpha skeleton. The
-entries below are the attribution record for code and assets that may be
-reused later, and the notices that must stay attached if they are.
+(§24, §32). No upstream source tree is vendored in this pre-alpha skeleton.
+Two built-in themes ship subset WOFF2 fonts under the SIL Open Font License;
+see [Bundled fonts](#bundled-fonts). The entries below are the attribution
+record for code and assets that may be reused later, and the notices that
+must stay attached if they are.
 
 SMF Works does not own Hermes Agent, OpenClaw, or Omarchy. Reuse is allowed
 only under those projects' own licenses. Inclusion here is not an endorsement
@@ -130,6 +132,24 @@ No TypeSafe source is vendored in `praxis_prime.decide`.
 | pyOpenSSL | Apache-2.0 | Transitive dependency of `webauthn` 3.0.x (`pyOpenSSL>=26.3`). No source is copied into this repository. |
 | pyasn1 | BSD-2-Clause | Transitive dependency of `webauthn` for attestation structures. No source is copied into this repository. |
 | pyasn1-modules | BSD | Transitive dependency of `webauthn` for ASN.1 modules. No source is copied into this repository. |
+| tinycss2 | BSD-3-Clause | CSS parser for the theme `theme.css` allowlist. No source is copied into this repository. |
+| webencodings | BSD | Transitive dependency of tinycss2. No source is copied into this repository. |
+
+## Bundled fonts
+
+`smf.praxis` and `smf.high-contrast` ship subset WOFF2 files built from the
+SIL Open Font License families in the `google/fonts` `ofl/` tree. The SPA
+serves them from the theme package. It does not request a font host. Each
+package keeps the upstream OFL 1.1 text in `assets/fonts/OFL.txt`. The
+theme `LICENSE` is MIT and covers the palette and the package text. The
+fonts stay OFL-1.1 and are not relicensed.
+
+| Family | Package file | Copyright | License |
+|---|---|---|---|
+| Cinzel (variable, weight 400–900) | `praxis_prime/ui_themes/smf.praxis/assets/fonts/Cinzel.woff2` | Copyright 2020 The Cinzel Project Authors (https://github.com/NDISCOVER/Cinzel) | OFL-1.1 |
+| Inter (variable) | `praxis_prime/ui_themes/smf.praxis/assets/fonts/Inter.woff2` | Copyright 2020 The Inter Project Authors (https://github.com/rsms/inter) | OFL-1.1 |
+| JetBrains Mono (variable) | `…/smf.praxis/assets/fonts/JetBrainsMono.woff2` and `…/smf.high-contrast/assets/fonts/JetBrainsMono.woff2` | Copyright 2020 The JetBrains Mono Project Authors (https://github.com/JetBrains/JetBrainsMono) | OFL-1.1 |
+| Atkinson Hyperlegible (regular and bold) | `praxis_prime/ui_themes/smf.high-contrast/assets/fonts/AtkinsonHyperlegible-Regular.woff2` and `AtkinsonHyperlegible-Bold.woff2` | Copyright 2020 Braille Institute of America, Inc. | OFL-1.1 |
 
 ## Runtime components that are not bundled
 
@@ -161,8 +181,15 @@ bundling, and download on first run only after the user agrees.
 
 ## Copied-file log
 
-Empty on purpose. Append a row when a file is actually added.
+Append a row when a file is actually added. The font rows are subset WOFF2
+files, not the upstream source trees. The OFL text in each package is the
+upstream licence, kept beside the fonts.
 
 | File in this repo | Upstream path | Commit | License | Notices kept |
 |---|---|---|---|---|
-| — | — | — | — | — |
+| `praxis_prime/ui_themes/smf.praxis/assets/fonts/Cinzel.woff2` | `google/fonts` `ofl/cinzel` | subset WOFF2, retrieved 2026-10 | OFL-1.1 | `smf.praxis/assets/fonts/OFL.txt` |
+| `praxis_prime/ui_themes/smf.praxis/assets/fonts/Inter.woff2` | `google/fonts` `ofl/inter` | subset WOFF2, retrieved 2026-10 | OFL-1.1 | `smf.praxis/assets/fonts/OFL.txt` |
+| `praxis_prime/ui_themes/smf.praxis/assets/fonts/JetBrainsMono.woff2` | `google/fonts` `ofl/jetbrainsmono` | subset WOFF2, retrieved 2026-10 | OFL-1.1 | `smf.praxis/assets/fonts/OFL.txt` |
+| `praxis_prime/ui_themes/smf.high-contrast/assets/fonts/JetBrainsMono.woff2` | `google/fonts` `ofl/jetbrainsmono` | subset WOFF2, retrieved 2026-10 | OFL-1.1 | `smf.high-contrast/assets/fonts/OFL.txt` |
+| `praxis_prime/ui_themes/smf.high-contrast/assets/fonts/AtkinsonHyperlegible-Regular.woff2` | `google/fonts` `ofl/atkinsonhyperlegible` | subset WOFF2, retrieved 2026-10 | OFL-1.1 | `smf.high-contrast/assets/fonts/OFL.txt` |
+| `praxis_prime/ui_themes/smf.high-contrast/assets/fonts/AtkinsonHyperlegible-Bold.woff2` | `google/fonts` `ofl/atkinsonhyperlegible` | subset WOFF2, retrieved 2026-10 | OFL-1.1 | `smf.high-contrast/assets/fonts/OFL.txt` |

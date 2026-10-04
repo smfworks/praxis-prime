@@ -135,18 +135,41 @@ export function Approvals({ profile }: { profile: string }) {
         const id = textOf(item.id);
         const tool = textOf(item.tool) || "action";
         return (
-          <article key={id} className="grid gap-2 rounded-md border border-line bg-card p-3" aria-label={`Approval for ${tool}`}>
+          <article
+            key={id}
+            className="pp-approval grid gap-2 rounded-md border border-line bg-card p-3"
+            aria-label={`Approval for ${tool}`}
+          >
+            <p className="flex items-center gap-2 text-sm font-semibold">
+              <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
+                <circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" strokeWidth="1.5" />
+                <path d="M5 8.2 L7.1 10.2 L11 6" fill="none" stroke="currentColor" strokeWidth="1.5" />
+              </svg>
+              Approval
+            </p>
             <h3 className="font-semibold">{tool}</h3>
             <p>{textOf(item.risk)}</p>
             <p>{textOf(item.summary) || textOf(item.reason)}</p>
-            <div className="flex flex-wrap gap-2">
-              <button className="btn" type="button" onClick={() => void decide(id, "allow_once")}>
+            <div className="pp-approval-actions flex flex-wrap gap-2">
+              <button
+                className="pp-approval-allow btn"
+                type="button"
+                onClick={() => void decide(id, "allow_once")}
+              >
                 Approve once
               </button>
-              <button className="btn-quiet" type="button" onClick={() => void decide(id, "allow_session")}>
+              <button
+                className="pp-approval-allow btn-quiet"
+                type="button"
+                onClick={() => void decide(id, "allow_session")}
+              >
                 Approve for this session
               </button>
-              <button className="btn-danger" type="button" onClick={() => void decide(id, "deny")}>
+              <button
+                className="pp-approval-deny btn-danger"
+                type="button"
+                onClick={() => void decide(id, "deny")}
+              >
                 Deny
               </button>
             </div>

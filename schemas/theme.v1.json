@@ -1,0 +1,194 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/smfworks/praxis-prime/schemas/theme.v1.json",
+  "title": "praxis.theme/v1",
+  "description": "Object model of a Praxis Prime theme.toml. The Python validator in praxis_prime.themes is the enforcer: contrast, font licences, restricted theme.css, SVG, and zip limits. This schema is the shape a model can check before lint. Colours are #rgb, #rrggbb, #rrggbbaa, or oklch(). Themes change appearance only.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "id", "name", "version", "license", "description", "tokens"],
+  "properties": {
+    "schema": { "const": "praxis.theme/v1" },
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9.-]{0,63}$",
+      "description": "Theme id. Built-ins use an smf. prefix."
+    },
+    "name": { "type": "string", "minLength": 1, "maxLength": 80 },
+    "version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$" },
+    "license": { "enum": ["MIT", "Apache-2.0", "CC-BY-4.0", "CC0-1.0"] },
+    "authors": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1, "maxLength": 80 }
+    },
+    "author": { "type": "string", "maxLength": 80 },
+    "description": { "type": "string", "minLength": 1, "maxLength": 400 },
+    "modes": {
+      "description": "Either the list of modes, or the [modes.light] colour-table alias for [tokens].",
+      "oneOf": [
+        {
+          "type": "array",
+          "items": { "enum": ["light", "dark"] },
+          "uniqueItems": true,
+          "minItems": 1
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "light": { "$ref": "#/$defs/palette" },
+            "dark": { "$ref": "#/$defs/palette" }
+          }
+        }
+      ]
+    },
+    "default_mode": { "enum": ["light", "dark", "system"] },
+    "min_praxis": { "type": "string", "maxLength": 32 },
+    "contrast": { "enum": ["AA", "AAA"], "default": "AA" },
+    "fonts": { "$ref": "#/$defs/fonts" },
+    "shape": { "$ref": "#/$defs/shape" },
+    "ornaments": { "$ref": "#/$defs/ornaments" },
+    "tokens": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["light", "dark"],
+      "properties": {
+        "light": { "$ref": "#/$defs/palette" },
+        "dark": { "$ref": "#/$defs/palette" }
+      }
+    }
+  },
+  "$defs": {
+    "color": {
+      "type": "string",
+      "pattern": "^(#[0-9A-Fa-f]{3}|#[0-9A-Fa-f]{4}|#[0-9A-Fa-f]{6}|#[0-9A-Fa-f]{8}|oklch\\([^)]+\\))$"
+    },
+    "palette": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "bg",
+        "bgRaised",
+        "fg",
+        "fgMuted",
+        "accent",
+        "accentFg",
+        "border",
+        "borderStrong",
+        "ring",
+        "ok",
+        "warn",
+        "danger"
+      ],
+      "properties": {
+        "bg": { "$ref": "#/$defs/color" },
+        "bgRaised": { "$ref": "#/$defs/color" },
+        "bgSunken": { "$ref": "#/$defs/color" },
+        "overlay": { "$ref": "#/$defs/color" },
+        "fg": { "$ref": "#/$defs/color" },
+        "fgMuted": { "$ref": "#/$defs/color" },
+        "fgSubtle": { "$ref": "#/$defs/color" },
+        "accent": { "$ref": "#/$defs/color" },
+        "accentFg": { "$ref": "#/$defs/color" },
+        "accentMuted": { "$ref": "#/$defs/color" },
+        "border": { "$ref": "#/$defs/color" },
+        "borderStrong": { "$ref": "#/$defs/color" },
+        "ring": { "$ref": "#/$defs/color" },
+        "ok": { "$ref": "#/$defs/color" },
+        "warn": { "$ref": "#/$defs/color" },
+        "danger": { "$ref": "#/$defs/color" },
+        "info": { "$ref": "#/$defs/color" },
+        "infoFg": { "$ref": "#/$defs/color" },
+        "okFg": { "$ref": "#/$defs/color" },
+        "warnFg": { "$ref": "#/$defs/color" },
+        "dangerFg": { "$ref": "#/$defs/color" },
+        "tool": { "$ref": "#/$defs/color" },
+        "selection": { "$ref": "#/$defs/color" },
+        "approval": { "$ref": "#/$defs/color" },
+        "dialOff": { "$ref": "#/$defs/color" },
+        "dialMonitor": { "$ref": "#/$defs/color" },
+        "dialEnforce": { "$ref": "#/$defs/color" },
+        "codeBg": { "$ref": "#/$defs/color" },
+        "codeFg": { "$ref": "#/$defs/color" },
+        "syn1": { "$ref": "#/$defs/color" },
+        "syn2": { "$ref": "#/$defs/color" },
+        "syn3": { "$ref": "#/$defs/color" },
+        "syn4": { "$ref": "#/$defs/color" },
+        "syn5": { "$ref": "#/$defs/color" },
+        "syn6": { "$ref": "#/$defs/color" },
+        "syn7": { "$ref": "#/$defs/color" },
+        "syn8": { "$ref": "#/$defs/color" }
+      }
+    },
+    "fontFace": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "family": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}$" },
+        "license": { "enum": ["OFL-1.1", "Apache-2.0", "MIT", "CC0-1.0", "Ubuntu-font-1.0"] },
+        "fallback": {
+          "type": "string",
+          "description": "Comma-separated family names. No url(), parentheses, or semicolons."
+        },
+        "files": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              { "type": "string", "pattern": "^assets/fonts/[A-Za-z0-9._-]+\\.woff2$" },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["path"],
+                "properties": {
+                  "path": { "type": "string", "pattern": "^assets/fonts/[A-Za-z0-9._-]+\\.woff2$" },
+                  "weight": { "type": "string", "pattern": "^[1-9]00( [1-9]00)?$" },
+                  "style": { "enum": ["normal", "italic"] }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    "fonts": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "display": { "$ref": "#/$defs/fontFace" },
+        "body": { "$ref": "#/$defs/fontFace" },
+        "mono": { "$ref": "#/$defs/fontFace" }
+      }
+    },
+    "shape": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "scale": { "type": "number", "minimum": 1.125, "maximum": 1.333 },
+        "baseSize": { "type": "number", "minimum": 15, "maximum": 18 },
+        "lineHeight": { "type": "number", "minimum": 1.2, "maximum": 2 },
+        "radius": { "type": "number", "minimum": 0, "maximum": 16 },
+        "density": { "enum": ["compact", "cozy", "comfortable"] },
+        "borderWidth": { "type": "number", "minimum": 1, "maximum": 4 },
+        "motion": { "enum": ["none", "subtle", "standard"] }
+      }
+    },
+    "ornaments": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "header": { "oneOf": [
+          { "const": "" },
+          { "type": "string", "pattern": "^assets/ornaments/[A-Za-z0-9._-]+\\.(svg|png|webp)$" }
+        ] },
+        "divider": { "oneOf": [
+          { "const": "" },
+          { "type": "string", "pattern": "^assets/ornaments/[A-Za-z0-9._-]+\\.(svg|png|webp)$" }
+        ] },
+        "watermark": { "oneOf": [
+          { "const": "" },
+          { "type": "string", "pattern": "^assets/ornaments/[A-Za-z0-9._-]+\\.(svg|png|webp)$" }
+        ] },
+        "watermarkOpacity": { "type": "number", "minimum": 0, "maximum": 0.06 }
+      }
+    }
+  }
+}

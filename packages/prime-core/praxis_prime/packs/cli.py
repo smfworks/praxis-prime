@@ -20,6 +20,8 @@ from praxis_prime.packs.model import PERSONA_BOUNDARY, LegacyPack
 from praxis_prime.paths import data_dir
 from praxis_prime.profiles.home import resolve_runtime_layout
 from praxis_prime.state import StateDB
+from praxis_prime.themes.cli import format_hint_lines
+from praxis_prime.themes.legacy import materialize_pack_theme
 
 
 def add_packs_parsers(commands: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -81,6 +83,11 @@ def _install(args: argparse.Namespace) -> int:
     print(f"path: {installed.path}")
     for warning in pack.warnings:
         print(f"warning: {warning.message}", file=sys.stderr)
+    hint = materialize_pack_theme(pack.name, pack.theme, data)
+    if pack.theme is not None:
+        print(f"theme hint: {hint.message}")
+        for mode, token, value in hint.adjusted:
+            print(f"  adjusted {mode} {token} = {value}")
     return 0
 
 
@@ -170,6 +177,10 @@ def _report(pack: LegacyPack) -> str:
         lines.append(f"theme hint: {pack.theme.suggested_theme_id}")
         for token, value in pack.theme.token_overrides:
             lines.append(f"  {token} = {value}")
+        for line in format_hint_lines(pack.theme):
+            if line.startswith("theme hint:"):
+                continue
+            lines.append(line)
     if pack.warnings:
         lines.append("")
         lines.append("warnings:")

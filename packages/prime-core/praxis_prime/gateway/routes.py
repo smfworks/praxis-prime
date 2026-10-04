@@ -64,6 +64,13 @@ _EXACT = frozenset(
         ("POST", "/v1/onboarding/dials"),
         ("POST", "/v1/onboarding/oidc"),
         ("POST", "/v1/onboarding/telegram"),
+        ("GET", "/v1/themes"),
+        ("GET", "/v1/themes/active"),
+        ("POST", "/v1/themes/preview"),
+        ("POST", "/v1/themes/install"),
+        ("POST", "/v1/themes/remove"),
+        ("POST", "/v1/themes/lock"),
+        ("POST", "/v1/themes/select"),
     }
 )
 
