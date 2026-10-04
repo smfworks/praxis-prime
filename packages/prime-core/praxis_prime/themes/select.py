@@ -2,8 +2,10 @@
 
 Precedence is admin lock, then the profile choice, then the device mode
 (``system``, which follows ``prefers-color-scheme`` in the stylesheet), then
-the Omarchy live-theme hook, then ``smf.praxis``. A lock also wins on mode
-when the lock names one. Device preference is not a stored theme id.
+``smf.praxis``. The Omarchy live theme is used only when the profile chose
+``omarchy`` and the rendered file compiles. A lock also wins on mode when
+the lock names one. Device preference is not a stored theme id. ``omarchy``
+and ``omarchy.live`` cannot be locked, because the file can change.
 """
 
 from __future__ import annotations
@@ -17,7 +19,7 @@ from pathlib import Path
 from praxis_prime.profiles.home import ProfileHome, org_policy_path
 from praxis_prime.statfile import StatKind, lstat_kind
 from praxis_prime.themes.errors import ThemeError, ThemeIssue
-from praxis_prime.themes.omarchy import live_theme
+from praxis_prime.themes.omarchy import LIVE_ID, live_theme
 from praxis_prime.themes.store import InstalledTheme, find_theme
 from praxis_prime.themes.tokens import MODE_CHOICES
 
@@ -46,17 +48,24 @@ def resolve_theme(data_root: Path, profile: str = "") -> ThemeChoice:
     if locked:
         requested = lock_id
         mode = lock_mode or choice_mode or "system"
+        lookup_id = requested
+    elif choice_id == "omarchy":
+        # Keep the requested id so the SPA still shows System (Omarchy)
+        # when the file is missing or the palette is refused.
+        requested = "omarchy"
+        mode = choice_mode or "system"
+        lookup_id = live_theme() or ""
     elif choice_id:
         requested = choice_id
         mode = choice_mode or "system"
+        lookup_id = requested
     else:
-        requested = live_theme() or ""
+        requested = ""
         mode = "system"
-    if requested == "omarchy":
-        requested = live_theme() or ""
+        lookup_id = ""
     if mode not in MODE_CHOICES:
         mode = "system"
-    installed = _lookup(data_root, requested)
+    installed = _lookup(data_root, lookup_id)
     if installed is None:
         installed = _lookup(data_root, _DEFAULT_ID)
     if installed is None:
@@ -105,6 +114,17 @@ def set_lock(data_root: Path, theme_id: str, mode: str = "") -> None:
             "unknown mode",
             (ThemeIssue("schema", "Mode must be light, dark, or system.", "mode"),),
         )
+    if theme_id in {"omarchy", LIVE_ID}:
+        raise ThemeError(
+            "omarchy cannot be locked",
+            (
+                ThemeIssue(
+                    "bad_id",
+                    "System (Omarchy) follows a file that can change. Lock a fixed theme.",
+                    theme_id,
+                ),
+            ),
+        )
     if _lookup(data_root, theme_id) is None:
         raise ThemeError(
             f"theme {theme_id} is not installed",
@@ -123,6 +143,10 @@ def lock_state(data_root: Path) -> tuple[str, str]:
 
 
 def _lookup(data_root: Path, theme_id: str) -> InstalledTheme | None:
+    if theme_id == LIVE_ID:
+        from praxis_prime.themes.omarchy import installed
+
+        return installed()
     if not theme_id or theme_id == "omarchy":
         return None
     found = find_theme(data_root, theme_id)

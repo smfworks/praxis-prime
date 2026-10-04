@@ -183,7 +183,8 @@ def test_cli_lint_pack_install_and_set(tmp_path: Path, capsys: pytest.CaptureFix
     assert "lab.sample" in capsys.readouterr().out
 
 
-def test_lock_beats_profile_and_does_not_tighten_tools(tmp_path: Path):
+def test_lock_beats_profile_and_does_not_tighten_tools(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("PRAXIS_PRIME_OMARCHY_THEME", str(tmp_path / "missing-omarchy.json"))
     data = tmp_path / "data"
     create_profile(data, "default")
     set_profile_theme(data, "default", "smf.high-contrast", "dark")

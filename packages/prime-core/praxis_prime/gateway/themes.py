@@ -25,6 +25,8 @@ from praxis_prime.paths import data_dir
 from praxis_prime.themes.cssgen import render_css
 from praxis_prime.themes.errors import ThemeError, ThemeIssue
 from praxis_prime.themes.legacy import hint_theme
+from praxis_prime.themes.omarchy import LIVE_ID
+from praxis_prime.themes.omarchy import installed as live_installed
 from praxis_prime.themes.select import ThemeChoice, resolve_theme, set_lock, set_profile_theme
 from praxis_prime.themes.store import (
     InstalledTheme,
@@ -414,6 +416,11 @@ def _may_select(principal: Principal,
 
 
 def _by_hash(data_root: Path | None, theme_id: str, digest: str) -> InstalledTheme | None:
+    if theme_id == LIVE_ID:
+        live = live_installed()
+        if live is not None and live.package_hash == digest:
+            return live
+        return None
     found = find_hash(data_root, theme_id, digest)
     if found is not None:
         return found
