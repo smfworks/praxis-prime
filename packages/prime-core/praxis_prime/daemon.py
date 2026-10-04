@@ -228,6 +228,7 @@ def serve(
         logger=logger,
         lane=agent._lock,
     )
+    server.scheduler = scheduler
     server.routine_fire = scheduler.fire_http
     scheduler.start()
     logger.info("routines_started")

@@ -231,6 +231,65 @@ def test_config_backups_keep_the_newest_five(tmp_path: Path):
     assert all((item.stat().st_mode & 0o777) == 0o600 for item in left)
 
 
+def test_same_spec_at_a_new_base_url_requires_replace(tmp_path: Path):
+    service = _service(tmp_path)
+    service.save(
+        Selection(
+            lane="local",
+            provider="llamacpp",
+            model="local-model",
+            base_url="http://127.0.0.1:9",
+            api_key="sk-stored",
+        )
+    )
+    changed = Selection(
+        lane="local",
+        provider="llamacpp",
+        model="local-model",
+        base_url="http://192.0.2.20:9",
+    )
+    assert service.requires_replace(changed) is True
+    assert service.needs_step_up(changed) is True
+    with pytest.raises(OnboardingError) as exc:
+        service.save(changed)
+    assert exc.value.code == "replace"
+    model_only = Selection(
+        lane="local",
+        provider="llamacpp",
+        model="other-model",
+        base_url="http://127.0.0.1:9",
+        replace=True,
+    )
+    assert service.needs_step_up(model_only) is False
+    assert service.requires_replace(
+        Selection(
+            lane="local",
+            provider="llamacpp",
+            model="other-model",
+            base_url="http://127.0.0.1:9",
+        )
+    )
+    provider = Selection(
+        lane="local",
+        provider="vllm",
+        model="local-model",
+        base_url="http://127.0.0.1:9",
+        replace=True,
+    )
+    assert service.needs_step_up(provider) is True
+
+
+def test_provider_test_payload_records_the_actor(tmp_path: Path):
+    events: list[dict[str, object]] = []
+    service = _service(tmp_path)
+    service.actor = "acc_ada"
+    service.audit = lambda kind, summary, payload: events.append(payload)
+    service.test(provider="llamacpp", model="local-model", base_url="http://127.0.0.1:9")
+    assert events
+    assert events[-1]["actor"] == "acc_ada"
+    assert "key" not in events[-1]
+
+
 def test_stored_key_stays_on_its_base_url(tmp_path: Path):
     seen: list[tuple[str, dict[str, str]]] = []
     events: list[tuple[str, dict[str, object]]] = []

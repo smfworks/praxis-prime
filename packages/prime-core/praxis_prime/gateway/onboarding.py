@@ -8,6 +8,7 @@ import os
 import sqlite3
 import threading
 import time
+from pathlib import Path
 from typing import Any
 
 from praxis_prime.accounts.db import AccountError, session_cookie
@@ -76,8 +77,10 @@ def handle_onboarding(
         if method == "GET" and route == "/v1/onboarding/status":
             return 200, {"setupRequired": False}
         return 403, _error("forbidden", "Use `praxis-prime setup` from this computer.")
+    if accounts.has_accounts() and _creation_active(server):
+        return _await_peer_owner(server)
     owner_exists = accounts.has_accounts()
-    if owner_exists and server.config_dir is not None:
+    if owner_exists and server.config_dir is not None and not _creation_active(server):
         invalidate_first_run_token(server.config_dir)
     if method == "GET" and route == "/v1/onboarding/status":
         return _status(server, headers, method, owner_exists, peer)
@@ -99,9 +102,10 @@ def onboarding_payload(
     server: Any,
     kind: str,
     payload: dict[str, object],
-    actor: str,
+    principal: Any,
 ) -> dict[str, object]:
     """Authenticated owner/admin WebSocket calls. Owner creation is not here."""
+    actor = "" if principal is None else str(getattr(principal, "account_id", "") or "")
     service = _service(server, actor)
     if kind == "onboarding.status":
         return _admin_status(server)
@@ -121,7 +125,8 @@ def onboarding_payload(
             pin=str(payload.get("tlsFingerprint", "") or ""),
         )
     if kind == "onboarding.save":
-        return service.save(_selection(payload, actor))
+        prepared, selection = _prepare_save(server, principal, payload)
+        return prepared.save(selection)
     raise OnboardingError("unknown setup request", code="not_found")
 
 
@@ -199,6 +204,8 @@ def _first_run(
     if denied is not None:
         return denied
     if server.accounts.has_accounts():
+        if _creation_active(server):
+            return _await_peer_owner(server)
         invalidate_first_run_token(server.config_dir)
         return 409, _error("conflict", "an owner account already exists")
     return _dispatch(server, method, route, body, None, extras)
@@ -241,8 +248,8 @@ def _dispatch(
                 pin=str(payload.get("tlsFingerprint", "") or ""),
             )
         if route == "/v1/onboarding/save":
-            _require_step_up(server, principal, payload)
-            return 200, service.save(_selection(payload, actor))
+            prepared, selection = _prepare_save(server, principal, payload)
+            return 200, prepared.save(selection)
         if route == "/v1/onboarding/dials":
             positions = payload.get("positions")
             if not isinstance(positions, dict):
@@ -266,8 +273,7 @@ def _create_owner(
     payload: dict[str, object],
     extras: list[tuple[str, str]],
 ) -> tuple[int, dict[str, object]]:
-    from praxis_prime.onboarding.owner import clear_discarded_owner, create_owner_account
-    from praxis_prime.profiles.migrate import MigrationBusy
+    from praxis_prime.onboarding.owner import validate_owner_inputs
 
     username = payload.get("username", "")
     password = payload.get("password", "")
@@ -278,9 +284,42 @@ def _create_owner(
         display = ""
     if server.data_root is None or server.config_dir is None:
         return 400, _error("bad_request", "data directory is not set")
-    store = server.accounts
-    _release_owned_database(server)
     try:
+        validate_owner_inputs(
+            username=username,
+            password=password,
+            display_name=display or username,
+        )
+    except AccountError as exc:
+        return 400, _error("bad_request", str(exc))
+    if not _begin_owner_creation(server):
+        return _await_peer_owner(server)
+    try:
+        return _create_owner_holding_gate(server, username, password, display, extras)
+    finally:
+        _end_owner_creation(server)
+
+
+def _create_owner_holding_gate(
+    server: Any,
+    username: str,
+    password: str,
+    display: str,
+    extras: list[tuple[str, str]],
+) -> tuple[int, dict[str, object]]:
+    from praxis_prime.onboarding.owner import clear_discarded_owner, create_owner_account
+    from praxis_prime.profiles.migrate import MigrationBusy
+
+    store = server.accounts
+    if store.has_accounts():
+        invalidate_first_run_token(server.config_dir)
+        return 409, _error("conflict", "an owner account already exists")
+    released = False
+    try:
+        if _holds_legacy_database(server):
+            _release_owned_database(server)
+            released = True
+            server.restart_required = True
         created = create_owner_account(
             store,
             server.data_root,
@@ -291,8 +330,8 @@ def _create_owner(
             daemon_running=lambda: False,
         )
     except MigrationBusy:
+        _settle_database(server, released)
         if _wait_for_owner(store):
-            invalidate_first_run_token(server.config_dir)
             return 409, _error("conflict", "an owner account already exists")
         return 503, _error(
             "unavailable",
@@ -300,12 +339,14 @@ def _create_owner(
             "Stop praxis-primed and run `praxis-prime setup`.",
         )
     except AccountError as exc:
+        _settle_database(server, released)
         message = str(exc)
-        if "already exists" in message:
+        if "already exists" in message and store.has_accounts():
             invalidate_first_run_token(server.config_dir)
             return 409, _error("conflict", message)
         return 400, _error("bad_request", message)
     except OSError as exc:
+        _settle_database(server, released)
         return 503, _error("unavailable", str(exc))
     account = created.account
     try:
@@ -316,15 +357,19 @@ def _create_owner(
         except OSError:
             pass
         store.discard_account(account.id)
+        _settle_database(server, released)
         return 503, _error("unavailable", "audit log is busy; the owner was not kept")
     invalidate_first_run_token(server.config_dir)
+    if released:
+        opened = _reopen_profile_database(server, actor=account.id)
+        server.restart_required = not opened
     issued = store.open_session(account)
     extras.append(("Set-Cookie", session_cookie(issued.token, max_age=issued.max_age)))
     return 201, {
         "ok": True,
         "account": account.public(),
         "csrfToken": issued.csrf_token,
-        "restartRequired": not created.profiles_existed,
+        "restartRequired": _process_needs_restart(server),
     }
 
 
@@ -336,6 +381,221 @@ def _wait_for_owner(store: Any) -> bool:
             return True
         time.sleep(_OWNER_WAIT_STEP)
     return bool(store.has_accounts())
+
+
+class _OwnerGate:
+    """One in-process owner creation. Waiters must not delete the token."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.active = False
+        self._done = threading.Condition(self._lock)
+
+
+_GATE_INIT = threading.Lock()
+
+
+def _owner_gate(server: Any) -> _OwnerGate:
+    gate = getattr(server, "owner_gate", None)
+    if isinstance(gate, _OwnerGate):
+        return gate
+    with _GATE_INIT:
+        gate = getattr(server, "owner_gate", None)
+        if not isinstance(gate, _OwnerGate):
+            gate = _OwnerGate()
+            server.owner_gate = gate
+        return gate
+
+
+def _creation_active(server: Any) -> bool:
+    gate = getattr(server, "owner_gate", None)
+    if not isinstance(gate, _OwnerGate):
+        return False
+    with gate._lock:
+        return gate.active
+
+
+def _begin_owner_creation(server: Any) -> bool:
+    gate = _owner_gate(server)
+    with gate._lock:
+        if gate.active:
+            return False
+        gate.active = True
+        return True
+
+
+def _end_owner_creation(server: Any) -> None:
+    gate = getattr(server, "owner_gate", None)
+    if not isinstance(gate, _OwnerGate):
+        return
+    with gate._lock:
+        gate.active = False
+        gate._done.notify_all()
+
+
+def _wait_until_idle(server: Any) -> bool:
+    """True when no owner creation is in progress. False when the wait expires."""
+    gate = _owner_gate(server)
+    deadline = time.monotonic() + _OWNER_WAIT_SECONDS
+    with gate._lock:
+        while gate.active:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            gate._done.wait(remaining)
+        return True
+
+
+def _await_peer_owner(server: Any) -> tuple[int, dict[str, object]]:
+    """Wait out an in-flight create. Do not burn the token if that create is discarded."""
+    if not _wait_until_idle(server):
+        return 503, _error("unavailable", "owner setup is still running; try again")
+    if server.accounts.has_accounts():
+        if server.config_dir is not None:
+            invalidate_first_run_token(server.config_dir)
+        return 409, _error("conflict", "an owner account already exists")
+    return 503, _error("unavailable", "owner setup did not finish; try again")
+
+
+def _holds_legacy_database(server: Any) -> bool:
+    """True when this process has the single-user ``data/prime.db`` open.
+
+    The multi-profile supervisor audit is a different file. Closing it
+    would drop the worker supervisor's log, and that process does not
+    hold the profile database the migration moves.
+    """
+    if getattr(server, "multi_profile", False) or server.data_root is None:
+        return False
+    runtime = getattr(getattr(server, "agent", None), "runtime", None)
+    db = getattr(runtime, "db", None) if runtime is not None else None
+    path = _database_path(db)
+    if path is None:
+        return False
+    try:
+        legacy = (Path(server.data_root) / "prime.db").resolve()
+    except OSError:
+        legacy = Path(server.data_root) / "prime.db"
+    return path == legacy
+
+
+def _database_path(db: Any) -> Path | None:
+    raw = getattr(db, "path", None)
+    if raw is None:
+        raw = getattr(db, "db_path", None)
+    if raw is None:
+        return None
+    try:
+        return Path(raw).resolve()
+    except OSError:
+        return Path(raw)
+
+
+def _settle_database(server: Any, released: bool) -> None:
+    """Reopen after a failed create. A failed reopen asks for a restart."""
+    if not released:
+        return
+    server.restart_required = not _restore_running_database(server)
+
+
+def _reopen_profile_database(server: Any, *, actor: str = "") -> bool:
+    if server.data_root is None:
+        return False
+    from praxis_prime.profiles.home import ProfileHome
+
+    path = ProfileHome(server.data_root, "default").db_path
+    try:
+        return _install_runtime_database(server, path, "default", actor=actor)
+    except (OSError, sqlite3.Error, RuntimeError, ValueError):
+        return False
+
+
+def _restore_running_database(server: Any) -> bool:
+    """Open the profile database if the move finished, otherwise the legacy file."""
+    runtime = getattr(getattr(server, "agent", None), "runtime", None)
+    if runtime is None or server.data_root is None:
+        return False
+    from praxis_prime.profiles.home import ProfileHome
+
+    root = Path(server.data_root)
+    candidates = (
+        (ProfileHome(root, "default").db_path, "default"),
+        (root / "prime.db", ""),
+    )
+    for path, profile in candidates:
+        if not path.is_file():
+            continue
+        try:
+            if _install_runtime_database(server, path, profile):
+                return True
+        except (OSError, sqlite3.Error, RuntimeError, ValueError):
+            continue
+    return False
+
+
+def _install_runtime_database(server: Any, path: Path, profile: str, *, actor: str = "") -> bool:
+    """Point the running daemon at ``path``. False when this process has no runtime."""
+    runtime = getattr(getattr(server, "agent", None), "runtime", None)
+    if runtime is None:
+        return False
+    from praxis_prime.audit.log import AuditLog
+    from praxis_prime.scheduler.store import RoutineStore
+    from praxis_prime.state import StateDB
+
+    db = StateDB(path)
+    try:
+        log = AuditLog(db)
+    except (OSError, sqlite3.Error, RuntimeError, ValueError):
+        db.close()
+        raise
+    log.bind(actor_account=actor, profile=profile)
+    runtime.db = db
+    runtime.audit = log
+    runtime.profile_id = profile
+    for name in ("store", "memory"):
+        holder = getattr(runtime, name, None)
+        if holder is not None and hasattr(holder, "db"):
+            holder.db = db
+    for holder in (
+        getattr(runtime, "policy", None),
+        getattr(runtime, "engine", None),
+        getattr(runtime, "mcp", None),
+        getattr(server, "decider", None),
+    ):
+        if holder is not None and hasattr(holder, "audit"):
+            holder.audit = log
+    server.audit = log
+    scheduler = getattr(server, "scheduler", None)
+    if scheduler is not None:
+        scheduler.store = RoutineStore(db)
+        scheduler.audit = log
+        memory = getattr(runtime, "memory", None)
+        if memory is not None:
+            scheduler.memory = memory
+    queue_obj = getattr(getattr(server, "agent", None), "queue", None)
+    if queue_obj is not None and hasattr(queue_obj, "profile_id"):
+        queue_obj.profile_id = profile
+    return True
+
+
+def _process_needs_restart(server: Any) -> bool:
+    """True while this process is still single-user or its database is closed.
+
+    A stub gateway with no runtime stays true. A daemon rebound to
+    ``profiles/default`` with an open connection is false.
+    """
+    if getattr(server, "restart_required", False):
+        return True
+    if getattr(server, "multi_profile", False):
+        return False
+    runtime = getattr(getattr(server, "agent", None), "runtime", None)
+    if runtime is None:
+        return True
+    profile = str(getattr(runtime, "profile_id", "") or "")
+    db = getattr(runtime, "db", None)
+    conn = getattr(db, "conn", None) if db is not None else None
+    if not profile or conn is None:
+        return True
+    return False
 
 
 def _release_owned_database(server: Any) -> None:
@@ -396,27 +656,43 @@ def _audit_owner_created(data_root: Any, account: Any) -> None:
         db.close()
 
 
-def _require_step_up(server: Any, principal: Any, payload: dict[str, object]) -> None:
-    api_key = str(payload.get("apiKey", "") or "")
-    provider = str(payload.get("provider", "") or "").strip().lower()
-    if not api_key or principal is None:
-        return
-    from praxis_prime.onboarding.service import KEY_NAMES, _secret_exists
+_STEP_UP_MESSAGE = (
+    "changing the provider, its endpoint, or its key needs a step-up, "
+    "or `praxis-prime setup --replace`"
+)
 
-    name = KEY_NAMES.get(provider, "")
-    if not name or server.config_dir is None:
-        return
-    if not _secret_exists(server.config_dir, {}, name):
-        return
-    session_id = str(getattr(principal, "session_id", "") or "")
-    token = str(payload.get("stepUpToken", "") or "")
-    factors = Factors(server.accounts)
-    spent = factors.step_up_valid(principal.account_id, token, session_id)
-    if not session_id or not spent:
+
+def _prepare_save(
+    server: Any,
+    principal: Any,
+    payload: dict[str, object],
+) -> tuple[OnboardingService, Selection]:
+    """Shared HTTP and WebSocket save guard. The CLI calls ``save`` directly.
+
+    ``replace`` is checked before the step-up token is spent, so a rejected
+    replacement leaves the token in place.
+    """
+    actor = "" if principal is None else str(getattr(principal, "account_id", "") or "")
+    service = _service(server, actor)
+    selection = _selection(payload, actor)
+    if service.requires_replace(selection) and not selection.replace:
         raise OnboardingError(
-            "replacing a provider key needs a step-up, or `praxis-prime setup --replace`",
+            "a provider is already configured; pass --replace to change it",
             code="replace",
         )
+    if service.needs_step_up(selection):
+        _spend_step_up(server, principal, payload)
+    return service, selection
+
+
+def _spend_step_up(server: Any, principal: Any, payload: dict[str, object]) -> None:
+    session_id = str(getattr(principal, "session_id", "") or "")
+    token = str(payload.get("stepUpToken", "") or "")
+    account_id = str(getattr(principal, "account_id", "") or "")
+    factors = Factors(server.accounts)
+    spent = factors.step_up_valid(account_id, token, session_id) if account_id else False
+    if not session_id or not spent:
+        raise OnboardingError(_STEP_UP_MESSAGE, code="replace")
 
 
 def _oidc(server: Any, payload: dict[str, object]) -> tuple[int, dict[str, object]]:
@@ -495,6 +771,7 @@ def _service(server: Any, actor: str) -> OnboardingService:
         fetcher=getattr(server, "onboarding_fetcher", None),
         hardware_runner=getattr(server, "onboarding_runner", None),
         audit=audit if server.audit is not None else None,
+        actor=actor,
     )
 
 

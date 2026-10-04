@@ -210,11 +210,16 @@ def scheduler_for(
     store = RoutineStore(runtime.db)
 
     def runner(routine: Routine, trigger: str) -> RoutineRun:
+        # Read the database at fire time. Web owner creation swaps
+        # ``runtime.db`` onto ``profiles/default`` without restarting.
+        database = runtime.db
+        if database is None:
+            raise RuntimeError("profile database is closed")
         return execute_routine(
             runtime,
             routine,
             trigger=trigger,
-            store=store,
+            store=RoutineStore(database),
             deliver=deliver,
             usd_per_iteration=usd_per_iteration,
         )

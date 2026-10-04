@@ -113,6 +113,8 @@ class GatewayServer:
         self.bearer_enabled = bearer_enabled
         self.multi_profile = multi_profile
         self.config_dir = config_dir
+        self.restart_required = False
+        self.scheduler = None
         self.setup_failures = SetupFailures()
         self.logger = logger
         self.socket_path = socket_path
@@ -322,6 +324,8 @@ class GatewayServer:
         peer: str = "",
     ) -> tuple[int, dict[str, object]]:
         route, _, query = path.partition("?")
+        if self.restart_required:
+            return 503, _error("unavailable", _RESTART_MESSAGE)
         if not route_allowed(method, route):
             return 404, _error("not_allowed", "route is not on the allowlist")
         if method == "GET" and route == "/health":
@@ -766,6 +770,10 @@ class GatewayServer:
         path: str,
         headers: dict[str, str],
     ) -> tuple[str, Principal] | None:
+        if self.restart_required:
+            frame_id = "" if frame is None else str(frame.get("id", ""))
+            outgoing.put(_frame_error(frame_id, "unavailable", _RESTART_MESSAGE))
+            return None
         if frame is None or frame.get("type") != "connect":
             frame_id = str((frame or {}).get("id", ""))
             outgoing.put(
@@ -807,6 +815,9 @@ class GatewayServer:
     ) -> None:
         kind = str(frame.get("type", ""))
         frame_id = str(frame.get("id", ""))
+        if self.restart_required:
+            outgoing.put(_frame_error(frame_id, "unavailable", _RESTART_MESSAGE))
+            return
         if not frame_allowed(kind):
             outgoing.put(_frame_error(frame_id, "unknown_type", f"unknown frame {kind}"))
             return
@@ -879,7 +890,7 @@ class GatewayServer:
                 self._model(frame, outgoing, profile_name)
             elif kind.startswith("onboarding."):
                 try:
-                    payload = onboarding_payload(self, kind, _payload(frame), principal.account_id)
+                    payload = onboarding_payload(self, kind, _payload(frame), principal)
                 except OnboardingError as exc:
                     outgoing.put(_frame_error(frame_id, exc.code, str(exc)))
                     return
@@ -1581,6 +1592,9 @@ def _write_bytes(
         conn.sendall(head.encode("ascii") + body)
     except OSError:
         return
+
+
+_RESTART_MESSAGE = "Restart praxis-primed to finish profile setup."
 
 
 def _http_action(method: str, route: str) -> str:

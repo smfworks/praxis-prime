@@ -79,6 +79,7 @@ class OnboardingService:
     fetcher: Fetcher | None = None
     hardware_runner: Callable[[list[str]], str] | None = None
     audit: AuditFn | None = None
+    actor: str = ""
 
     def status(self, *, owner_exists: bool) -> dict[str, object]:
         settings = self._settings()
@@ -215,9 +216,8 @@ class OnboardingService:
             raise OnboardingError(f"{provider} is not a local provider", code="usage")
         if not model:
             raise OnboardingError("a primary model is required", code="usage")
-        settings = self._settings()
         spec = f"{provider}:{model}"
-        self._refuse_clobber(settings.model_spec, spec, provider, selection)
+        self._refuse_clobber(selection)
         base = _base_url(provider, selection.base_url, lane)
         tested = self.test(
             provider=provider,
@@ -294,19 +294,85 @@ class OnboardingService:
         self._audit("provider.configured", "provider skipped", {"lane": "skip", "ready": False})
         return {"ok": True, "inferenceReady": False, "skipped": True}
 
-    def _refuse_clobber(
-        self,
-        current: str,
-        spec: str,
-        provider: str,
-        selection: Selection,
-    ) -> None:
-        key_name = KEY_NAMES.get(provider, "")
-        replacing_key = bool(selection.api_key) and key_name and _secret_exists(
-            self.config_dir, self.env, key_name
+    def requires_replace(self, selection: Selection) -> bool:
+        """True when this save would change a configured provider, endpoint, or key.
+
+        The same spec at a new base URL counts. A model-only change counts
+        too. The caller still decides whether a step-up is required.
+        """
+        lane = selection.lane.strip().lower()
+        current = self._settings().model_spec.strip()
+        if lane == "skip":
+            return bool(current)
+        provider = selection.provider.strip().lower()
+        model = selection.model.strip()
+        if not provider or not model:
+            return False
+        spec = f"{provider}:{model}"
+        changing = bool(current) and current != spec
+        return changing or self._replacing_key(provider, selection) or self._endpoint_changed(
+            selection
         )
-        changing = bool(current.strip()) and current.strip() != spec
-        if (changing or replacing_key) and not selection.replace:
+
+    def needs_step_up(self, selection: Selection) -> bool:
+        """True when the browser must spend a step-up before this save.
+
+        A model-only change does not. Changing the provider, its base URL,
+        or a stored key does. The CLI does not call this.
+        """
+        lane = selection.lane.strip().lower()
+        provider = selection.provider.strip().lower()
+        current = self._settings().model_spec.strip()
+        if lane == "skip":
+            return bool(current)
+        if self._replacing_key(provider, selection):
+            return True
+        if not current:
+            return False
+        current_provider = current.split(":", 1)[0]
+        if provider and provider != current_provider:
+            return True
+        return self._endpoint_changed(selection)
+
+    def _replacing_key(self, provider: str, selection: Selection) -> bool:
+        if not selection.api_key:
+            return False
+        key_name = KEY_NAMES.get(provider, "")
+        if not key_name:
+            return False
+        return _secret_exists(self.config_dir, self.env, key_name)
+
+    def _endpoint_changed(self, selection: Selection) -> bool:
+        """True when the proposed base URL differs from the saved one.
+
+        An unusable base URL returns false so ``save`` can raise its own
+        usage error instead of a replace error.
+        """
+        lane = selection.lane.strip().lower()
+        provider = selection.provider.strip().lower()
+        if lane == "skip" or not provider:
+            return False
+        recorded = self._recorded_base()
+        if not recorded:
+            return False
+        try:
+            proposed = _normalize_base(_base_url(provider, selection.base_url, lane))
+        except OnboardingError:
+            return False
+        return bool(proposed) and proposed != recorded
+
+    def _recorded_base(self) -> str:
+        record = read_record(self.config_dir)
+        record_base = str(record.get("base_url", "") or "").strip()
+        if record_base:
+            return _normalize_base(record_base)
+        current = self._settings().model_spec.strip()
+        if not current:
+            return ""
+        return self._bound_base(current.split(":", 1)[0])
+
+    def _refuse_clobber(self, selection: Selection) -> None:
+        if self.requires_replace(selection) and not selection.replace:
             raise OnboardingError(
                 "a provider is already configured; pass --replace to change it",
                 code="replace",
@@ -617,6 +683,8 @@ class OnboardingService:
             for key, value in payload.items()
             if "key" not in key and "secret" not in key
         }
+        if self.actor and "actor" not in safe:
+            safe["actor"] = self.actor
         try:
             self.audit(kind, summary, safe)
         except (OSError, RuntimeError, ValueError):

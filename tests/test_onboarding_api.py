@@ -634,8 +634,355 @@ def test_admin_cannot_send_a_stored_key_to_another_host(tmp_path: Path):
         cookie=issued.token,
         csrf=issued.csrf_token,
     )
+    assert status == 409
+    assert body["error"]["code"] == "replace"
+    assert seen == []
+    from praxis_prime.accounts.factors import Factors
+
+    moved["stepUpToken"] = Factors(store)._mint_step_up(admin.id, issued.session_id)
+    status, body, _extras = _call(
+        server,
+        "POST",
+        "/v1/onboarding/save",
+        json.dumps(moved).encode(),
+        cookie=issued.token,
+        csrf=issued.csrf_token,
+    )
     assert status == 400
     assert "re-enter the API key" in body["error"]["message"]
     assert seen == []
     del owner, extras, admin
     store.close()
+
+
+def _running(tmp_path: Path, store: AccountStore, config: Path):
+    from praxis_prime.runtime import build_runtime
+
+    server = _gateway(tmp_path, store, config)
+    data = tmp_path / "data"
+    data.mkdir(parents=True, exist_ok=True)
+    runtime = build_runtime(
+        env={},
+        config_path=config / "config.toml",
+        data_path=data / "prime.db",
+        cwd=tmp_path,
+    )
+
+    class _Agent:
+        def list_routines(self, profile: str = "") -> list[object]:
+            del profile
+            self.runtime.db.conn.execute("SELECT 1").fetchone()
+            return []
+
+    agent = _Agent()
+    agent.runtime = runtime
+    server.agent = agent  # type: ignore[assignment]
+    server.audit = runtime.audit
+    return server, runtime
+
+
+def _bearer(server: GatewayServer) -> dict[str, str]:
+    return {"authorization": f"Bearer {server.token}"}
+
+
+def test_weak_owner_password_leaves_the_daemon_open(tmp_path: Path):
+    config = tmp_path / "config"
+    data = tmp_path / "data"
+    store = AccountStore(tmp_path / "accounts.db")
+    server, runtime = _running(tmp_path, store, config)
+    try:
+        token = ensure_first_run_token(config)
+        weak = json.dumps(
+            {"username": "ada", "password": "short", "displayName": "Ada"}
+        ).encode()
+        status, body, _extras = _call(
+            server, "POST", "/v1/onboarding/owner", weak, token=token
+        )
+        assert status == 400, body
+        assert runtime.db is not None and runtime.db.conn is not None
+        assert runtime.audit is not None
+        runtime.db.conn.execute("SELECT 1").fetchone()
+        assert not (data / "profiles" / ".migration.json").exists()
+        assert (data / "prime.db").is_file()
+        assert read_first_run_token(config) == token
+        assert store.count_accounts() == 0
+        status, body, _extras = _call(
+            server,
+            "GET",
+            "/v1/routines",
+            extra_headers=_bearer(server),
+        )
+        assert status == 200, body
+        runtime.audit.append(
+            session_id=None,
+            kind="auth.login",
+            summary="still open",
+            payload={"actor_account": "probe"},
+        )
+        row = runtime.db.conn.execute(
+            "SELECT summary FROM audit_events WHERE summary = 'still open'"
+        ).fetchone()
+        assert row is not None
+    finally:
+        runtime.close()
+        store.close()
+
+
+def test_web_owner_reopens_the_profile_database(tmp_path: Path):
+    config = tmp_path / "config"
+    data = tmp_path / "data"
+    store = AccountStore(tmp_path / "accounts.db")
+    server, runtime = _running(tmp_path, store, config)
+    try:
+        token = ensure_first_run_token(config)
+        status, body, _extras = _call(
+            server, "POST", "/v1/onboarding/owner", _owner("ada"), token=token
+        )
+        assert status == 201, body
+        assert body["restartRequired"] is False
+        assert runtime.profile_id == "default"
+        assert runtime.db is not None and runtime.db.conn is not None
+        assert runtime.audit is not None
+        assert not (data / "prime.db").exists()
+        assert (data / "profiles" / "default" / "prime.db").is_file()
+        status, health, _extras = _call(server, "GET", "/health")
+        assert status == 200, health
+        status, logged, _extras = _call(
+            server,
+            "POST",
+            "/v1/auth/login",
+            json.dumps({"username": "ada", "password": _PASSWORD}).encode(),
+        )
+        assert status == 200, logged
+        rows = runtime.db.conn.execute(
+            "SELECT kind, summary FROM audit_events WHERE kind = 'auth.login'"
+        ).fetchall()
+        assert any(row["summary"] == "login" for row in rows)
+        status, routines, _extras = _call(
+            server,
+            "GET",
+            "/v1/routines",
+            extra_headers=_bearer(server),
+        )
+        assert status == 200, routines
+        runtime.close()
+    finally:
+        store.close()
+
+
+def test_runtime_close_tolerates_a_missing_audit_log(tmp_path: Path):
+    from praxis_prime.runtime import build_runtime
+
+    runtime = build_runtime(
+        env={},
+        config_path=tmp_path / "config.toml",
+        data_path=tmp_path / "prime.db",
+        cwd=tmp_path,
+    )
+    audit = runtime.audit
+    db = runtime.db
+    runtime.audit = None  # type: ignore[assignment]
+    runtime.db = None  # type: ignore[assignment]
+    runtime.close()
+    audit.close()
+    db.close()
+
+
+def test_waiting_owner_request_keeps_the_token_when_audit_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from praxis_prime.audit.log import AuditLog
+
+    entered = threading.Event()
+    release = threading.Event()
+
+    def boom(self: AuditLog, **kwargs: object) -> str:
+        del self, kwargs
+        entered.set()
+        assert release.wait(5)
+        raise OSError("busy")
+
+    monkeypatch.setattr(AuditLog, "append", boom)
+    config = tmp_path / "config"
+    store = AccountStore(tmp_path / "accounts.db")
+    server = _gateway(tmp_path, store, config)
+    token = ensure_first_run_token(config)
+    statuses: list[int] = []
+
+    def post() -> None:
+        status, _body, _extras = _call(
+            server, "POST", "/v1/onboarding/owner", _owner("ada"), token=token
+        )
+        statuses.append(status)
+
+    first = threading.Thread(target=post)
+    first.start()
+    assert entered.wait(5)
+    second = threading.Thread(target=post)
+    second.start()
+    release.set()
+    first.join(5)
+    second.join(5)
+    assert statuses == [503, 503]
+    assert store.count_accounts() == 0
+    assert read_first_run_token(config) == token
+    store.close()
+
+
+def test_onboarding_save_step_up_matches_on_http_and_websocket(tmp_path: Path):
+    import queue
+
+    from praxis_prime.accounts.factors import Factors
+    from praxis_prime.gateway.authz import Principal
+
+    config = tmp_path / "config"
+    store = AccountStore(tmp_path / "accounts.db")
+    server = _gateway(tmp_path, store, config)
+    token = ensure_first_run_token(config)
+    status, owner, extras = _call(
+        server, "POST", "/v1/onboarding/owner", _owner("ada"), token=token
+    )
+    assert status == 201, owner
+    cookie = _session(extras)
+    csrf = str(owner["csrfToken"])
+    account_id = str(owner["account"]["id"])
+    session_id = store.session_from_token(cookie)
+    assert session_id is not None
+    saved = {
+        "lane": "local",
+        "provider": "llamacpp",
+        "model": "local-model",
+        "baseUrl": "http://127.0.0.1:9",
+        "apiKey": "sk-first",
+    }
+    status, body, _extras = _call(
+        server,
+        "POST",
+        "/v1/onboarding/save",
+        json.dumps(saved).encode(),
+        cookie=cookie,
+        csrf=csrf,
+    )
+    assert status == 200, body
+    replaced = {**saved, "apiKey": "sk-second", "replace": True}
+    status, body, _extras = _call(
+        server,
+        "POST",
+        "/v1/onboarding/save",
+        json.dumps(replaced).encode(),
+        cookie=cookie,
+        csrf=csrf,
+    )
+    assert status == 409, body
+    assert body["error"]["code"] == "replace"
+    factors = Factors(store)
+    replaced["stepUpToken"] = factors._mint_step_up(account_id, session_id.id)
+    status, body, _extras = _call(
+        server,
+        "POST",
+        "/v1/onboarding/save",
+        json.dumps(replaced).encode(),
+        cookie=cookie,
+        csrf=csrf,
+    )
+    assert status == 200, body
+    principal = Principal(
+        kind="session",
+        account_id=account_id,
+        username="ada",
+        role="owner",
+        session_id=session_id.id,
+    )
+    outgoing: queue.Queue[dict[str, Any]] = queue.Queue()
+    without = {
+        "lane": "local",
+        "provider": "llamacpp",
+        "model": "local-model",
+        "baseUrl": "http://127.0.0.1:9",
+        "apiKey": "sk-third",
+        "replace": True,
+    }
+    server._dispatch(
+        {"type": "onboarding.save", "id": "ws-1", "payload": without},
+        "operator",
+        principal,
+        outgoing,
+    )
+    frame = outgoing.get_nowait()
+    assert frame["ok"] is False
+    assert frame["payload"]["code"] == "replace"
+    without["stepUpToken"] = factors._mint_step_up(account_id, session_id.id)
+    server._dispatch(
+        {"type": "onboarding.save", "id": "ws-2", "payload": without},
+        "operator",
+        principal,
+        outgoing,
+    )
+    frame = outgoing.get_nowait()
+    assert frame["ok"] is True, frame
+    assert frame["payload"]["ok"] is True
+    held = factors._mint_step_up(account_id, session_id.id)
+    moved = {
+        "lane": "local",
+        "provider": "llamacpp",
+        "model": "local-model",
+        "baseUrl": "http://192.0.2.20:9",
+        "replace": False,
+        "stepUpToken": held,
+    }
+    status, body, _extras = _call(
+        server,
+        "POST",
+        "/v1/onboarding/save",
+        json.dumps(moved).encode(),
+        cookie=cookie,
+        csrf=csrf,
+    )
+    assert status == 409, body
+    assert factors.step_up_valid(account_id, held, session_id.id) is True
+    store.close()
+
+
+def test_provider_test_records_the_actor(tmp_path: Path):
+    from praxis_prime.audit.log import AuditLog
+    from praxis_prime.state import StateDB
+
+    config = tmp_path / "config"
+    data = tmp_path / "data"
+    store = AccountStore(tmp_path / "accounts.db")
+    server = _gateway(tmp_path, store, config)
+    token = ensure_first_run_token(config)
+    status, owner, extras = _call(
+        server, "POST", "/v1/onboarding/owner", _owner("ada"), token=token
+    )
+    assert status == 201, owner
+    db = StateDB(data / "profiles" / "default" / "prime.db")
+    log = AuditLog(db)
+    server.audit = log
+    cookie = _session(extras)
+    csrf = str(owner["csrfToken"])
+    account_id = str(owner["account"]["id"])
+    try:
+        status, body, _extras = _call(
+            server,
+            "POST",
+            "/v1/onboarding/test",
+            json.dumps(
+                {"provider": "llamacpp", "model": "local-model", "baseUrl": "http://127.0.0.1:9"}
+            ).encode(),
+            cookie=cookie,
+            csrf=csrf,
+        )
+        assert status == 200, body
+        rows = db.conn.execute(
+            "SELECT actor_account, payload_json FROM audit_events WHERE kind = 'provider.test'"
+        ).fetchall()
+        assert rows
+        assert rows[-1]["actor_account"] == account_id
+        payload = json.loads(rows[-1]["payload_json"])
+        assert payload["actor"] == account_id
+        assert payload["actor_account"] == account_id
+    finally:
+        log.close()
+        db.close()
+        store.close()

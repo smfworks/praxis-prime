@@ -72,8 +72,14 @@ class Runtime:
         if self.browser is not None:
             self.browser.close()
         self.engine.labels.close()
-        self.audit.close()
-        self.db.close()
+        # Web owner creation closes these before the profile move and may
+        # leave them unset when the reopen fails.
+        audit = self.audit
+        if audit is not None:
+            audit.close()
+        db = self.db
+        if db is not None:
+            db.close()
         token = self.data_root_token
         self.data_root_token = None
         if token is not None:
