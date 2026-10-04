@@ -150,8 +150,9 @@ _NAMED_RFN = {
     "smf.dental": set(),
 }
 # Name ID 0 is the copyright notice. It keeps the author's name and the
-# Reserved Font Name clause. Every other name record in a renamed subset
-# must not contain these strings. Lexend is not in this set.
+# Reserved Font Name clause. A renamed subset has no name ID 7, which would
+# claim the subset name is a trademark of the original foundry. Every other
+# name record must not contain these strings. Lexend is not in this set.
 _RENAMED_FONTS = {
     "LibreBaskerville.woff2",
     "SourceSans3.woff2",
@@ -200,6 +201,7 @@ def test_subset_fonts_drop_reserved_names():
             finally:
                 font.close()
             if path.name in _RENAMED_FONTS:
+                assert 7 not in by_id, (path.name, by_id.get(7))
                 for name_id, values in by_id.items():
                     if name_id == 0:
                         continue
