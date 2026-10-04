@@ -155,6 +155,10 @@ fonts stay OFL-1.1 and are not relicensed.
 | Source Sans 3 (variable, weight 200–900) | `praxis_prime/ui_themes/smf.legal-office/assets/fonts/SourceSans3.woff2` | © 2023 Adobe (http://www.adobe.com/), with Reserved Font Name ‘Source’ | OFL-1.1 |
 | Source Code Pro (variable, weight 200–900) | `praxis_prime/ui_themes/smf.legal-office/assets/fonts/SourceCodePro.woff2` | © 2023 Adobe (http://www.adobe.com/), with Reserved Font Name ‘Source’ | OFL-1.1 |
 
+| IBM Plex Sans (variable, weight 100–700) | `praxis_prime/ui_themes/smf.forensic/assets/fonts/IBMPlexSans.woff2` | Copyright 2019 IBM Corp. All rights reserved. | OFL-1.1 |
+| IBM Plex Mono regular | `praxis_prime/ui_themes/smf.forensic/assets/fonts/IBMPlexMono-Regular.woff2` | Copyright 2017 IBM Corp. All rights reserved. | OFL-1.1 |
+| IBM Plex Mono bold | `praxis_prime/ui_themes/smf.forensic/assets/fonts/IBMPlexMono-Bold.woff2` | Copyright 2017 IBM Corp. All rights reserved. | OFL-1.1 |
+
 ## Runtime components that are not bundled
 
 These are not shipped here. If a release later vendors source, or if a
@@ -200,3 +204,6 @@ upstream licence, kept beside the fonts.
 | `praxis_prime/ui_themes/smf.legal-office/assets/fonts/LibreBaskerville.woff2` | `google/fonts` `ofl/librebaskerville` | Version 2.005; google/fonts b3d4b3ba7c4d54f15ed2be72d7f58b9097c3b252 (retrieved 2026-10) | OFL-1.1 | `smf.legal-office/assets/fonts/OFL.txt` |
 | `praxis_prime/ui_themes/smf.legal-office/assets/fonts/SourceSans3.woff2` | `google/fonts` `ofl/sourcesans3` | Version 3.052;hotconv 1.1.0;makeotfexe 2.6.0; google/fonts 914ec116571b1162d886aa402e715552221f0b77 (retrieved 2026-10) | OFL-1.1 | `smf.legal-office/assets/fonts/OFL.txt` |
 | `praxis_prime/ui_themes/smf.legal-office/assets/fonts/SourceCodePro.woff2` | `google/fonts` `ofl/sourcecodepro` | Version 1.026;hotconv 1.1.0;makeotfexe 2.6.0; google/fonts bd62bd8b4715f007af6905b0c9fd030f8410b289 (retrieved 2026-10) | OFL-1.1 | `smf.legal-office/assets/fonts/OFL.txt` |
+| `praxis_prime/ui_themes/smf.forensic/assets/fonts/IBMPlexSans.woff2` | `google/fonts` `ofl/ibmplexsans` | Version 3.201; google/fonts 0b58fb370093f9a9f4ff785d94405710b79de67c (retrieved 2026-10) | OFL-1.1 | `smf.forensic/assets/fonts/OFL.txt` |
+| `praxis_prime/ui_themes/smf.forensic/assets/fonts/IBMPlexMono-Regular.woff2` | `google/fonts` `ofl/ibmplexmono` | Version 2.3; google/fonts 0b58fb370093f9a9f4ff785d94405710b79de67c (retrieved 2026-10) | OFL-1.1 | `smf.forensic/assets/fonts/OFL.txt` |
+| `praxis_prime/ui_themes/smf.forensic/assets/fonts/IBMPlexMono-Bold.woff2` | `google/fonts` `ofl/ibmplexmono` | Version 2.3; google/fonts 0b58fb370093f9a9f4ff785d94405710b79de67c (retrieved 2026-10) | OFL-1.1 | `smf.forensic/assets/fonts/OFL.txt` |

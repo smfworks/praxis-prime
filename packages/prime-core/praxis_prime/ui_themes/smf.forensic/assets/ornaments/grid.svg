@@ -1,0 +1,6 @@
+<?xml version='1.0' encoding='utf-8'?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 8 8" fill="none" stroke="#5c6b78" stroke-width="0.4" role="img" aria-hidden="true">
+  <title>Engineering grid</title>
+  <desc>An 8 pixel grid.</desc>
+  <path d="M0 0 H8 M0 0 V8" />
+</svg>

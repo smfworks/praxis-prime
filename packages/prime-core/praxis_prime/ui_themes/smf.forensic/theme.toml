@@ -1,0 +1,79 @@
+schema = "praxis.theme/v1"
+id = "smf.forensic"
+name = "Forensic Engineering"
+version = "1.0.0"
+license = "MIT"
+authors = ["Praxis Prime"]
+description = "Graphite, blueprint blue, and safety amber. A faint engineering grid."
+modes = ["light", "dark"]
+default_mode = "light"
+min_praxis = "0.1.0"
+contrast = "AA"
+
+[fonts.display]
+family = "IBM Plex Sans"
+license = "OFL-1.1"
+fallback = "sans-serif"
+files = [
+  { path = "assets/fonts/IBMPlexSans.woff2", weight = "100 700", style = "normal" },
+]
+
+[fonts.body]
+family = "IBM Plex Sans"
+license = "OFL-1.1"
+fallback = "sans-serif"
+files = [
+  { path = "assets/fonts/IBMPlexSans.woff2", weight = "100 700", style = "normal" },
+]
+
+[fonts.mono]
+family = "IBM Plex Mono"
+license = "OFL-1.1"
+fallback = "monospace"
+files = [
+  { path = "assets/fonts/IBMPlexMono-Regular.woff2", weight = "400", style = "normal" },
+  { path = "assets/fonts/IBMPlexMono-Bold.woff2", weight = "700", style = "normal" },
+]
+
+[shape]
+radius = 2
+density = "cozy"
+motion = "subtle"
+scale = 1.2
+baseSize = 16
+lineHeight = 1.5
+borderWidth = 1
+
+[tokens.light]
+bg = "#f4f6f8"
+bgRaised = "#ffffff"
+fg = "#15191d"
+fgMuted = "#4f5a65"
+accent = "#0b5c8c"
+accentFg = "#ffffff"
+border = "#cfd6dd"
+borderStrong = "#4f5a65"
+ring = "#0b5c8c"
+ok = "#1f7a45"
+warn = "#8a5a00"
+danger = "#b3261e"
+
+[tokens.dark]
+bg = "#121416"
+bgRaised = "#1b1f23"
+fg = "#e6e9ec"
+fgMuted = "#9aa4ae"
+accent = "#f2a900"
+accentFg = "#121416"
+border = "#2d333a"
+borderStrong = "#9aa4ae"
+ring = "#f2a900"
+ok = "#5ccf8a"
+warn = "#f2a900"
+danger = "#ff6b5e"
+
+[ornaments]
+header = "assets/ornaments/grid.svg"
+divider = "assets/ornaments/grid.svg"
+watermark = "assets/ornaments/grid.svg"
+watermarkOpacity = 0.03
