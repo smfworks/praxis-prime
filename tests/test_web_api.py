@@ -269,6 +269,7 @@ def test_single_process_catalog_fails_closed_without_membership(tmp_path: Path):
     store.set_membership(bea.id, "beta", "operator")
     store.set_membership(member.id, "alpha", "operator")
     runtime = build_runtime(
+        model="ollama:qwen3:32b",
         env={},
         config_path=tmp_path / "missing.toml",
         data_path=data / "unused.db",
@@ -406,6 +407,7 @@ def test_memory_catalog_hides_another_members_episode(tmp_path: Path):
     store.set_membership(ada.id, "alpha", "owner")
     store.set_membership(vic.id, "alpha", "viewer")
     runtime = build_runtime(
+        model="ollama:qwen3:32b",
         env={},
         config_path=tmp_path / "missing.toml",
         data_path=data / "unused.db",
@@ -820,6 +822,7 @@ def test_concurrent_chats_keep_their_own_events(tmp_path: Path):
         AssistantFinal(content="BEA-REPLY"),
     ]
     runtime = build_runtime(
+        model="ollama:qwen3:32b",
         env={},
         config_path=tmp_path / "missing.toml",
         data_path=data / "prime.db",
@@ -1238,6 +1241,7 @@ def _accounts(
         if profile:
             store.set_membership(ada.id, profile, "owner")
     runtime = build_runtime(
+        model="ollama:qwen3:32b",
         env={},
         config_path=tmp_path / "missing.toml",
         data_path=data / "prime.db",

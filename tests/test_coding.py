@@ -59,6 +59,7 @@ def _init_repo(path: Path) -> None:
 def _runtime(tmp_path: Path, repo: Path, replies: list[AssistantFinal]):
     provider = ScriptedProvider(replies)
     runtime = build_runtime(
+        model="ollama:qwen3:32b",
         env={},
         config_path=tmp_path / "missing.toml",
         data_path=tmp_path / "prime.db",
@@ -94,6 +95,7 @@ def test_profile_worktree_is_created_on_the_data_root(tmp_path: Path):
     assert relative.parts[1] == "default"
     assert "profiles" not in relative.parts
     runtime = build_runtime(
+        model="ollama:qwen3:32b",
         env={},
         config_path=tmp_path / "missing.toml",
         data_path=data / "unused.db",
@@ -494,6 +496,7 @@ def test_coding_session_write_grant_is_explicit(tmp_path: Path):
         return ApprovalDecision.ALLOW_ONCE
 
     allowed = build_runtime(
+        model="ollama:qwen3:32b",
         env={},
         config_path=tmp_path / "missing-allow.toml",
         data_path=tmp_path / "allowed.db",

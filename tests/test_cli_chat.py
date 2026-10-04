@@ -20,6 +20,7 @@ def _runtime(tmp_path: Path, replies: list[AssistantFinal | Exception]):
         data_path=tmp_path / "prime.db",
         cwd=tmp_path,
         providers={"ollama": provider},
+        model="ollama:qwen3:32b",
     )
     return runtime, provider
 
@@ -91,6 +92,7 @@ def test_repl_denies_a_destructive_tool_until_yes(tmp_path: Path):
         ]
     )
     runtime = build_runtime(
+        model="ollama:qwen3:32b",
         env={},
         config_path=tmp_path / "missing.toml",
         data_path=tmp_path / "prime.db",

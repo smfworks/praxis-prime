@@ -39,7 +39,7 @@ from praxis_prime.loop.events import StatusEvent, TurnEnded
 from praxis_prime.loop.prompt import SYSTEM_PROMPT
 from praxis_prime.paths import config_dir
 from praxis_prime.policy.shellguard import compliance_mode
-from praxis_prime.router.types import TextDelta
+from praxis_prime.router.types import InferenceNotConfigured, TextDelta
 from praxis_prime.runtime import Runtime
 from praxis_prime.tools.registry import Risk
 
@@ -125,8 +125,12 @@ def _run_loop(
     task: str,
     write: Write,
 ) -> tuple[str, str | None]:
+    try:
+        model = runtime.router.primary.spec()
+    except InferenceNotConfigured as exc:
+        raise CodingError(str(exc)) from exc
     session_id = runtime.store.create(
-        model=runtime.router.primary.spec(),
+        model=model,
         preamble=preamble,
     )
     registry = coding_registry(work.path)

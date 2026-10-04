@@ -55,6 +55,15 @@ _EXACT = frozenset(
         ("POST", "/v1/decide"),
         ("POST", "/v1/systemone"),
         ("GET", "/v1/audit"),
+        ("GET", "/v1/onboarding/status"),
+        ("POST", "/v1/onboarding/detect"),
+        ("POST", "/v1/onboarding/probe"),
+        ("POST", "/v1/onboarding/test"),
+        ("POST", "/v1/onboarding/save"),
+        ("POST", "/v1/onboarding/owner"),
+        ("POST", "/v1/onboarding/dials"),
+        ("POST", "/v1/onboarding/oidc"),
+        ("POST", "/v1/onboarding/telegram"),
     }
 )
 
@@ -68,6 +77,11 @@ _FRAME_TYPES = frozenset(
         "chat.send",
         "model.set",
         "session.drop",
+        "onboarding.status",
+        "onboarding.detect",
+        "onboarding.probe",
+        "onboarding.test",
+        "onboarding.save",
     }
 )
 

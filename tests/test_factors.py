@@ -124,6 +124,7 @@ def test_daemon_enrolls_and_signs_in_with_passkey_and_totp(tmp_path: Path):
     store = AccountStore(data / "accounts.db")
     ada = store.create_account(username_text="ada", password=_PASSWORD, display_name="Ada")
     runtime = build_runtime(
+        model="ollama:qwen3:32b",
         env={},
         config_path=tmp_path / "missing.toml",
         data_path=data / "prime.db",
@@ -373,6 +374,7 @@ def test_step_up_origin_mfa_token_and_challenge_cap(tmp_path: Path):
     ada = store.create_account(username_text="ada", password=_PASSWORD, display_name="Ada")
     store.create_account(username_text="bob", password=_PASSWORD, display_name="Bob")
     runtime = build_runtime(
+        model="ollama:qwen3:32b",
         env={},
         config_path=tmp_path / "missing.toml",
         data_path=data / "prime.db",
@@ -797,6 +799,7 @@ def test_http_disable_requires_step_up_and_sign_in_challenges_are_sealed(tmp_pat
     ada = store.create_account(username_text="ada", password=_PASSWORD, display_name="Ada")
     store.create_account(username_text="bob", password=_PASSWORD, display_name="Bob")
     runtime = build_runtime(
+        model="ollama:qwen3:32b",
         env={},
         config_path=tmp_path / "missing.toml",
         data_path=data / "prime.db",

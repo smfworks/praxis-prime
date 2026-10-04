@@ -5,11 +5,13 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import http.client
 import io
 import json
 import secrets as secrets_mod
 import socket
 import sqlite3
+import ssl
 import sys
 import time
 from collections.abc import Iterator
@@ -1532,6 +1534,12 @@ def test_private_resolved_addresses_are_refused(monkeypatch: pytest.MonkeyPatch)
     assert oidc_mod._address_blocked("172.32.0.1") is False
     assert oidc_mod._address_blocked("2001:4860:4860::8888") is False
     assert oidc_mod._address_blocked("::ffff:8.8.8.8") is False
+    assert oidc_mod._address_blocked("::a00:1") is True
+    assert oidc_mod._address_blocked("::10.0.0.1") is True
+    assert oidc_mod._address_blocked("2002:a9fe:a9fe::") is True
+    assert oidc_mod._address_blocked("64:ff9b::a00:1") is True
+    assert oidc_mod._address_blocked("64:ff9b::808:808") is False
+    assert oidc_mod._address_blocked("::7f00:1") is True
 
     def refuse_connect(*_args: object, **_kwargs: object) -> None:
         raise AssertionError("connected to an unchecked address")
@@ -1611,6 +1619,142 @@ def test_private_resolved_addresses_are_refused(monkeypatch: pytest.MonkeyPatch)
         )
     assert caught.value.reason == "provider_unreachable"
     assert seen == [("8.8.8.8", 443)]
+
+    tried: list[tuple[str, int]] = []
+
+    def fail_first(address: tuple[str, int], timeout: float | None = None) -> None:
+        del timeout
+        tried.append(address)
+        raise TimeoutError("slow")
+
+    monkeypatch.setattr(socket, "create_connection", fail_first)
+    monkeypatch.setattr(oidc_mod, "_resolve", lambda _host, _port: ["8.8.8.8", "1.1.1.1"])
+    with pytest.raises(OidcError) as caught:
+        oidc_mod._request(
+            "https://idp.example/jwks",
+            method="GET",
+            body=None,
+            headers={},
+            allow_http=False,
+            limit=128,
+        )
+    assert caught.value.reason == "provider_unreachable"
+    assert tried == [("8.8.8.8", 443), ("1.1.1.1", 443)]
+    monkeypatch.setattr(oidc_mod, "_resolve", lambda _host, _port: ["::a00:1"])
+    monkeypatch.setattr(socket, "create_connection", refuse_connect)
+    with pytest.raises(OidcError) as caught:
+        oidc_mod._request(
+            "https://idp.example/jwks",
+            method="GET",
+            body=None,
+            headers={},
+            allow_http=False,
+            limit=128,
+        )
+    assert caught.value.reason == "url_rejected"
+
+
+class _ScriptedConnection:
+    """Stand-in for one resolved address. Records whether ``request`` ran."""
+
+    made: list[_ScriptedConnection] = []
+    fail = ""
+
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        *,
+        timeout: float,
+        pinned: str,
+        tls: object,
+    ) -> None:
+        del host, port, timeout, tls
+        self.pinned = pinned
+        self.requested = False
+        self.closed = False
+        # _read_bounded looks up the live socket. None uses response.read1.
+        self.sock = None
+        _ScriptedConnection.made.append(self)
+
+    def connect(self) -> None:
+        if self.fail == "refused" and self.pinned == "8.8.8.8":
+            raise ConnectionRefusedError("connection refused")
+        if self.fail == "tls" and self.pinned == "8.8.8.8":
+            raise ssl.SSLError("handshake failed")
+
+    def request(
+        self,
+        method: str,
+        path: str,
+        body: bytes | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> None:
+        del method, path, body, headers
+        self.requested = True
+        if self.fail == "request-timeout":
+            raise TimeoutError("timed out after the request was sent")
+        if self.fail == "http":
+            raise http.client.HTTPException("response failed")
+
+    def getresponse(self) -> object:
+        return _ScriptedResponse(self.fail == "body-timeout")
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _ScriptedResponse:
+    def __init__(self, timeout: bool) -> None:
+        self.status = 200
+        self.fp = None
+        self._timeout = timeout
+        self._sent = False
+
+    def read1(self, _limit: int) -> bytes:
+        if self._timeout:
+            raise TimeoutError("timed out while reading the body")
+        if self._sent:
+            return b""
+        self._sent = True
+        return b'{"ok":true}'
+
+
+def test_oidc_retries_only_before_the_request_is_sent(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(oidc_mod, "_resolve", lambda _host, _port: ["8.8.8.8", "1.1.1.1"])
+    monkeypatch.setattr(oidc_mod, "_BoundConnection", _ScriptedConnection)
+
+    def once(failure: str) -> bytes | None:
+        _ScriptedConnection.made = []
+        _ScriptedConnection.fail = failure
+        try:
+            return oidc_mod._request(
+                "https://idp.example/token",
+                method="POST",
+                body=b"grant_type=authorization_code",
+                headers={},
+                allow_http=False,
+                limit=128,
+            )
+        except OidcError as exc:
+            assert exc.reason == "provider_unreachable"
+            return None
+
+    assert once("request-timeout") is None
+    assert [item.pinned for item in _ScriptedConnection.made] == ["8.8.8.8"]
+    assert _ScriptedConnection.made[0].requested is True
+    assert once("body-timeout") is None
+    assert [item.pinned for item in _ScriptedConnection.made] == ["8.8.8.8"]
+    assert _ScriptedConnection.made[0].requested is True
+    assert once("http") is None
+    assert [item.pinned for item in _ScriptedConnection.made] == ["8.8.8.8"]
+    assert once("refused") == b'{"ok":true}'
+    assert [item.pinned for item in _ScriptedConnection.made] == ["8.8.8.8", "1.1.1.1"]
+    assert _ScriptedConnection.made[0].requested is False
+    assert _ScriptedConnection.made[1].requested is True
+    assert once("tls") == b'{"ok":true}'
+    assert [item.pinned for item in _ScriptedConnection.made] == ["8.8.8.8", "1.1.1.1"]
+    assert _ScriptedConnection.made[0].requested is False
 
 
 def test_jwks_refetch_is_rate_limited(

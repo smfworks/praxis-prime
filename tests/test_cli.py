@@ -64,7 +64,7 @@ def test_doctor_reports_the_four_checks(capsys):
     code = main(["doctor"])
     assert code == 0
     output = capsys.readouterr().out
-    for name in ("Python", "OS", "Session", "Ollama"):
+    for name in ("Python", "OS", "Session", "Provider", "Local servers"):
         assert name in output
 
 

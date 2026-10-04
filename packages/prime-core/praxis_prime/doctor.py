@@ -1,8 +1,9 @@
 """Environment checks for ``praxis-prime doctor``.
 
-Reports Python, Ubuntu vs Arch vs Omarchy, Wayland vs X11, and whether Ollama
-answers on loopback. A missing display or a stopped Ollama is a warning.
-Python older than 3.12 is a failure.
+Reports Python, Ubuntu vs Arch vs Omarchy, Wayland vs X11, the configured
+model provider, and local servers that answered a read-only probe. A missing
+display is a warning. A missing provider is a warning. Detected local servers
+are information only and are not selected. Python older than 3.12 is a failure.
 
 TODO: ARCHITECTURE §28.1 (portals, uinput, PipeWire) once those adapters exist.
 """
@@ -58,12 +59,19 @@ def collect_checks(
     ollama_base: str = DEFAULT_OLLAMA_BASE,
     bwrap_present: bool = False,
     playwright_present: bool = False,
+    provider_spec: str = "",
+    provider_ready: bool = False,
+    local_servers: Sequence[str] | None = None,
 ) -> list[Check]:
+    detected = list(local_servers or ())
+    if ollama_reachable and not any(item.startswith("ollama ") for item in detected):
+        detected.append(f"ollama at {ollama_base}")
     return [
         check_python(version_info),
         check_os(os_release_text, env, which, path_exists),
         check_session(env),
-        check_ollama(ollama_reachable, ollama_base),
+        check_provider(provider_spec, provider_ready),
+        check_local_servers(detected),
         check_sandbox(bwrap_present),
         check_browser(playwright_present),
     ]
@@ -128,9 +136,34 @@ def check_browser(playwright_present: bool) -> Check:
 
 
 def check_ollama(reachable: bool, base_url: str) -> Check:
+    """Kept for callers that probe Ollama on its own. Doctor does not select it."""
     if reachable:
         return Check("Ollama", "ok", f"reachable at {base_url}")
     return Check("Ollama", "warn", f"not reachable at {base_url}")
+
+
+def check_provider(spec: str, ready: bool) -> Check:
+    chosen = spec.strip()
+    if not chosen:
+        return Check(
+            "Provider",
+            "warn",
+            "no provider configured. Run `praxis-prime setup` or open the web UI.",
+        )
+    if ready:
+        return Check("Provider", "ok", f"configured {chosen}")
+    return Check(
+        "Provider",
+        "warn",
+        f"{chosen} is chosen but not verified. Run `praxis-prime setup`.",
+    )
+
+
+def check_local_servers(servers: Sequence[str]) -> Check:
+    if not servers:
+        return Check("Local servers", "info", "none detected (information only; not selected)")
+    listed = ", ".join(servers)
+    return Check("Local servers", "info", f"detected (information only; not selected): {listed}")
 
 
 def classify_os(
@@ -197,18 +230,48 @@ def probe_ollama(
         return False
 
 
+def _detected_local_servers() -> list[str]:
+    """Names of local servers that answered. Detection never selects one."""
+    try:
+        from praxis_prime.onboarding.detect import detect
+
+        found = detect(timeout=0.8)
+    except (OSError, ValueError):
+        return []
+    servers = found.get("servers")
+    if not isinstance(servers, list):
+        return []
+    names: list[str] = []
+    for item in servers:
+        if not isinstance(item, dict):
+            continue
+        provider = str(item.get("provider", "")).strip()
+        base = str(item.get("baseUrl", "")).strip()
+        if provider and base:
+            names.append(f"{provider} at {base}")
+        elif provider:
+            names.append(provider)
+    return names
+
+
 def run_system_doctor() -> list[Check]:
     from praxis_prime.browser.driver import playwright_available
+    from praxis_prime.router.settings import load_settings
 
+    settings = load_settings()
+    ready = settings.provider_ready()
     return collect_checks(
         version_info=(sys.version_info.major, sys.version_info.minor, sys.version_info.micro),
         os_release_text=_read_text(Path("/etc/os-release")),
         env=_system_env(),
         which=shutil.which,
         path_exists=lambda candidate: Path(candidate).exists(),
-        ollama_reachable=probe_ollama(),
+        ollama_reachable=probe_ollama(timeout=0.8),
         bwrap_present=shutil.which("bwrap") is not None,
         playwright_present=playwright_available(),
+        provider_spec=settings.model_spec,
+        provider_ready=ready,
+        local_servers=_detected_local_servers(),
     )
 
 

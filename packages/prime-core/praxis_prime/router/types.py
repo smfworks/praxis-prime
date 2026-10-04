@@ -96,18 +96,35 @@ class ProviderUnreachable(ProviderError):
         super().__init__(provider, message, unreachable=True)
 
 
+INFERENCE_NOT_CONFIGURED = (
+    "No model provider is configured. Run `praxis-prime setup` or open the web UI."
+)
+
+
+def unverified_provider_message(spec: str) -> str:
+    """A config names a provider that has not passed the setup test."""
+    return (
+        f"{spec} is named in the config and has not been verified. "
+        "Run `praxis-prime setup` to test it and mark it ready."
+    )
+
+
+class InferenceNotConfigured(RuntimeError):
+    """Chat was asked to run before the operator chose and verified a provider."""
+
+    def __init__(self, message: str = INFERENCE_NOT_CONFIGURED) -> None:
+        super().__init__(message)
+
+
 class RouterExhausted(RuntimeError):
     """Every provider in the chain failed before producing a response."""
 
     def __init__(self, attempts: list[ProviderUnreachable]) -> None:
         self.attempts = attempts
-        lines = ["No configured model provider is reachable."]
+        lines = ["The configured model provider is not reachable."]
         for attempt in attempts:
             lines.append(f"- {attempt.provider}: {attempt.message}")
-        lines.append(
-            "Start Ollama with `ollama serve`, set PRAXIS_PRIME_MODEL, "
-            "or set PRAXIS_PRIME_FALLBACK_MODELS. API keys belong in the environment, not config."
-        )
+        lines.append("Run `praxis-prime setup` or open the web UI.")
         super().__init__("\n".join(lines))
 
 
@@ -126,6 +143,7 @@ def parse_model_spec(spec: str) -> ModelRef:
         "llama.cpp": "openai-compatible",
         "llama_cpp": "openai-compatible",
         "vllm": "openai-compatible",
+        "lmstudio": "openai-compatible",
         "openai_compatible": "openai-compatible",
     }
     provider = aliases.get(provider, provider)
@@ -138,6 +156,37 @@ def parse_model_spec(spec: str) -> ModelRef:
     if not model:
         raise ValueError(f"model spec {spec!r} is missing a model name")
     return ModelRef(provider, model)
+
+
+def canonical_spec(spec: str) -> str:
+    """``provider:model`` after alias folding. ``llamacpp:m`` is ``openai-compatible:m``."""
+    return parse_model_spec(spec).spec()
+
+
+def specs_cover(spec: str, verified: object) -> bool:
+    """True when ``spec`` and one verified entry name the same provider and model.
+
+    Both sides are normalized. A bad entry is skipped so one stale record
+    cannot break a load. An empty spec is not covered.
+    """
+    text = spec.strip()
+    if not text:
+        return False
+    try:
+        wanted = canonical_spec(text)
+    except ValueError:
+        return False
+    if not isinstance(verified, (list, tuple, set, frozenset)):
+        return False
+    for item in verified:
+        if not isinstance(item, str) or not item.strip():
+            continue
+        try:
+            if canonical_spec(item) == wanted:
+                return True
+        except ValueError:
+            continue
+    return False
 
 
 def parse_arguments(raw: object) -> dict[str, Any]:

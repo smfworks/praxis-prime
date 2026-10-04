@@ -2,6 +2,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState, type FormEvent } from "react";
 
 import { ApiError, api, currentProfile, rowsOf, selectProfile, setCsrf, textOf } from "./api";
+import { missingItems, SetupNeeded, SetupWizard } from "./setup";
 import { ChatView, DirectoryView, FactorsView, ListView, Approvals } from "./views";
 import { asPublicKey, credentialJson, requestOptions } from "./webauthn";
 
@@ -49,7 +50,7 @@ export function App() {
   }
   if (!account) {
     return (
-      <Login
+      <SignedOut
         onSignedIn={() => {
           void client.invalidateQueries({ queryKey: ["session"] });
           if (!location.hash) location.hash = "#/chat";
@@ -58,6 +59,43 @@ export function App() {
     );
   }
   return <Shell account={account} route={route} />;
+}
+
+function SignedOut({ onSignedIn }: { onSignedIn: () => void }) {
+  const client = useQueryClient();
+  const setup = useQuery({
+    queryKey: ["setup-gate"],
+    queryFn: async () => {
+      try {
+        return await api("GET", "/v1/onboarding/status");
+      } catch (error) {
+        if (error instanceof ApiError && (error.status === 401 || error.status === 403)) {
+          return { setupRequired: false };
+        }
+        throw error;
+      }
+    },
+  });
+  if (setup.isLoading) {
+    return (
+      <p className="p-6" role="status">
+        Loading…
+      </p>
+    );
+  }
+  if (setup.data?.setupRequired === true) {
+    return (
+      <SetupWizard
+        mode="first"
+        onFinished={() => {
+          void client.invalidateQueries({ queryKey: ["session"] });
+          void client.invalidateQueries({ queryKey: ["setup-gate"] });
+          location.hash = "#/chat";
+        }}
+      />
+    );
+  }
+  return <Login onSignedIn={onSignedIn} />;
 }
 
 async function loadSession(): Promise<Account | null> {
@@ -108,6 +146,11 @@ function Shell({ account, route }: { account: Account; route: string }) {
     await client.invalidateQueries({ queryKey: ["session"] });
   }
 
+  const setup = useQuery({
+    queryKey: ["setup-status"],
+    queryFn: () => api("GET", "/v1/onboarding/status"),
+  });
+  const missing = missingItems(setup.data);
   const admin = account.role === "owner" || account.role === "admin";
   return (
     <div className="min-h-screen bg-canvas text-ink">
@@ -154,6 +197,15 @@ function Shell({ account, route }: { account: Account; route: string }) {
         </div>
       </header>
       <main id="main" className="mx-auto max-w-5xl px-4 py-6">
+        {admin && missing.length > 0 && route !== "setup" ? <SetupNeeded items={missing} /> : null}
+        {!admin && setup.data?.inferenceReady === false ? (
+          <p className="mb-4" role="status">
+            Inference not configured
+          </p>
+        ) : null}
+        {route === "setup" && admin ? (
+          <SetupWizard mode="admin" onFinished={() => (location.hash = "#/chat")} />
+        ) : null}
         <p className="mb-4 text-sm text-muted">
           Signed in as {account.username}. <span className="text-muted">({account.role})</span>
         </p>

@@ -1,26 +1,29 @@
 """Model settings from the XDG config file and the environment.
 
-API keys are read from the environment only. They are not written to
-``config.toml`` and they do not appear in ``Settings``'s repr.
+No provider is selected by default. API keys are read from the environment
+or the secrets file. They are not written to ``config.toml`` and they do
+not appear in ``Settings``'s repr. A key that is present does not choose a model.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from praxis_prime.channels.secrets import parse_env_file
 from praxis_prime.compliance.providers import ProviderFlags, flags_from_config
 from praxis_prime.paths import config_dir
 from praxis_prime.policy.boundary import absolute_config_paths, parse_fetch_allow
 from praxis_prime.policy.dials import default_positions
 from praxis_prime.router.http import normalize_base
-from praxis_prime.router.types import ModelRef, parse_model_spec
+from praxis_prime.router.types import ModelRef, canonical_spec, parse_model_spec, specs_cover
 
 _MODES = {"plan", "ask", "auto", "full"}
-_DEFAULT_MODEL = "ollama:qwen3:32b"
+_READY_NAME = "provider-ready.json"
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,6 +54,11 @@ class Settings:
     read_roots: tuple[str, ...] = ()
     read_allow: tuple[str, ...] = ()
     fetch_allow: tuple[str, ...] = ()
+    verified_specs: tuple[str, ...] = ()
+    allow_providers: tuple[str, ...] = ()
+    utility_spec: str = ""
+    vision_spec: str = ""
+    judge_spec: str = ""
 
     def __repr__(self) -> str:
         return (
@@ -63,7 +71,13 @@ class Settings:
         )
 
     def chain(self) -> list[ModelRef]:
-        """Primary, then explicit fallbacks, then a local fallback when it helps."""
+        """The chosen primary, then fallbacks that each passed their own test.
+
+        An empty primary means no chain. A base URL, an API key, or a local
+        server that happens to be running does not add an entry.
+        """
+        if not self.model_spec.strip():
+            return []
         refs: list[ModelRef] = []
 
         def add(spec: str) -> None:
@@ -73,14 +87,17 @@ class Settings:
 
         add(self.model_spec)
         for spec in self.fallback_specs:
-            add(spec)
-        if refs[0].provider != "ollama":
-            add(_DEFAULT_MODEL)
-        if self.openai_compatible_base_url and not any(
-            ref.provider == "openai-compatible" for ref in refs
-        ):
-            add(f"openai-compatible:{self.openai_compatible_model}")
+            if specs_cover(spec, self.verified_specs):
+                add(spec)
         return refs
+
+    def provider_ready(self) -> bool:
+        """True when the configured primary passed a setup test.
+
+        ``llamacpp:m`` in the config and ``openai-compatible:m`` in the
+        verification record are the same provider.
+        """
+        return bool(self.model_spec.strip()) and specs_cover(self.model_spec, self.verified_specs)
 
 
 def load_settings(
@@ -104,7 +121,7 @@ def load_settings(
     primary = _first(
         environ.get("PRAXIS_PRIME_MODEL"),
         _str(models.get("primary")),
-        _DEFAULT_MODEL,
+        "",
     )
     fallback_env = environ.get("PRAXIS_PRIME_FALLBACK_MODELS", "")
     if fallback_env.strip():
@@ -162,6 +179,13 @@ def load_settings(
         ),
         "xai": flags_from_config("xai", _table(providers.get("xai")), base_url=xai_url),
     }
+    secrets = _provider_secrets(environ, path)
+    allow_raw = models.get("allow_providers") or []
+    allow = (
+        tuple(str(item).strip() for item in allow_raw if str(item).strip())
+        if isinstance(allow_raw, list)
+        else ()
+    )
 
     return Settings(
         model_spec=primary,
@@ -171,23 +195,17 @@ def load_settings(
         openai_compatible_model=_first(
             environ.get("PRAXIS_PRIME_OPENAI_COMPATIBLE_MODEL"),
             _str(compat_cfg.get("model")),
-            "local",
+            "",
         ),
         openai_base_url=openai_url,
         anthropic_base_url=anthropic_url,
         xai_base_url=xai_url,
-        openai_api_key=_first(
-            environ.get("PRAXIS_PRIME_OPENAI_API_KEY"),
-            environ.get("OPENAI_API_KEY"),
-            "",
+        openai_api_key=_key(environ, secrets, "PRAXIS_PRIME_OPENAI_API_KEY", "OPENAI_API_KEY"),
+        anthropic_api_key=_key(
+            environ, secrets, "PRAXIS_PRIME_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"
         ),
-        anthropic_api_key=_first(
-            environ.get("PRAXIS_PRIME_ANTHROPIC_API_KEY"),
-            environ.get("ANTHROPIC_API_KEY"),
-            "",
-        ),
-        xai_api_key=_first(environ.get("PRAXIS_PRIME_XAI_API_KEY"), environ.get("XAI_API_KEY"), ""),
-        openai_compatible_api_key=environ.get("PRAXIS_PRIME_OPENAI_COMPATIBLE_API_KEY", ""),
+        xai_api_key=_key(environ, secrets, "PRAXIS_PRIME_XAI_API_KEY", "XAI_API_KEY"),
+        openai_compatible_api_key=_key(environ, secrets, "PRAXIS_PRIME_OPENAI_COMPATIBLE_API_KEY"),
         max_iterations=_positive_int(
             _first(
                 environ.get("PRAXIS_PRIME_MAX_ITERATIONS"),
@@ -208,7 +226,79 @@ def load_settings(
         read_roots=absolute_config_paths(tools.get("read_roots")),
         read_allow=absolute_config_paths(tools.get("read_allow")),
         fetch_allow=tuple(sorted(parse_fetch_allow(tools.get("fetch_allow")))),
+        verified_specs=verified_specs_from(path),
+        allow_providers=allow,
+        utility_spec=_str(models.get("utility")).strip(),
+        vision_spec=_str(models.get("vision")).strip(),
+        judge_spec=_judge_spec(file_data),
     )
+
+
+def verified_specs_from(config_path: Path) -> tuple[str, ...]:
+    """Specs that passed a live test. Missing or unreadable records yield none."""
+    path = config_path.parent / _READY_NAME
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeError):
+        return ()
+    if not isinstance(data, dict):
+        return ()
+    found: list[str] = []
+    if data.get("ready") is True:
+        spec = data.get("spec")
+        if isinstance(spec, str) and spec.strip():
+            found.append(spec.strip())
+    fallbacks = data.get("fallbacks")
+    if isinstance(fallbacks, list):
+        for item in fallbacks:
+            if isinstance(item, str) and item.strip():
+                found.append(item.strip())
+    roles = data.get("roles")
+    if isinstance(roles, dict):
+        for role in roles.values():
+            if not isinstance(role, dict) or role.get("passed") is not True:
+                continue
+            spec = role.get("spec")
+            if isinstance(spec, str) and spec.strip():
+                found.append(spec.strip())
+    unique: list[str] = []
+    for spec in found:
+        try:
+            canonical = canonical_spec(spec)
+        except ValueError:
+            continue
+        if canonical not in unique:
+            unique.append(canonical)
+    return tuple(unique)
+
+
+def _provider_secrets(environ: Mapping[str, str], config_path: Path) -> dict[str, str]:
+    override = environ.get("PRAXIS_PRIME_SECRETS_FILE", "").strip()
+    path = Path(override) if override else config_path.parent / "secrets.env"
+    if not path.is_file():
+        return {}
+    try:
+        return parse_env_file(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError):
+        return {}
+
+
+def _key(environ: Mapping[str, str], secrets: Mapping[str, str], *names: str) -> str:
+    for name in names:
+        value = environ.get(name, "").strip()
+        if value:
+            return value
+    for name in names:
+        value = secrets.get(name, "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _judge_spec(file_data: Mapping[str, object]) -> str:
+    decide = _table(file_data.get("decide"))
+    models = _table(decide.get("models"))
+    return _str(models.get("tier2")).strip()
 
 
 def _table(value: object) -> dict[str, object]:

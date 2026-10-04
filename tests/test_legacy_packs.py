@@ -287,6 +287,7 @@ def test_cli_packs_list_install_and_info(tmp_path: Path, capsys: pytest.CaptureF
     installed_out = capsys.readouterr()
     assert "installed demo_pack 1.2.3 (MIT)" in installed_out.out
     assert "Ignored pack model pin" in installed_out.err
+    assert "Pack author suggests" in installed_out.err
     assert "dashboard.js" in installed_out.err
     assert main(["packs", "info", "demo_pack", *base]) == 0
     info = capsys.readouterr().out

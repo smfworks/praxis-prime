@@ -34,7 +34,7 @@ from praxis_prime.profiles.policy import ToolAllowlist, clamp_dials
 from praxis_prime.router.factory import build_router
 from praxis_prime.router.router import ChatProvider, ModelRouter
 from praxis_prime.router.settings import Settings, load_settings
-from praxis_prime.router.types import parse_model_spec
+from praxis_prime.router.types import InferenceNotConfigured, parse_model_spec
 from praxis_prime.skills.catalog import SkillCatalog, bundled_skills_dir
 from praxis_prime.skills.tools import install_skill_tool
 from praxis_prime.state import StateDB, refuse_if_migrating
@@ -72,8 +72,14 @@ class Runtime:
         if self.browser is not None:
             self.browser.close()
         self.engine.labels.close()
-        self.audit.close()
-        self.db.close()
+        # Web owner creation closes these before the profile move and may
+        # leave them unset when the reopen fails.
+        audit = self.audit
+        if audit is not None:
+            audit.close()
+        db = self.db
+        if db is not None:
+            db.close()
         token = self.data_root_token
         self.data_root_token = None
         if token is not None:
@@ -119,8 +125,12 @@ class Runtime:
         else:
             history = []
             active_preamble = preamble
+            try:
+                session_model = self.router.primary.spec()
+            except InferenceNotConfigured:
+                session_model = ""
             session_id = self.store.create(
-                model=self.router.primary.spec(),
+                model=session_model,
                 preamble=preamble,
                 owner_account=owner_account,
                 owner_profile=owner_profile,
@@ -163,6 +173,41 @@ class Runtime:
         return session_id, loop
 
 
+def reload_serving_router(
+    runtime: Runtime,
+    *,
+    env: Mapping[str, str] | None,
+    config_path: Path,
+    lock: object | None = None,
+) -> None:
+    """Reload settings and swap the router. A failed build leaves the old one.
+
+    ``load_settings`` runs under ``lock`` so two saves cannot publish a stale
+    router. Profile dials already applied on ``runtime.settings`` are kept.
+    """
+
+    def apply() -> None:
+        fresh = load_settings(env, config_path=config_path)
+        fresh = replace(fresh, dials=dict(runtime.settings.dials))
+        router = build_router(fresh)
+        router.require_verified = True
+        router.verified_specs = set(fresh.verified_specs)
+        runtime.settings = fresh
+        runtime.router = router
+        runtime.policy.provider_flags = dict(fresh.provider_flags)
+        engine = runtime.engine
+        engine.router = router
+        judge = getattr(engine, "judge", None)
+        if judge is not None and hasattr(judge, "router"):
+            judge.router = router
+
+    if lock is None:
+        apply()
+        return
+    with lock:
+        apply()
+
+
 def build_runtime(
     *,
     env: Mapping[str, str] | None = None,
@@ -184,12 +229,16 @@ def build_runtime(
             config_path=config_path,
         )
     chosen = providers
+    stub_map = None
     if chosen is None:
         from praxis_prime.router.stub import providers_from_env
 
         source = os.environ if env is None else env
-        chosen = providers_from_env(source)
+        stub_map = providers_from_env(source)
+        chosen = stub_map
     router = build_router(settings, chosen)
+    router.require_verified = providers is None and stub_map is None
+    router.verified_specs = set(settings.verified_specs)
     if model:
         ref = parse_model_spec(model)
         router.use_primary(ref)

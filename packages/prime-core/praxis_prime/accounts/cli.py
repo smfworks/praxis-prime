@@ -27,7 +27,7 @@ from praxis_prime.accounts.factors import FactorError, Factors
 from praxis_prime.accounts.roles import SERVER_ROLES
 from praxis_prime.audit.log import AuditLog
 from praxis_prime.paths import config_dir, data_dir
-from praxis_prime.profiles.migrate import MigrationBusy, migrate_single_user, migrate_under_lock
+from praxis_prime.profiles.migrate import MigrationBusy
 from praxis_prime.state import DatabaseBusy, StateDB
 from praxis_prime.statfile import StatKind, lstat_kind
 
@@ -137,6 +137,9 @@ def _create(args: argparse.Namespace) -> int:
     try:
         if not store.has_accounts():
             return _create_owner(args, store, password)
+        from praxis_prime.onboarding.token import invalidate_first_run_token
+
+        invalidate_first_run_token(_config(args))
         account = store.create_account(
             username_text=args.username,
             password=password,
@@ -153,38 +156,30 @@ def _create(args: argparse.Namespace) -> int:
 
 def _create_owner(args: argparse.Namespace, store: AccountStore, password: str) -> int:
     """Migrate first. A failure before the marker does not leave an owner behind."""
-    account: Account | None = None
+    from praxis_prime.onboarding.owner import create_owner_account
+    from praxis_prime.onboarding.token import invalidate_first_run_token
+
     try:
-        result = migrate_under_lock(_data(args), _config(args), owner_account="")
-        account = store.create_account(
-            username_text=args.username,
-            password=password,
-            display_name=args.display_name or args.username,
-            role="owner",
-            email=args.email,
-        )
-        result = migrate_single_user(
+        created = create_owner_account(
+            store,
             _data(args),
             _config(args),
-            owner_account=account.id,
-            daemon_running=lambda: False,
+            username=args.username,
+            password=password,
+            display_name=args.display_name or args.username,
+            email=args.email,
         )
-        store.set_membership(account.id, result.profile_id, "owner")
     except MigrationBusy as exc:
         print(f"praxis-prime account: {exc}", file=sys.stderr)
         return 2
     except (AccountError, OSError) as exc:
-        if account is not None:
-            try:
-                store.discard_account(account.id)
-            except AccountError:
-                pass
         print(f"praxis-prime account: {exc}", file=sys.stderr)
         return 2
-    print(f"created owner {account.username} ({account.id})")
-    print(f"profile {result.profile_id}")
-    if result.backup:
-        print(f"backup {result.backup}")
+    invalidate_first_run_token(_config(args))
+    print(f"created owner {created.account.username} ({created.account.id})")
+    print(f"profile {created.profile_id}")
+    if created.backup:
+        print(f"backup {created.backup}")
     return 0
 
 

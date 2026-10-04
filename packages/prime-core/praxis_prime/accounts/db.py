@@ -173,15 +173,18 @@ class AccountStore:
         now = _now()
         account_id = _new_id("acc")
         with self._lock:
-            existing = self.conn.execute("SELECT COUNT(*) AS n FROM accounts").fetchone()
-            count = int(existing["n"]) if existing is not None else 0
-            if count == 0:
-                chosen = "owner"
-            elif chosen == "owner":
-                raise AccountError("an owner account already exists")
-            if chosen not in SERVER_ROLES:
-                raise AccountError("role must be owner, admin, operator, viewer, or auditor")
             try:
+                self.conn.execute("BEGIN IMMEDIATE")
+                existing = self.conn.execute("SELECT COUNT(*) AS n FROM accounts").fetchone()
+                count = int(existing["n"]) if existing is not None else 0
+                if count == 0:
+                    chosen = "owner"
+                elif chosen == "owner":
+                    raise AccountError("an owner account already exists")
+                if chosen not in SERVER_ROLES:
+                    raise AccountError(
+                        "role must be owner, admin, operator, viewer, or auditor"
+                    )
                 self.conn.execute(
                     """
                     INSERT INTO accounts (
@@ -192,8 +195,15 @@ class AccountStore:
                     (account_id, name, shown, mail, encoded, chosen, now, now),
                 )
                 self.conn.commit()
+            except AccountError:
+                self.conn.rollback()
+                raise
             except sqlite3.IntegrityError as exc:
+                self.conn.rollback()
                 raise AccountError(f"account {name} already exists") from exc
+            except Exception:
+                self.conn.rollback()
+                raise
             tighten_file(self.path)
         return Account(account_id, name, shown, mail, chosen, "active", now)
 

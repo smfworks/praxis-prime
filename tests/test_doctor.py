@@ -125,10 +125,15 @@ def test_only_python_failure_sets_the_exit_code():
         "Python",
         "OS",
         "Session",
-        "Ollama",
+        "Provider",
+        "Local servers",
         "Sandbox",
         "Browser",
     ]
+    provider = next(check for check in checks if check.name == "Provider")
+    assert provider.status == "warn"
+    local = next(check for check in checks if check.name == "Local servers")
+    assert local.status == "info"
     assert report_exit_code(checks) == 1
 
     healthy = collect_checks(

@@ -95,6 +95,7 @@ def test_daemon_spa_signs_in_streams_and_approves(tmp_path: Path):
             "PYTHONPATH": os.pathsep.join(python_path),
             "PRAXIS_PRIME_GATEWAY_LISTEN": "127.0.0.1:0",
             "PRAXIS_PRIME_STUB_REPLIES": str(replies),
+            "PRAXIS_PRIME_MODEL": "ollama:qwen3:32b",
             "PRAXIS_PRIME_UI_DIR": str(ui),
         }
     )
@@ -180,6 +181,7 @@ def _daemon(
             "PYTHONPATH": os.pathsep.join(python_path),
             "PRAXIS_PRIME_GATEWAY_LISTEN": "127.0.0.1:0",
             "PRAXIS_PRIME_STUB_REPLIES": str(file),
+            "PRAXIS_PRIME_MODEL": "ollama:qwen3:32b",
             "PRAXIS_PRIME_UI_DIR": str(ui),
         }
     )

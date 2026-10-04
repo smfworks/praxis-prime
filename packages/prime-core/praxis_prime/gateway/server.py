@@ -47,6 +47,12 @@ from praxis_prime.gateway.guard import (
     mutation_type_denial,
 )
 from praxis_prime.gateway.oidc import oidc_public, oidc_session
+from praxis_prime.gateway.onboarding import (
+    SetupFailures,
+    close_owned_gateway_audit,
+    handle_onboarding,
+    onboarding_payload,
+)
 from praxis_prime.gateway.protocol import (
     CHAT_ROLES,
     OPERATOR_ONLY,
@@ -68,6 +74,7 @@ from praxis_prime.gateway.ws import (
 )
 from praxis_prime.host import Host, TurnResult
 from praxis_prime.observe import JsonLogger
+from praxis_prime.onboarding.service import OnboardingError
 from praxis_prime.statfile import StatKind, lstat_kind
 
 _APPROVAL_PATH = re.compile(r"^/v1/approvals/(ap_[0-9a-f]{8})$")
@@ -96,6 +103,7 @@ class GatewayServer:
         data_root: Path | None = None,
         bearer_enabled: bool = True,
         multi_profile: bool = False,
+        config_dir: Path | None = None,
     ) -> None:
         self.host = host
         self._port = port
@@ -109,6 +117,12 @@ class GatewayServer:
         self.data_root = data_root
         self.bearer_enabled = bearer_enabled
         self.multi_profile = multi_profile
+        self.config_dir = config_dir
+        self.restart_required = False
+        self.setup_in_progress = False
+        self._owns_gateway_audit = False
+        self.scheduler = None
+        self.setup_failures = SetupFailures()
         self.logger = logger
         self.socket_path = socket_path
         self._stopped = threading.Event()
@@ -170,6 +184,18 @@ class GatewayServer:
                 os.unlink(self.socket_path)
             except OSError:
                 pass
+        close_owned_gateway_audit(self)
+
+    def _pause_message(self) -> str | None:
+        """Why ordinary requests are paused, or None when the gateway is open.
+
+        A restart blocks health. Setup-in-progress does not: ``/health`` stays ok.
+        """
+        if self.restart_required:
+            return _RESTART_MESSAGE
+        if self.setup_in_progress:
+            return _SETUP_MESSAGE
+        return None
 
     def publish(self, frame: dict[str, object]) -> None:
         """Fan out one event. Each socket is filtered by the principal it connected as.
@@ -317,10 +343,15 @@ class GatewayServer:
         peer: str = "",
     ) -> tuple[int, dict[str, object]]:
         route, _, query = path.partition("?")
+        if method == "GET" and route == "/health" and not self.restart_required:
+            return 200, {"ok": True, "service": "praxis-primed"}
+        paused = self._pause_message()
+        if paused is not None:
+            if paused == _SETUP_MESSAGE:
+                extras.append(("Retry-After", "1"))
+            return 503, _error("unavailable", paused)
         if not route_allowed(method, route):
             return 404, _error("not_allowed", "route is not on the allowlist")
-        if method == "GET" and route == "/health":
-            return 200, {"ok": True, "service": "praxis-primed"}
         if method == "POST" and route == "/v1/auth/login":
             if self.accounts is None:
                 return 503, _error("unavailable", "accounts are not configured")
@@ -350,6 +381,11 @@ class GatewayServer:
         public_factor = self._public_factor(method, route, headers, body, extras, peer)
         if public_factor is not None:
             return public_factor
+        onboarding = handle_onboarding(
+            self, method, route, headers, body, extras, peer, query
+        )
+        if onboarding is not None:
+            return onboarding
         principal = authenticate_http(
             self.accounts,
             headers,
@@ -756,6 +792,11 @@ class GatewayServer:
         path: str,
         headers: dict[str, str],
     ) -> tuple[str, Principal] | None:
+        frame_id = "" if frame is None else str(frame.get("id", ""))
+        paused = self._pause_message()
+        if paused is not None:
+            outgoing.put(_frame_error(frame_id, "unavailable", paused))
+            return None
         if frame is None or frame.get("type") != "connect":
             frame_id = str((frame or {}).get("id", ""))
             outgoing.put(
@@ -797,6 +838,10 @@ class GatewayServer:
     ) -> None:
         kind = str(frame.get("type", ""))
         frame_id = str(frame.get("id", ""))
+        paused = self._pause_message()
+        if paused is not None:
+            outgoing.put(_frame_error(frame_id, "unavailable", paused))
+            return
         if not frame_allowed(kind):
             outgoing.put(_frame_error(frame_id, "unknown_type", f"unknown frame {kind}"))
             return
@@ -867,6 +912,13 @@ class GatewayServer:
                 self._chat(frame, principal, outgoing, key, profile_name)
             elif kind == "model.set":
                 self._model(frame, outgoing, profile_name)
+            elif kind.startswith("onboarding."):
+                try:
+                    payload = onboarding_payload(self, kind, _payload(frame), principal)
+                except OnboardingError as exc:
+                    outgoing.put(_frame_error(frame_id, exc.code, str(exc)))
+                    return
+                outgoing.put({"type": "result", "id": frame_id, "ok": True, "payload": payload})
             elif kind == "session.drop":
                 session_id = frame.get("sessionId") or _payload(frame).get("sessionId")
                 try:
@@ -1566,6 +1618,10 @@ def _write_bytes(
         return
 
 
+_RESTART_MESSAGE = "Restart praxis-primed to finish profile setup."
+_SETUP_MESSAGE = "Setup is in progress. Retry shortly."
+
+
 def _http_action(method: str, route: str) -> str:
     if method == "GET" and route in {"/v1/memory", "/v1/skills", "/v1/routines"}:
         return "content"
@@ -1585,6 +1641,8 @@ def _http_action(method: str, route: str) -> str:
 
 
 def _frame_action(kind: str) -> str:
+    if kind.startswith("onboarding."):
+        return "admin"
     if kind == "approvals.decide":
         return "approve"
     if kind in {"chat.send", "model.set", "session.drop"}:

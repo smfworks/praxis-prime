@@ -1,8 +1,8 @@
 """Model router.
 
-Ollama is the default. OpenAI-compatible endpoints cover llama.cpp server
-and vLLM. Anthropic, OpenAI, and xAI are optional and read keys from the
-environment.
+No provider is selected until the operator chooses one. OpenAI-compatible
+endpoints cover llama.cpp, vLLM, and LM Studio. Anthropic, OpenAI, and xAI
+read keys from the environment or the secrets file.
 
 ARCHITECTURE §6. Sensitivity pinning and the Decision Engine role are later.
 """
@@ -15,6 +15,7 @@ from praxis_prime.router.types import (
     ChatMessage,
     ChatRequest,
     FallbackNotice,
+    InferenceNotConfigured,
     ProviderUnreachable,
     RouterExhausted,
     TextDelta,
@@ -27,6 +28,7 @@ __all__ = [
     "ChatMessage",
     "ChatRequest",
     "FallbackNotice",
+    "InferenceNotConfigured",
     "ModelRouter",
     "ProviderUnreachable",
     "RouterExhausted",

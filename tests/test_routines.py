@@ -178,6 +178,7 @@ def test_inotify_or_poll_sees_a_write(tmp_path: Path):
 def test_webhook_needs_the_gateway_token_and_respects_pause(tmp_path: Path):
     clock = Clock(datetime(2026, 4, 1, 12, 0, tzinfo=UTC))
     runtime = build_runtime(
+        model="ollama:qwen3:32b",
         env={},
         config_path=tmp_path / "missing.toml",
         data_path=tmp_path / "prime.db",
@@ -290,6 +291,7 @@ def test_always_ask_is_queued_and_denied_on_timeout(tmp_path: Path):
     )
     queue = ApprovalQueue(ttl=0.05, on_pending=pending.append)
     runtime = build_runtime(
+        model="ollama:qwen3:32b",
         env={},
         config_path=tmp_path / "missing.toml",
         data_path=tmp_path / "prime.db",
@@ -340,6 +342,7 @@ def test_always_ask_is_queued_and_denied_on_timeout(tmp_path: Path):
 def test_budget_stops_before_the_model_and_telegram_gets_a_redacted_summary(tmp_path: Path):
     provider = ScriptedProvider([AssistantFinal(content="token=sk-testfakevalue12345678 done")])
     runtime = build_runtime(
+        model="ollama:qwen3:32b",
         env={},
         config_path=tmp_path / "missing.toml",
         data_path=tmp_path / "prime.db",

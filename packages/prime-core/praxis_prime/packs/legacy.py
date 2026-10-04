@@ -74,8 +74,8 @@ _ATTR = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 def _pin_message(kind: str, value: str) -> str:
     return (
-        f"Ignored pack {kind} pin {value}; a pack cannot select the LLM "
-        "or send data to a provider"
+        f"Ignored pack {kind} pin. Pack author suggests {value}. "
+        "A pack cannot select the LLM or send data to a provider."
     )
 
 
