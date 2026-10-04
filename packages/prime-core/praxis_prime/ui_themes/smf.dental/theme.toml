@@ -1,0 +1,75 @@
+schema = "praxis.theme/v1"
+id = "smf.dental"
+name = "Dental Office"
+version = "1.0.0"
+license = "MIT"
+authors = ["Praxis Prime"]
+description = "Soft mint and aqua, rounded type, no clinical imagery."
+modes = ["light", "dark"]
+default_mode = "light"
+min_praxis = "0.1.0"
+contrast = "AA"
+
+[fonts.display]
+family = "Nunito"
+license = "OFL-1.1"
+fallback = "sans-serif"
+files = [
+  { path = "assets/fonts/Nunito.woff2", weight = "200 900", style = "normal" },
+]
+
+[fonts.body]
+family = "Figtree"
+license = "OFL-1.1"
+fallback = "sans-serif"
+files = [
+  { path = "assets/fonts/Figtree.woff2", weight = "300 900", style = "normal" },
+]
+
+[fonts.mono]
+family = "JetBrains Mono"
+license = "OFL-1.1"
+fallback = "monospace"
+files = [
+  { path = "assets/fonts/JetBrainsMono.woff2", weight = "100 800", style = "normal" },
+]
+
+[shape]
+radius = 12
+density = "comfortable"
+motion = "subtle"
+scale = 1.2
+baseSize = 16
+lineHeight = 1.5
+borderWidth = 1
+
+[tokens.light]
+bg = "#f6fbfa"
+bgRaised = "#ffffff"
+fg = "#12302c"
+fgMuted = "#4a6661"
+accent = "#0f766e"
+accentFg = "#ffffff"
+border = "#cde5e1"
+borderStrong = "#4a6661"
+ring = "#0f766e"
+ok = "#1b7a4b"
+warn = "#8a5a00"
+danger = "#b42318"
+
+[tokens.dark]
+bg = "#0d1b1a"
+bgRaised = "#142826"
+fg = "#e9f6f4"
+fgMuted = "#9fc2bc"
+accent = "#5eead4"
+accentFg = "#0d1b1a"
+border = "#24403c"
+borderStrong = "#9fc2bc"
+ring = "#5eead4"
+ok = "#86efac"
+warn = "#fcd34d"
+danger = "#f28b82"
+
+[ornaments]
+watermarkOpacity = 0

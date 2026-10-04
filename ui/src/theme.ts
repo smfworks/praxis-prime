@@ -42,6 +42,13 @@ function acceptedThemeCss(css: string): string {
   return next.href;
 }
 
+/** Poll while System (Omarchy) is selected so a rewritten palette swaps the link. */
+function omarchyPoll(data: Record<string, unknown> | undefined): number | false {
+  if (!data) return false;
+  if (textOf(data.id) === "omarchy.live" || textOf(data.requested) === "omarchy") return 2000;
+  return false;
+}
+
 /** Load the active theme for the signed-in profile, or the public default. */
 export function ThemeBridge({ profile }: { profile: string }) {
   const active = useQuery({
@@ -51,6 +58,7 @@ export function ThemeBridge({ profile }: { profile: string }) {
         "GET",
         profile ? `/v1/themes/active?profile=${encodeURIComponent(profile)}` : "/v1/themes/active",
       ),
+    refetchInterval: (query) => omarchyPoll(query.state.data),
   });
   useEffect(() => {
     if (active.data) applyTheme(active.data);

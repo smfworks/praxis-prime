@@ -85,6 +85,11 @@ def parse_color(text: str) -> Color:
     )
 
 
+def composite(front: Color, back: Color) -> Color:
+    """Porter-Duff source-over. Opaque ``back`` makes the result opaque."""
+    return _over(front, back)
+
+
 def contrast_ratio(left: str | Color, right: str | Color) -> float:
     """WCAG contrast of the two colours as they composite.
 

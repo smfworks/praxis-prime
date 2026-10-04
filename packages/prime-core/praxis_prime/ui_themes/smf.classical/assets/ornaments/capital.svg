@@ -1,0 +1,6 @@
+<?xml version='1.0' encoding='utf-8'?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 16" fill="none" stroke="#5b6b2f" stroke-width="1" stroke-linejoin="miter" role="img" aria-hidden="true">
+  <title>Column capital</title>
+  <desc>A geometric column capital. No figures.</desc>
+  <path d="M2 14 H46 M6 14 V9 H42 V14 M10 9 V5 H38 V9 M14 5 V2 H34 V5" />
+</svg>

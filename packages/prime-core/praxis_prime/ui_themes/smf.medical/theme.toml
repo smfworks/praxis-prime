@@ -1,0 +1,75 @@
+schema = "praxis.theme/v1"
+id = "smf.medical"
+name = "Medical Office"
+version = "1.0.0"
+license = "MIT"
+authors = ["Praxis Prime"]
+description = "Calm teal on a clinical ground. No motion and no ornaments."
+modes = ["light", "dark"]
+default_mode = "light"
+min_praxis = "0.1.0"
+contrast = "AA"
+
+[fonts.display]
+family = "Inter"
+license = "OFL-1.1"
+fallback = "sans-serif"
+files = [
+  { path = "assets/fonts/Inter.woff2", weight = "100 900", style = "normal" },
+]
+
+[fonts.body]
+family = "Inter"
+license = "OFL-1.1"
+fallback = "sans-serif"
+files = [
+  { path = "assets/fonts/Inter.woff2", weight = "100 900", style = "normal" },
+]
+
+[fonts.mono]
+family = "JetBrains Mono"
+license = "OFL-1.1"
+fallback = "monospace"
+files = [
+  { path = "assets/fonts/JetBrainsMono.woff2", weight = "100 800", style = "normal" },
+]
+
+[shape]
+radius = 4
+density = "cozy"
+motion = "none"
+scale = 1.2
+baseSize = 16
+lineHeight = 1.5
+borderWidth = 1
+
+[tokens.light]
+bg = "#f7fafa"
+bgRaised = "#ffffff"
+fg = "#10222a"
+fgMuted = "#46606a"
+accent = "#0e7490"
+accentFg = "#ffffff"
+border = "#cfdfe3"
+borderStrong = "#46606a"
+ring = "#0e7490"
+ok = "#1b7a4b"
+warn = "#8a5a00"
+danger = "#b42318"
+
+[tokens.dark]
+bg = "#0c1a1f"
+bgRaised = "#13262d"
+fg = "#e8f2f4"
+fgMuted = "#9db7bf"
+accent = "#4fc3d9"
+accentFg = "#0c1a1f"
+border = "#24424b"
+borderStrong = "#9db7bf"
+ring = "#4fc3d9"
+ok = "#6fd3a0"
+warn = "#f2c14e"
+danger = "#f28b82"
+
+[ornaments]
+watermarkOpacity = 0

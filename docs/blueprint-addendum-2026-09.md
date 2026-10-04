@@ -591,6 +591,8 @@ M0 packs/packaging ─┐
 
 **M2 status (2026-10-03).** The wizard is in the tree: no default provider, one onboarding backend for `praxis-prime setup` and `/v1/onboarding/*`, a first-run token that dies when the owner exists, and a live completion plus tool-call test before a provider is ready. Still deferred: consented mDNS/tailnet/port-scan discovery, API-key pools (gap 2), external secret stores (gap 3), doctor fixes and backup/restore (gap 7), OS keychain and age, OAuth cloud sign-in, model download, per-profile provider secrets, and using the setup TLS pin for later chat.
 
+**M3 status (2026-10-04).** The theme engine, eight built-ins, the Omarchy source adapter, `docs/THEME-AUTHORING.md`, and the offline AI round-trip are in the tree. The seven requested themes pass WCAG 2.2 AA in both modes. High Contrast passes AAA. A package that hides a control or loads a remote resource is still rejected. What the code does is in [ARCHITECTURE.md](ARCHITECTURE.md) (M3a and M3b status) and [USAGE.md](USAGE.md). The M3 row above stays the approved design.
+
 **M1c status.** The supervisor and per-profile workers are in the tree. The trust boundary is in [SECURITY.md](SECURITY.md) and [ARCHITECTURE.md](ARCHITECTURE.md) §3.1. The gateway half of pattern 10 (route allowlist, session-id agreement, path/body/query id agreement) landed with that work. The SPA client stays M1d. Landlock, a Linux user per profile, per-profile provider secrets, and OIDC are not part of M1c.
 
 **Placement in the existing phases (ARCHITECTURE §29):**

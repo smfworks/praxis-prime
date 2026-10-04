@@ -386,7 +386,20 @@ praxis-prime mcp tools notes
 
 A theme changes colours, type, and a few decorative hooks. It does not add controls, run code, or call the network.
 
-Two themes ship in the wheel. `smf.praxis` is the default (Cinzel, Inter, and JetBrains Mono). `smf.high-contrast` is WCAG 2.2 AAA, with Atkinson Hyperlegible for text and JetBrains Mono for code. The other six built-in themes, the Omarchy live-theme adapter, and the authoring guide are the next part of this milestone.
+Eight themes ship in the wheel. All of them pass WCAG 2.2 AA in both modes. `smf.high-contrast` is AAA. Fonts are subset WOFF2 files under the SIL Open Font License, stored in each package with `assets/fonts/OFL.txt`. The page does not request a font host.
+
+| Id | Name | Type |
+|---|---|---|
+| `smf.praxis` | Praxis | Cinzel, Inter, JetBrains Mono. The default. |
+| `smf.high-contrast` | High Contrast | Atkinson Hyperlegible and JetBrains Mono. AAA. |
+| `smf.legal-office` | Legal Office | Praxis Legal Display Subset, Praxis Office Sans Subset, Praxis Office Mono Subset. Burgundy is danger only. |
+| `smf.forensic` | Forensic Engineering | Praxis Forensic Sans Subset and Praxis Forensic Mono Subset. A faint grid. |
+| `smf.education` | Education | Lexend, Atkinson Hyperlegible, JetBrains Mono. Base size 17. |
+| `smf.classical` | Classical | Fraunces, Praxis Office Sans Subset, Praxis Office Mono Subset. Dark is the default. |
+| `smf.medical` | Medical Office | Inter and JetBrains Mono. Motion is off. No ornaments. |
+| `smf.dental` | Dental Office | Nunito, Figtree, JetBrains Mono. Radius 12. |
+
+How to write a package is in [THEME-AUTHORING.md](THEME-AUTHORING.md).
 
 ```bash
 praxis-prime theme list
@@ -395,6 +408,7 @@ praxis-prime theme lint ./my-theme --json
 praxis-prime theme pack ./my-theme
 praxis-prime theme install ./my-theme-1.0.0.praxis-theme.zip
 praxis-prime theme set smf.high-contrast --mode dark --profile default
+praxis-prime theme set omarchy --profile default
 praxis-prime theme set smf.praxis --lock --mode light
 praxis-prime theme set --unlock
 praxis-prime theme remove lab.sample
@@ -402,15 +416,15 @@ praxis-prime theme remove lab.sample
 
 `theme pack` writes `<id>-<version>.praxis-theme.zip` in the current directory, or at `-o`. `theme lint --json` prints `{"ok": true, "id", "version", "contrast"}` or `{"ok": false, "error": {"code": "theme_invalid", "message", "issues"}}`. Each issue has `code`, `message`, `path`, and `fix`.
 
-Install writes `theme.lock.json` beside the package. The lock lists the SHA-256 of every file and a package hash. The lock file itself is outside that hash. Loading and serving a user or system theme checks those hashes. A mismatch is skipped on the list, and the stylesheet URL is 404. Built-ins are read from the wheel at `praxis_prime/ui_themes` with `importlib.resources` and have no lock file. User themes go in `$XDG_DATA_HOME/praxis-prime/themes/<id>/<version>/` (or `--data-dir`). `--system` on `install` and `remove` uses `/var/lib/praxis-prime/themes`. The same id resolves user, then system, then built-in, except `smf` and `smf.*`, which stay the built-in. A user or system package cannot take those ids. Inside one source the highest `MAJOR.MINOR.PATCH` wins. A built-in cannot be removed.
+Install writes `theme.lock.json` beside the package. The lock lists the SHA-256 of every file and a package hash. The lock file itself is outside that hash. Loading and serving a user or system theme checks those hashes. A mismatch is skipped on the list, and the stylesheet URL is 404. Built-ins are read from the wheel at `praxis_prime/ui_themes` with `importlib.resources` and have no lock file. User themes go in `$XDG_DATA_HOME/praxis-prime/themes/<id>/<version>/` (or `--data-dir`). `--system` on `install` and `remove` uses `/var/lib/praxis-prime/themes`. The same id resolves user, then system, then built-in, except `smf`, `smf.*`, and `omarchy.live`, which cannot be installed. `smf` and `smf.*` stay the built-in. `omarchy.live` is reserved for the in-memory Omarchy stylesheet. Inside one source the highest `MAJOR.MINOR.PATCH` wins. A built-in cannot be removed.
 
-Selection order is the admin lock, then the profile choice, then device preference, then the Omarchy live theme, then `smf.praxis`. `--mode system` follows `prefers-color-scheme` in the stylesheet. A lock also sets the mode when the lock names one. The Omarchy hook returns no theme until that adapter lands, so an unset profile paints `smf.praxis`.
+Selection order is the admin lock, then the profile choice, then `smf.praxis`. `--mode system` follows `prefers-color-scheme` in the stylesheet. A lock also sets the mode when the lock names one. Device preference is a mode, not a theme id. System (Omarchy) is a profile choice (`theme set omarchy`), not a package. Selecting `omarchy.live` is stored as `omarchy`. It applies only when that profile chose it and `~/.local/state/omarchy/current/theme/praxis-prime.json` compiles. `XDG_STATE_HOME` is honoured. `PRAXIS_PRIME_OMARCHY_THEME` overrides the path for a test. The file is untrusted. A palette that cannot pass WCAG 2.2 AA is logged and the page paints `smf.praxis`, while Appearance still shows System (Omarchy). A colour in that file is `#rgb` or `#rrggbb`. Eight-digit hex is refused. A parse failure is cached by the file inode, mtime, and size and the parent directory inode, and the page still paints `smf.praxis`. `GET /themes/omarchy.live/<hash>.css` opens the file only when some profile's stored choice is `omarchy`. Otherwise that route is 404 and the file is not opened. An unset profile stays on the lock or on `smf.praxis`. `omarchy` and `omarchy.live` cannot be locked. A later rewrite of a palette that already compiled appends `theme.activate` when `prime.db` exists. While System (Omarchy) is selected, the page asks for the active theme every 2 seconds and swaps the stylesheet when the file changes.
 
 The CLI writes the data directory the same way `packs install` does. Account roles are enforced by the daemon. `theme install` and `theme set` (including `--lock`) append `theme.install` and `theme.activate` when that runtime's `prime.db` already exists. `theme remove` appends `theme.remove` for each removed version, with `id`, `version`, and `packageHash`. A missing database is left uncreated.
 
 In the web UI, open Settings → Appearance. The page lists themes and sets light, dark, or system. An owner or admin can install a `.zip` (the file is checked, then you confirm Install), remove a user or system theme, and lock or unlock the theme for every profile. An owner or admin can set any profile. An operator can set a profile where their membership is owner or operator. A viewer or an auditor cannot change the theme. While a lock is set, a non-admin select is refused.
 
-A legacy pack `theme` hint (`accent`, `panel` as `bgRaised`, `ok`, `warn`) is checked against `smf.praxis`, or against the suggested built-in when that theme is installed. Lightness may move by at most 0.25 in OKLCH so each pair clears WCAG 2.2 AA. Past that the hint is refused and the pack still installs. `praxis-prime packs install` writes `pack.<name>` when the hint passes. Choosing `smf.praxis` itself leaves the hint off. See [PACKS-LEGACY.md](PACKS-LEGACY.md).
+A legacy pack `theme` hint (`accent`, `panel` as `bgRaised`, `ok`, `warn`) is checked against `smf.praxis`. Lightness may move by at most 0.25 in OKLCH so each pair clears WCAG 2.2 AA. Past that the hint is refused and the pack still installs. `praxis-prime packs install` writes `pack.<name>` from that palette when the hint passes. Choosing `smf.praxis` itself leaves the hint off. Choosing a suggested built-in (`smf.legal-office`, `smf.forensic`, `smf.education`, or `smf.medical`) uses that built-in. The hint is not painted over it. See [PACKS-LEGACY.md](PACKS-LEGACY.md).
 
 The package schema is `praxis.theme/v1`, published at `schemas/theme.v1.json`. Optional `theme.css` may set `--pp-*` custom properties on `:root` and `[data-mode]`, plus the decorative hooks `.pp-ornament-*`, `.pp-header-band`, `.pp-sidebar-texture`, and `.pp-divider`. The validator folds those custom properties into the token maps. The served stylesheet uses the compiled values for light, dark, system-light, and system-dark, and does not replay the author `:root` rules. The validator rejects `@import`, remote `url()`, scripts, rules aimed at approval, dial, or audit controls, and decorative lengths outside about 16px. Package paths are `assets/fonts/<name>.woff2` and `assets/ornaments/<name>.svg` (or png or webp), with a name of letters, digits, `.`, `_`, and `-`, plus exactly `assets/preview.png` or `assets/preview.webp`. Both modes are checked for contrast before install, and the served CSS resolves to those same colours.
 

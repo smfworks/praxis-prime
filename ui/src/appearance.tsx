@@ -41,7 +41,8 @@ export function Appearance({ admin, profile }: { admin: boolean; profile: string
   const active = (body?.active ?? {}) as Record<string, unknown>;
   const lock = (body?.lock ?? {}) as Record<string, unknown>;
   const locked = active.locked === true;
-  const currentId = textOf(active.id) || "smf.praxis";
+  const requested = textOf(active.requested);
+  const currentId = requested === "omarchy" ? "omarchy" : textOf(active.id) || "smf.praxis";
   const currentMode = textOf(active.mode) || "system";
   const shownId = themeId || currentId;
   const shownMode = mode || currentMode;
@@ -171,6 +172,7 @@ export function Appearance({ admin, profile }: { admin: boolean; profile: string
             void save(next, shownMode || currentMode);
           }}
         >
+          <option value="omarchy">System (Omarchy)</option>
           {themes.map((item) => (
             <option key={item.id} value={item.id}>
               {item.name} ({item.contrast}
@@ -179,6 +181,12 @@ export function Appearance({ admin, profile }: { admin: boolean; profile: string
           ))}
         </select>
       </div>
+      {shownId === "omarchy" ? (
+        <p className="text-sm text-muted">
+          Colours come from the Omarchy theme file on this machine. A missing file, or a palette that
+          cannot meet AA, uses Praxis.
+        </p>
+      ) : null}
       {chosen?.description ? <p className="text-sm text-muted">{chosen.description}</p> : null}
       <div className="grid gap-1 text-sm">
         <label htmlFor="pp-theme-mode">Mode</label>
@@ -237,7 +245,12 @@ export function Appearance({ admin, profile }: { admin: boolean; profile: string
                 Unlock theme
               </button>
             ) : (
-              <button className="btn-quiet" type="button" disabled={busy || !shownId} onClick={() => void onLock(true)}>
+              <button
+                className="btn-quiet"
+                type="button"
+                disabled={busy || !shownId || shownId === "omarchy"}
+                onClick={() => void onLock(true)}
+              >
                 Lock for every profile
               </button>
             )}

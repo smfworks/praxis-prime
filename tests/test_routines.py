@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import socket
 import time
 from datetime import UTC, datetime, timedelta
@@ -23,7 +24,14 @@ from praxis_prime.scheduler.cron import ScheduleError
 from praxis_prime.scheduler.runner import execute_routine
 from praxis_prime.scheduler.service import RoutineScheduler
 from praxis_prime.scheduler.store import Routine, RoutineRun, RoutineStore
-from praxis_prime.scheduler.watch import DirectoryWatcher, file_token
+from praxis_prime.scheduler.watch import (
+    _DIRTY_CAP,
+    _IN_IGNORED,
+    _IN_Q_OVERFLOW,
+    DirectoryWatcher,
+    _Event,
+    file_token,
+)
 from praxis_prime.state import StateDB
 from praxis_prime.tools.registry import Risk, Tool, ToolContext, ToolRegistry
 
@@ -160,19 +168,313 @@ def test_file_change_while_down_can_be_skipped(tmp_path: Path):
         db.close()
 
 
+def test_dirty_set_is_bounded_and_overflow_stats(tmp_path: Path):
+    path = tmp_path / "live.txt"
+    path.write_text("same")
+    watcher = DirectoryWatcher()
+    try:
+        seen = watcher.observe(path, "", startup=True)
+        token = seen.token
+        for index in range(_DIRTY_CAP + 5):
+            watcher._mark_dirty(str(tmp_path / f"noise-{index}"))
+        assert watcher._overflow is False
+        assert watcher._dirty == set()
+
+        for index in range(_DIRTY_CAP + 5):
+            key = f"/tmp/cap-{index}"
+            watcher._watched.add(key)
+            watcher._mark_dirty(key)
+        assert watcher._overflow
+        assert len(watcher._dirty) <= _DIRTY_CAP
+
+        watcher._watched.clear()
+        watcher._dirty.clear()
+        seen = watcher.observe(path, token, startup=False)
+        assert seen.token == file_token(path)
+        assert seen.token_changed is False
+        assert seen.overflowed is True
+        seen = watcher.observe(path, seen.token, startup=False)
+        assert seen.token_changed is False
+        assert seen.dirty is False
+        assert seen.overflowed is False
+    finally:
+        watcher.close()
+
+
+def test_replaced_directory_is_watched_again(tmp_path: Path):
+    current = tmp_path / "current"
+    theme = current / "theme"
+    theme.mkdir(parents=True)
+    target = theme / "live.txt"
+    target.write_text("one")
+    watcher = DirectoryWatcher()
+    try:
+        seen = watcher.observe(target, "", startup=True)
+        assert seen.token_changed
+        token = seen.token
+        stamp = target.stat()
+        shutil.rmtree(theme)
+        incoming = current / "incoming"
+        incoming.mkdir()
+        rewritten = incoming / "live.txt"
+        if watcher.backend == "inotify":
+            rewritten.write_text("two")
+            os.utime(rewritten, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+        else:
+            rewritten.write_text("two\n")
+        incoming.rename(theme)
+        replaced = theme / "live.txt"
+        if watcher.backend == "inotify":
+            assert file_token(replaced) == token
+        seen = watcher.observe(replaced, token, startup=False)
+        if watcher.backend == "inotify":
+            assert seen.token_changed is False
+            assert seen.dirty or seen.overflowed
+        else:
+            assert seen.token_changed
+        token = seen.token
+        if watcher.backend != "inotify":
+            return
+        assert str(theme) in watcher._armed
+        assert str(current) in watcher._armed
+        watcher._dirty.clear()
+        replaced.write_text("three")
+        watcher._drain()
+        assert str(replaced) in watcher._dirty
+    finally:
+        watcher.close()
+
+
+def test_repointed_symlink_is_noticed(tmp_path: Path):
+    current = tmp_path / "current"
+    current.mkdir()
+    first = tmp_path / "a"
+    second = tmp_path / "b"
+    first.mkdir()
+    second.mkdir()
+    (first / "live.txt").write_text("one")
+    (second / "live.txt").write_text("two")
+    link = current / "theme"
+    link.symlink_to(first, target_is_directory=True)
+    watcher = DirectoryWatcher()
+    try:
+        seen = watcher.observe(link / "live.txt", "", startup=True)
+        assert seen.token_changed
+        token = seen.token
+        stamp = (first / "live.txt").stat()
+        link.unlink()
+        link.symlink_to(second, target_is_directory=True)
+        if watcher.backend == "inotify":
+            os.utime(second / "live.txt", ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+            assert file_token(link / "live.txt") == token
+        else:
+            (second / "live.txt").write_text("two\n")
+        seen = watcher.observe(link / "live.txt", token, startup=False)
+        if watcher.backend == "inotify":
+            assert seen.token_changed is False
+            assert seen.dirty or seen.overflowed
+        else:
+            assert seen.token_changed
+        if watcher.backend != "inotify":
+            return
+        watcher._dirty.clear()
+        (second / "live.txt").write_text("three")
+        watcher._drain()
+        assert str(link / "live.txt") in watcher._dirty
+    finally:
+        watcher.close()
+
+
+def test_kernel_queue_overflow_is_dirty(tmp_path: Path):
+    path = tmp_path / "live.txt"
+    path.write_text("same")
+    watcher = DirectoryWatcher()
+    try:
+        watcher._watched.add(str(path))
+        watcher._apply(_Event(-1, _IN_Q_OVERFLOW, None, ""))
+        assert watcher._overflow
+        assert watcher._dirty == set()
+        seen = watcher.observe(path, "stale", startup=False)
+        assert seen.token_changed
+        assert seen.overflowed
+        assert seen.token == file_token(path)
+        assert watcher._overflow is False
+        ignored = tmp_path / "theme"
+        ignored.mkdir()
+        watcher._armed.add(str(ignored))
+        watcher._wd_path[7] = ignored
+        watcher._watched.add(str(ignored / "live.txt"))
+        watcher._apply(_Event(7, _IN_IGNORED, ignored, ""))
+        assert str(ignored) not in watcher._armed
+        assert 7 not in watcher._wd_path
+        assert str(ignored / "live.txt") in watcher._dirty
+    finally:
+        watcher.close()
+
+
+def _kernel_watch_ids(fd: int) -> set[int]:
+    """Watch descriptors from ``/proc/self/fdinfo``. The kernel prints them in hex."""
+    text = Path(f"/proc/self/fdinfo/{fd}").read_text(encoding="utf-8")
+    found: set[int] = set()
+    for line in text.splitlines():
+        if not line.startswith("inotify wd:"):
+            continue
+        found.add(int(line.split()[1].split(":", 1)[1], 16))
+    return found
+
+
+def test_watch_map_stays_exact_after_many_switches(tmp_path: Path):
+    current = tmp_path / "current"
+    theme = current / "theme"
+    theme.mkdir(parents=True)
+    target = theme / "live.txt"
+    target.write_text("one")
+    watcher = DirectoryWatcher()
+    try:
+        seen = watcher.observe(target, "", startup=True)
+        assert seen.token_changed
+        token = seen.token
+        counts: list[int] = []
+        for index in range(8):
+            stamp = target.stat()
+            body = target.read_text(encoding="utf-8")
+            theme.rename(current / f"aside-{index}")
+            theme.mkdir()
+            target = theme / "live.txt"
+            if watcher.backend == "inotify":
+                target.write_text(body, encoding="utf-8")
+                os.utime(target, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+                assert file_token(target) == token
+            else:
+                target.write_text(body + "x", encoding="utf-8")
+            seen = watcher.observe(target, token, startup=False)
+            if watcher.backend == "inotify":
+                assert seen.token_changed is False
+                assert seen.dirty or seen.overflowed
+            else:
+                assert seen.token_changed
+            token = seen.token
+            paths = [str(path) for path in watcher._wd_path.values()]
+            assert len(paths) == len(set(paths))
+            assert set(paths) == watcher._armed
+            if watcher.backend == "inotify":
+                assert watcher._armed == {str(theme), str(current)}
+                assert watcher._fd is not None
+                assert set(watcher._wd_path) == _kernel_watch_ids(watcher._fd)
+            else:
+                assert watcher._armed == set()
+            counts.append(len(watcher._wd_path))
+        assert counts == [counts[0]] * len(counts)
+    finally:
+        watcher.close()
+
+
 def test_inotify_or_poll_sees_a_write(tmp_path: Path):
     path = tmp_path / "live.txt"
     path.write_text("before")
     watcher = DirectoryWatcher()
     try:
-        changed, token = watcher.observe(path, "", startup=True)
-        assert changed
+        seen = watcher.observe(path, "", startup=True)
+        assert seen.token_changed
         path.write_text("after")
-        changed, _token = watcher.observe(path, token, startup=False)
-        assert changed
+        seen = watcher.observe(path, seen.token, startup=False)
+        assert seen.token_changed
         assert watcher.backend in {"inotify", "poll"}
     finally:
         watcher.close()
+
+
+def test_unrelated_churn_does_not_fire_a_file_routine(tmp_path: Path):
+    watched = tmp_path / "watched"
+    watched.mkdir()
+    path = watched / "live.txt"
+    path.write_text("same")
+    db, scheduler, routine, ran = _file_watch(tmp_path, path)
+    try:
+        assert scheduler.tick() == []
+        for index in range(1030):
+            (watched / f"noise-{index}").write_text("x")
+        assert scheduler.tick() == []
+        for index in range(1100):
+            churn = tmp_path / f"churn-{index}"
+            churn.write_text("x")
+            churn.unlink()
+        assert scheduler.tick() == []
+        assert ran == []
+        assert scheduler.store.get(routine.id).watch_token == file_token(path)
+        assert scheduler.watcher._overflow is False
+        assert not any("noise-" in key or "churn-" in key for key in scheduler.watcher._dirty)
+    finally:
+        scheduler.join()
+        db.close()
+
+
+def test_overflow_cap_does_not_fire_a_file_routine(tmp_path: Path):
+    path = tmp_path / "live.txt"
+    path.write_text("same")
+    db, scheduler, routine, ran = _file_watch(tmp_path, path)
+    try:
+        assert scheduler.tick() == []
+        watcher = scheduler.watcher
+        for index in range(_DIRTY_CAP + 5):
+            key = f"/tmp/cap-{index}"
+            watcher._watched.add(key)
+            watcher._mark_dirty(key)
+        assert watcher._overflow is True
+        assert scheduler.tick() == []
+        assert ran == []
+        assert scheduler.store.get(routine.id).watch_token == file_token(path)
+    finally:
+        scheduler.join()
+        db.close()
+
+
+def test_chmod_does_not_fire_a_file_routine(tmp_path: Path):
+    path = tmp_path / "live.txt"
+    path.write_text("same")
+    os.chmod(path, 0o644)
+    db, scheduler, routine, ran = _file_watch(tmp_path, path)
+    try:
+        assert scheduler.tick() == []
+        os.chmod(path, 0o600)
+        assert file_token(path) == scheduler.store.get(routine.id).watch_token
+        assert scheduler.tick() == []
+        assert ran == []
+    finally:
+        scheduler.join()
+        db.close()
+
+
+def test_identical_same_mtime_rewrite_does_not_fire_a_file_routine(tmp_path: Path):
+    path = tmp_path / "live.txt"
+    path.write_text("same")
+    db, scheduler, routine, ran = _file_watch(tmp_path, path)
+    try:
+        assert scheduler.tick() == []
+        stamp = path.stat()
+        path.write_bytes(path.read_bytes())
+        os.utime(path, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+        assert file_token(path) == scheduler.store.get(routine.id).watch_token
+        assert scheduler.tick() == []
+        assert ran == []
+    finally:
+        scheduler.join()
+        db.close()
+
+
+def test_real_content_change_fires_a_file_routine(tmp_path: Path):
+    path = tmp_path / "live.txt"
+    path.write_text("same")
+    db, scheduler, routine, ran = _file_watch(tmp_path, path)
+    try:
+        assert scheduler.tick() == []
+        path.write_text("changed-body")
+        assert scheduler.tick() == [f"run {routine.id}"]
+        assert ran == [routine.id]
+        assert scheduler.store.get(routine.id).watch_token == file_token(path)
+    finally:
+        scheduler.join()
+        db.close()
 
 
 def test_webhook_needs_the_gateway_token_and_respects_pause(tmp_path: Path):
@@ -429,6 +731,24 @@ def test_routines_cli_lists_pauses_and_keeps_history(tmp_path: Path, capsys):
     )
     assert refused == 1
     assert "1 minute" in capsys.readouterr().err
+
+
+def _file_watch(tmp_path: Path, path: Path):
+    clock = Clock(datetime(2026, 6, 1, 12, 0, tzinfo=UTC))
+    db = StateDB(tmp_path / "prime.db")
+    store = RoutineStore(db, clock=clock)
+    routine = store.add(
+        name="notes",
+        prompt="Look at the file.",
+        trigger_kind="file",
+        trigger_expr=str(path),
+        timezone_name="UTC",
+        missed_policy="once",
+        watch_token=file_token(path),
+    )
+    ran: list[str] = []
+    scheduler = RoutineScheduler(store, _recorder(store, ran), clock=clock)
+    return db, scheduler, routine, ran
 
 
 def _add(store: RoutineStore, name: str, *, missed: str) -> Routine:

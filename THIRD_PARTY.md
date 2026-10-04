@@ -4,7 +4,7 @@ Copyright (c) 2026 SMF Works. Praxis Prime itself is MIT; see LICENSE and NOTICE
 
 This file is the third-party notice named in the architecture blueprint
 (§24, §32). No upstream source tree is vendored in this pre-alpha skeleton.
-Two built-in themes ship subset WOFF2 fonts under the SIL Open Font License;
+The built-in themes ship subset WOFF2 fonts under the SIL Open Font License;
 see [Bundled fonts](#bundled-fonts). The entries below are the attribution
 record for code and assets that may be reused later, and the notices that
 must stay attached if they are.
@@ -137,7 +137,7 @@ No TypeSafe source is vendored in `praxis_prime.decide`.
 
 ## Bundled fonts
 
-`smf.praxis` and `smf.high-contrast` ship subset WOFF2 files built from the
+The built-in themes ship subset WOFF2 files built from the
 SIL Open Font License families in the `google/fonts` `ofl/` tree. The SPA
 serves them from the theme package. It does not request a font host. Each
 package keeps the upstream OFL 1.1 text in `assets/fonts/OFL.txt`. The
@@ -150,6 +150,24 @@ fonts stay OFL-1.1 and are not relicensed.
 | Inter (variable) | `praxis_prime/ui_themes/smf.praxis/assets/fonts/Inter.woff2` | Copyright 2020 The Inter Project Authors (https://github.com/rsms/inter) | OFL-1.1 |
 | JetBrains Mono (variable) | `…/smf.praxis/assets/fonts/JetBrainsMono.woff2` and `…/smf.high-contrast/assets/fonts/JetBrainsMono.woff2` | Copyright 2020 The JetBrains Mono Project Authors (https://github.com/JetBrains/JetBrainsMono) | OFL-1.1 |
 | Atkinson Hyperlegible (regular and bold) | `praxis_prime/ui_themes/smf.high-contrast/assets/fonts/AtkinsonHyperlegible-Regular.woff2` and `AtkinsonHyperlegible-Bold.woff2` | Copyright 2020 Braille Institute of America, Inc. | OFL-1.1 |
+| Praxis Legal Display Subset (subset of Libre Baskerville, weight 400–700) | `praxis_prime/ui_themes/smf.legal-office/assets/fonts/LibreBaskerville.woff2` | Copyright 2012 The Libre Baskerville Project Authors (https://github.com/impallari/Libre-Baskerville) | OFL-1.1 |
+| Praxis Office Sans Subset (subset of Source Sans 3, weight 200–900) | `praxis_prime/ui_themes/smf.legal-office/assets/fonts/SourceSans3.woff2` | © 2023 Adobe (http://www.adobe.com/), with Reserved Font Name ‘Source’ | OFL-1.1 |
+| Praxis Office Mono Subset (subset of Source Code Pro, weight 200–900) | `praxis_prime/ui_themes/smf.legal-office/assets/fonts/SourceCodePro.woff2` | © 2023 Adobe (http://www.adobe.com/), with Reserved Font Name ‘Source’ | OFL-1.1 |
+| Praxis Forensic Sans Subset (subset of IBM Plex Sans, weight 100–700) | `praxis_prime/ui_themes/smf.forensic/assets/fonts/IBMPlexSans.woff2` | Copyright 2019 IBM Corp. All rights reserved. | OFL-1.1 |
+| Praxis Forensic Mono Subset (subset of IBM Plex Mono, regular) | `praxis_prime/ui_themes/smf.forensic/assets/fonts/IBMPlexMono-Regular.woff2` | Copyright 2017 IBM Corp. All rights reserved. | OFL-1.1 |
+| Praxis Forensic Mono Subset (subset of IBM Plex Mono, bold) | `praxis_prime/ui_themes/smf.forensic/assets/fonts/IBMPlexMono-Bold.woff2` | Copyright 2017 IBM Corp. All rights reserved. | OFL-1.1 |
+| Lexend (variable, weight 100–900) | `praxis_prime/ui_themes/smf.education/assets/fonts/Lexend.woff2` | Copyright 2019 The Lexend Project Authors (https://github.com/googlefonts/lexend) | OFL-1.1 |
+| Atkinson Hyperlegible regular | `praxis_prime/ui_themes/smf.education/assets/fonts/AtkinsonHyperlegible-Regular.woff2` | Copyright 2020 Braille Institute of America, Inc. | OFL-1.1 |
+| Atkinson Hyperlegible bold | `praxis_prime/ui_themes/smf.education/assets/fonts/AtkinsonHyperlegible-Bold.woff2` | Copyright 2020 Braille Institute of America, Inc. | OFL-1.1 |
+| JetBrains Mono (variable) | `praxis_prime/ui_themes/smf.education/assets/fonts/JetBrainsMono.woff2` | Copyright 2020 The JetBrains Mono Project Authors (https://github.com/JetBrains/JetBrainsMono) | OFL-1.1 |
+| Fraunces (variable, weight 100–900) | `praxis_prime/ui_themes/smf.classical/assets/fonts/Fraunces.woff2` | Copyright 2020 The Fraunces Project Authors (github.com/undercasetype/Fraunces) | OFL-1.1 |
+| Praxis Office Sans Subset (subset of Source Sans 3, weight 200–900) | `praxis_prime/ui_themes/smf.classical/assets/fonts/SourceSans3.woff2` | © 2023 Adobe (http://www.adobe.com/), with Reserved Font Name ‘Source’ | OFL-1.1 |
+| Praxis Office Mono Subset (subset of Source Code Pro, weight 200–900) | `praxis_prime/ui_themes/smf.classical/assets/fonts/SourceCodePro.woff2` | © 2023 Adobe (http://www.adobe.com/), with Reserved Font Name ‘Source’ | OFL-1.1 |
+| Inter (variable) | `praxis_prime/ui_themes/smf.medical/assets/fonts/Inter.woff2` | Copyright 2016 The Inter Project Authors (https://github.com/rsms/inter) | OFL-1.1 |
+| JetBrains Mono (variable) | `praxis_prime/ui_themes/smf.medical/assets/fonts/JetBrainsMono.woff2` | Copyright 2020 The JetBrains Mono Project Authors (https://github.com/JetBrains/JetBrainsMono) | OFL-1.1 |
+| Nunito (variable, weight 200–900) | `praxis_prime/ui_themes/smf.dental/assets/fonts/Nunito.woff2` | Copyright 2014 The Nunito Project Authors (https://github.com/googlefonts/nunito) | OFL-1.1 |
+| Figtree (variable, weight 300–900) | `praxis_prime/ui_themes/smf.dental/assets/fonts/Figtree.woff2` | Copyright 2022 The Figtree Project Authors (https://github.com/erikdkennedy/figtree) | OFL-1.1 |
+| JetBrains Mono (variable) | `praxis_prime/ui_themes/smf.dental/assets/fonts/JetBrainsMono.woff2` | Copyright 2020 The JetBrains Mono Project Authors (https://github.com/JetBrains/JetBrainsMono) | OFL-1.1 |
 
 ## Runtime components that are not bundled
 
@@ -193,3 +211,21 @@ upstream licence, kept beside the fonts.
 | `praxis_prime/ui_themes/smf.high-contrast/assets/fonts/JetBrainsMono.woff2` | `google/fonts` `ofl/jetbrainsmono` | subset WOFF2, retrieved 2026-10 | OFL-1.1 | `smf.high-contrast/assets/fonts/OFL.txt` |
 | `praxis_prime/ui_themes/smf.high-contrast/assets/fonts/AtkinsonHyperlegible-Regular.woff2` | `google/fonts` `ofl/atkinsonhyperlegible` | subset WOFF2, retrieved 2026-10 | OFL-1.1 | `smf.high-contrast/assets/fonts/OFL.txt` |
 | `praxis_prime/ui_themes/smf.high-contrast/assets/fonts/AtkinsonHyperlegible-Bold.woff2` | `google/fonts` `ofl/atkinsonhyperlegible` | subset WOFF2, retrieved 2026-10 | OFL-1.1 | `smf.high-contrast/assets/fonts/OFL.txt` |
+| `praxis_prime/ui_themes/smf.legal-office/assets/fonts/LibreBaskerville.woff2` | `google/fonts` `ofl/librebaskerville` | Version 2.005; google/fonts b3d4b3ba7c4d54f15ed2be72d7f58b9097c3b252 (retrieved 2026-10); modified subset, renamed per OFL 1.1 section 3 | OFL-1.1 | `smf.legal-office/assets/fonts/OFL.txt` |
+| `praxis_prime/ui_themes/smf.legal-office/assets/fonts/SourceSans3.woff2` | `google/fonts` `ofl/sourcesans3` | Version 3.052;hotconv 1.1.0;makeotfexe 2.6.0; google/fonts 914ec116571b1162d886aa402e715552221f0b77 (retrieved 2026-10); modified subset, renamed per OFL 1.1 section 3 | OFL-1.1 | `smf.legal-office/assets/fonts/OFL.txt` |
+| `praxis_prime/ui_themes/smf.legal-office/assets/fonts/SourceCodePro.woff2` | `google/fonts` `ofl/sourcecodepro` | Version 1.026;hotconv 1.1.0;makeotfexe 2.6.0; google/fonts bd62bd8b4715f007af6905b0c9fd030f8410b289 (retrieved 2026-10); modified subset, renamed per OFL 1.1 section 3 | OFL-1.1 | `smf.legal-office/assets/fonts/OFL.txt` |
+| `praxis_prime/ui_themes/smf.forensic/assets/fonts/IBMPlexSans.woff2` | `google/fonts` `ofl/ibmplexsans` | Version 3.201; google/fonts 0b58fb370093f9a9f4ff785d94405710b79de67c (retrieved 2026-10); modified subset, renamed per OFL 1.1 section 3 | OFL-1.1 | `smf.forensic/assets/fonts/OFL.txt` |
+| `praxis_prime/ui_themes/smf.forensic/assets/fonts/IBMPlexMono-Regular.woff2` | `google/fonts` `ofl/ibmplexmono` | Version 2.3; google/fonts 0b58fb370093f9a9f4ff785d94405710b79de67c (retrieved 2026-10); modified subset, renamed per OFL 1.1 section 3 | OFL-1.1 | `smf.forensic/assets/fonts/OFL.txt` |
+| `praxis_prime/ui_themes/smf.forensic/assets/fonts/IBMPlexMono-Bold.woff2` | `google/fonts` `ofl/ibmplexmono` | Version 2.3; google/fonts 0b58fb370093f9a9f4ff785d94405710b79de67c (retrieved 2026-10); modified subset, renamed per OFL 1.1 section 3 | OFL-1.1 | `smf.forensic/assets/fonts/OFL.txt` |
+| `praxis_prime/ui_themes/smf.education/assets/fonts/Lexend.woff2` | `google/fonts` `ofl/lexend` | Version 1.007; google/fonts e2332cf862ac3145c0ee5f24f04f4c1819b2410b (retrieved 2026-10) | OFL-1.1 | `smf.education/assets/fonts/OFL.txt` |
+| `praxis_prime/ui_themes/smf.education/assets/fonts/AtkinsonHyperlegible-Regular.woff2` | `google/fonts` `ofl/atkinsonhyperlegible` | Version 1.006; ttfautohint (v1.8.3) (retrieved 2026-10) | OFL-1.1 | `smf.education/assets/fonts/OFL.txt` |
+| `praxis_prime/ui_themes/smf.education/assets/fonts/AtkinsonHyperlegible-Bold.woff2` | `google/fonts` `ofl/atkinsonhyperlegible` | Version 1.006; ttfautohint (v1.8.3) (retrieved 2026-10) | OFL-1.1 | `smf.education/assets/fonts/OFL.txt` |
+| `praxis_prime/ui_themes/smf.education/assets/fonts/JetBrainsMono.woff2` | `google/fonts` `ofl/jetbrainsmono` | Version 2.211 (retrieved 2026-10) | OFL-1.1 | `smf.education/assets/fonts/OFL.txt` |
+| `praxis_prime/ui_themes/smf.classical/assets/fonts/Fraunces.woff2` | `google/fonts` `ofl/fraunces` | Version 1.000;[b76b70a41]; google/fonts 4024282d9b0cffcdb8e3024560862746178d741f (retrieved 2026-10) | OFL-1.1 | `smf.classical/assets/fonts/OFL.txt` |
+| `praxis_prime/ui_themes/smf.classical/assets/fonts/SourceSans3.woff2` | `google/fonts` `ofl/sourcesans3` | Version 3.052;hotconv 1.1.0;makeotfexe 2.6.0; google/fonts 914ec116571b1162d886aa402e715552221f0b77 (retrieved 2026-10); modified subset, renamed per OFL 1.1 section 3 | OFL-1.1 | `smf.classical/assets/fonts/OFL.txt` |
+| `praxis_prime/ui_themes/smf.classical/assets/fonts/SourceCodePro.woff2` | `google/fonts` `ofl/sourcecodepro` | Version 1.026;hotconv 1.1.0;makeotfexe 2.6.0; google/fonts bd62bd8b4715f007af6905b0c9fd030f8410b289 (retrieved 2026-10); modified subset, renamed per OFL 1.1 section 3 | OFL-1.1 | `smf.classical/assets/fonts/OFL.txt` |
+| `praxis_prime/ui_themes/smf.medical/assets/fonts/Inter.woff2` | `google/fonts` `ofl/inter` | Version 4.001;git-66647c0bb (retrieved 2026-10) | OFL-1.1 | `smf.medical/assets/fonts/OFL.txt` |
+| `praxis_prime/ui_themes/smf.medical/assets/fonts/JetBrainsMono.woff2` | `google/fonts` `ofl/jetbrainsmono` | Version 2.211 (retrieved 2026-10) | OFL-1.1 | `smf.medical/assets/fonts/OFL.txt` |
+| `praxis_prime/ui_themes/smf.dental/assets/fonts/Nunito.woff2` | `google/fonts` `ofl/nunito` | Version 3.602; google/fonts 8b0a1d0f5983c89bc2b93f1b5fb55f9e252744b5 (retrieved 2026-10) | OFL-1.1 | `smf.dental/assets/fonts/OFL.txt` |
+| `praxis_prime/ui_themes/smf.dental/assets/fonts/Figtree.woff2` | `google/fonts` `ofl/figtree` | Version 2.002; google/fonts a60a77e14f28abd4ef243a1b5dfc48df0cec5205 (retrieved 2026-10) | OFL-1.1 | `smf.dental/assets/fonts/OFL.txt` |
+| `praxis_prime/ui_themes/smf.dental/assets/fonts/JetBrainsMono.woff2` | `google/fonts` `ofl/jetbrainsmono` | Version 2.211 (retrieved 2026-10) | OFL-1.1 | `smf.dental/assets/fonts/OFL.txt` |

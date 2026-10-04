@@ -1,0 +1,8 @@
+Here is the package:
+```json
+{
+  "theme.toml": "schema = \"praxis.theme/v1\"\nid = \"lab.calm-mint\"\nname = \"Calm mint\"\nversion = \"1.0.0\"\nlicense = \"MIT\"\nauthors = [\"Example Author\"]\ndescription = \"A calm mint example for a dental office. No bundled fonts.\"\nmodes = [\"light\", \"dark\"]\ndefault_mode = \"light\"\nmin_praxis = \"0.1.0\"\ncontrast = \"AA\"\n\n[shape]\nradius = 12\ndensity = \"comfortable\"\nmotion = \"subtle\"\nbaseSize = 16\n\n[tokens.light]\nbg = \"#f6fbfa\"\nbgRaised = \"#ffffff\"\nfg = \"#f6fbfa\"\nfgMuted = \"#4a6661\"\naccent = \"#0f766e\"\naccentFg = \"#ffffff\"\nborder = \"#cde5e1\"\nborderStrong = \"#4a6661\"\nring = \"#0f766e\"\nok = \"#1b7a4b\"\nwarn = \"#8a5a00\"\ndanger = \"#b42318\"\n\n[tokens.dark]\nbg = \"#0d1b1a\"\nbgRaised = \"#142826\"\nfg = \"#e9f6f4\"\nfgMuted = \"#9fc2bc\"\naccent = \"#5eead4\"\naccentFg = \"#0d1b1a\"\nborder = \"#24403c\"\nborderStrong = \"#9fc2bc\"\nring = \"#5eead4\"\nok = \"#86efac\"\nwarn = \"#fcd34d\"\ndanger = \"#f28b82\"\n",
+  "THEME.md": "# Calm mint\n\nA worked example for a dental office. Colours are mint and ink. There is no clinical imagery and no bundled font. The package text is MIT.\n",
+  "LICENSE": "MIT License\n\nCopyright (c) 2026 the theme author\n\nPermission is hereby granted, free of charge, to any person obtaining a copy of this theme package to deal in the package without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the package, and to permit persons to whom the package is furnished to do so, subject to the license conditions. The package is provided as is, without warranty of any kind.\n"
+}
+```

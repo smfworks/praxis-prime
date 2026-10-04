@@ -2,24 +2,31 @@
 
 Precedence is admin lock, then the profile choice, then the device mode
 (``system``, which follows ``prefers-color-scheme`` in the stylesheet), then
-the Omarchy live-theme hook, then ``smf.praxis``. A lock also wins on mode
-when the lock names one. Device preference is not a stored theme id.
+``smf.praxis``. The Omarchy live theme is used only when the profile chose
+``omarchy`` and the rendered file compiles. Selecting ``omarchy.live`` is
+stored as ``omarchy``. A lock also wins on mode when the lock names one.
+Device preference is not a stored theme id. ``omarchy`` and ``omarchy.live``
+cannot be locked, because the file can change.
 """
 
 from __future__ import annotations
 
 import os
 import re
+import threading
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
-from praxis_prime.profiles.home import ProfileHome, org_policy_path
+from praxis_prime.profiles.home import ProfileHome, list_profiles, org_policy_path
 from praxis_prime.statfile import StatKind, lstat_kind
 from praxis_prime.themes.errors import ThemeError, ThemeIssue
-from praxis_prime.themes.omarchy import live_theme
+from praxis_prime.themes.omarchy import LIVE_ID, live_theme, theme_file
 from praxis_prime.themes.store import InstalledTheme, find_theme
 from praxis_prime.themes.tokens import MODE_CHOICES
+
+_LIVE_SEEN: dict[str, str] = {}
+_LIVE_SEEN_LOCK = threading.Lock()
 
 _HEADING = re.compile(r"^\[([A-Za-z0-9_.-]+)\]\s*$")
 _DEFAULT_ID = "smf.praxis"
@@ -46,17 +53,24 @@ def resolve_theme(data_root: Path, profile: str = "") -> ThemeChoice:
     if locked:
         requested = lock_id
         mode = lock_mode or choice_mode or "system"
+        lookup_id = requested
+    elif choice_id == "omarchy":
+        # Keep the requested id so the SPA still shows System (Omarchy)
+        # when the file is missing or the palette is refused.
+        requested = "omarchy"
+        mode = choice_mode or "system"
+        lookup_id = live_theme() or ""
     elif choice_id:
         requested = choice_id
         mode = choice_mode or "system"
+        lookup_id = requested
     else:
-        requested = live_theme() or ""
+        requested = ""
         mode = "system"
-    if requested == "omarchy":
-        requested = live_theme() or ""
+        lookup_id = ""
     if mode not in MODE_CHOICES:
         mode = "system"
-    installed = _lookup(data_root, requested)
+    installed = _lookup(data_root, lookup_id)
     if installed is None:
         installed = _lookup(data_root, _DEFAULT_ID)
     if installed is None:
@@ -64,16 +78,83 @@ def resolve_theme(data_root: Path, profile: str = "") -> ThemeChoice:
             "default theme is missing",
             (ThemeIssue("not_found", "smf.praxis is not available.", _DEFAULT_ID),),
         )
-    return ThemeChoice(
+    choice = ThemeChoice(
         theme_id=installed.package.theme_id,
         mode=mode,
         locked=locked,
         requested=requested or _DEFAULT_ID,
         installed=installed,
     )
+    if choice.theme_id == LIVE_ID:
+        _note_live_swap(data_root, choice)
+    return choice
+
+
+def any_profile_chose(data_root: Path, theme_id: str) -> bool:
+    """True when a profile's stored choice is ``theme_id``.
+
+    Used to keep ``GET /themes/omarchy.live/<hash>.css`` from opening the
+    Omarchy file until some profile has actually chosen it.
+    """
+    for name in list_profiles(data_root):
+        choice_id, _mode = _profile_choice(data_root, name)
+        if choice_id == theme_id:
+            return True
+    return False
+
+
+def _note_live_swap(data_root: Path, choice: ThemeChoice) -> None:
+    """Audit a palette that replaced one already compiled in this process.
+
+    The first observation is silent. Selecting System (Omarchy) already
+    writes ``theme.activate``. A later rewrite of the same file does too,
+    with the new package hash. A missing ``prime.db`` is left uncreated.
+    """
+    source = str(theme_file())
+    digest = choice.installed.package_hash
+    with _LIVE_SEEN_LOCK:
+        previous = _LIVE_SEEN.get(source)
+        _LIVE_SEEN[source] = digest
+    if previous is None or previous == digest:
+        return
+    _audit_activate(data_root, choice)
+
+
+def _audit_activate(data_root: Path, choice: ThemeChoice) -> None:
+    from praxis_prime.audit.log import AuditLog
+    from praxis_prime.profiles.home import resolve_runtime_layout
+    from praxis_prime.state import StateDB
+
+    layout = resolve_runtime_layout(None, data_file=data_root / "prime.db", profile=None)
+    if lstat_kind(layout.db_path) is not StatKind.FILE:
+        return
+    payload: dict[str, object] = {
+        "id": choice.theme_id,
+        "mode": choice.mode,
+        "packageHash": choice.installed.package_hash,
+        "locked": choice.locked,
+    }
+    db = StateDB(layout.db_path)
+    try:
+        log = AuditLog(db)
+        try:
+            log.append(
+                session_id=None,
+                kind="theme.activate",
+                summary=f"activated theme {choice.theme_id}",
+                payload=payload,
+            )
+        finally:
+            log.close()
+    finally:
+        db.close()
 
 
 def set_profile_theme(data_root: Path, profile: str, theme_id: str, mode: str) -> ThemeChoice:
+    # The stylesheet id is omarchy.live. The stored profile choice is omarchy,
+    # which is what the CSS gate counts. Saving the stylesheet id 404s that CSS.
+    if theme_id == LIVE_ID:
+        theme_id = "omarchy"
     if mode not in MODE_CHOICES:
         raise ThemeError(
             "unknown mode",
@@ -105,6 +186,17 @@ def set_lock(data_root: Path, theme_id: str, mode: str = "") -> None:
             "unknown mode",
             (ThemeIssue("schema", "Mode must be light, dark, or system.", "mode"),),
         )
+    if theme_id in {"omarchy", LIVE_ID}:
+        raise ThemeError(
+            "omarchy cannot be locked",
+            (
+                ThemeIssue(
+                    "bad_id",
+                    "System (Omarchy) follows a file that can change. Lock a fixed theme.",
+                    theme_id,
+                ),
+            ),
+        )
     if _lookup(data_root, theme_id) is None:
         raise ThemeError(
             f"theme {theme_id} is not installed",
@@ -123,6 +215,10 @@ def lock_state(data_root: Path) -> tuple[str, str]:
 
 
 def _lookup(data_root: Path, theme_id: str) -> InstalledTheme | None:
+    if theme_id == LIVE_ID:
+        from praxis_prime.themes.omarchy import installed
+
+        return installed()
     if not theme_id or theme_id == "omarchy":
         return None
     found = find_theme(data_root, theme_id)

@@ -1,5 +1,6 @@
 """Built-in praxis.theme/v1 packages, loaded with importlib.resources.
 
-M3a ships ``smf.praxis`` and ``smf.high-contrast``. The other six ids named
-in Addendum A §1.7 are added in M3b.
+Eight packages ship: ``smf.praxis``, ``smf.high-contrast``,
+``smf.legal-office``, ``smf.forensic``, ``smf.education``,
+``smf.classical``, ``smf.medical``, and ``smf.dental``.
 """

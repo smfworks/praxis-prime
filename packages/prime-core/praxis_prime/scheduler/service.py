@@ -137,17 +137,18 @@ class RoutineScheduler:
 
     def _file(self, routine: Routine, moment: datetime, *, startup: bool) -> list[str]:
         path = Path(routine.trigger_expr)
-        changed, token = self.watcher.observe(path, routine.watch_token, startup=startup)
-        if not changed:
+        seen = self.watcher.observe(path, routine.watch_token, startup=startup)
+        # Dirty and overflow re-stat the path. A run needs a new token.
+        if not seen.token_changed:
             return []
         missed = _stale(path, moment, routine.min_interval_seconds)
         if missed and routine.missed_policy == "skip":
-            self._skip(routine, moment, "file", watch_token=token)
+            self._skip(routine, moment, "file", watch_token=seen.token)
             return [f"skip {routine.id}"]
         if too_soon(routine, moment):
             return []
         self.runner(routine, "file")
-        self.store.mark_fired(routine, moment, watch_token=token)
+        self.store.mark_fired(routine, moment, watch_token=seen.token)
         return [f"run {routine.id}"]
 
     def _skip(

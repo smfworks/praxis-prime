@@ -1,0 +1,75 @@
+schema = "praxis.theme/v1"
+id = "smf.classical"
+name = "Classical"
+version = "1.0.0"
+license = "MIT"
+authors = ["Praxis Prime"]
+description = "Stone, olive, and antique gold. Dark mode is the default. WisdomForge type."
+modes = ["light", "dark"]
+default_mode = "dark"
+min_praxis = "0.1.0"
+contrast = "AA"
+
+[fonts.display]
+family = "Fraunces"
+license = "OFL-1.1"
+fallback = "serif"
+files = [
+  { path = "assets/fonts/Fraunces.woff2", weight = "100 900", style = "normal" },
+]
+
+[fonts.body]
+family = "Praxis Office Sans Subset"
+license = "OFL-1.1"
+fallback = "sans-serif"
+files = [
+  { path = "assets/fonts/SourceSans3.woff2", weight = "200 900", style = "normal" },
+]
+
+[fonts.mono]
+family = "Praxis Office Mono Subset"
+license = "OFL-1.1"
+fallback = "monospace"
+files = [
+  { path = "assets/fonts/SourceCodePro.woff2", weight = "200 900", style = "normal" },
+]
+
+[shape]
+radius = 4
+density = "cozy"
+motion = "subtle"
+scale = 1.2
+baseSize = 16
+lineHeight = 1.55
+borderWidth = 1
+
+[tokens.light]
+bg = "#f5efe3"
+bgRaised = "#fcf8f0"
+fg = "#221d16"
+fgMuted = "#5b5041"
+accent = "#5b6b2f"
+accentFg = "#fcf8f0"
+border = "#d9ceb8"
+borderStrong = "#5b5041"
+ring = "#5b6b2f"
+ok = "#3f6b2a"
+warn = "#7d5a00"
+danger = "#9b2c20"
+
+[tokens.dark]
+bg = "#0a0a0f"
+bgRaised = "#13131a"
+fg = "#f3eadc"
+fgMuted = "#b5a48c"
+accent = "#c9a96e"
+accentFg = "#0a0a0f"
+border = "#2a2a35"
+borderStrong = "#b5a48c"
+ring = "#c9a96e"
+ok = "#9cc28a"
+warn = "#d9b25f"
+danger = "#e57368"
+
+[ornaments]
+divider = "assets/ornaments/capital.svg"

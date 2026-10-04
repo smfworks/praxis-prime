@@ -26,7 +26,7 @@ praxis-prime routines delete rt_0123abcd
 |---|---|---|
 | Cron | `--cron "M H DOM MON DOW"` | Five fields, in the routine timezone. Names (`mon`, `jan`) and `7` for Sunday are accepted. When both day-of-month and day-of-week are restricted, either match is enough. |
 | Interval | `--every 15m` or `--cron "@every 15m"` | Units are `s`, `m`, `h`, and `d`. |
-| File | `--watch PATH` | inotify when the kernel has it, otherwise a stat each tick. A token of size and mtime (or a hash of a directory's children) catches a change that happened while the daemon was down. |
+| File | `--watch PATH` | inotify when the kernel has it, otherwise a stat each tick. A token of size and mtime (or a hash of a directory's children) catches a change that happened while the daemon was down. The routine runs when that token changes. Other names in the directory, a chmod, and a queue overflow stat again and do not start a run. |
 | Webhook | `--webhook` | `POST /v1/routines/<id>/fire` on the loopback gateway. The bearer token is required, same as `/status`. |
 
 The shortest gap is one minute. `30s` is rejected. A second fire inside that gap returns HTTP 429 and does not start a session. A paused routine returns 409. An unknown id returns 404. A missing or wrong token returns 401 and does not run anything.

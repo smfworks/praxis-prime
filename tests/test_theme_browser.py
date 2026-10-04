@@ -40,13 +40,20 @@ def test_settings_switches_theme_and_mode(tmp_path: Path):
             _sign_in(page, port, "ada", settle="Chat")
             page.get_by_role("link", name="Settings").click()
             page.get_by_role("heading", name="Appearance").wait_for()
-            page.get_by_label("Theme", exact=True).select_option("smf.high-contrast")
-            page.wait_for_function(_BG_IS, arg="#ffffff")
-            page.get_by_label("Mode", exact=True).select_option("dark")
-            page.wait_for_function("() => document.documentElement.dataset.mode === 'dark'")
-            page.wait_for_function(_BG_IS, arg="#000000")
             page.get_by_label("Mode", exact=True).select_option("light")
             page.wait_for_function("() => document.documentElement.dataset.mode === 'light'")
+            for theme_id, light, dark in _THEMES:
+                page.get_by_label("Theme", exact=True).select_option(theme_id)
+                page.wait_for_function(_BG_IS, arg=light)
+                page.get_by_label("Mode", exact=True).select_option("dark")
+                page.wait_for_function("() => document.documentElement.dataset.mode === 'dark'")
+                page.wait_for_function(_BG_IS, arg=dark)
+                page.get_by_label("Mode", exact=True).select_option("light")
+                page.wait_for_function(_BG_IS, arg=light)
+            page.get_by_label("Theme", exact=True).select_option("omarchy")
+            page.wait_for_function(_OMARCHY_SELECTED)
+            page.wait_for_function(_BG_IS, arg="#f6f1e7")
+            page.get_by_label("Theme", exact=True).select_option("smf.high-contrast")
             page.wait_for_function(_BG_IS, arg="#ffffff")
             page.set_viewport_size({"width": 390, "height": 844})
             page.get_by_role("link", name="Chat").click()
@@ -106,6 +113,19 @@ def _fulfill_json(route, body: dict[str, object]) -> None:
         body=json.dumps(body),
     )
 
+
+_OMARCHY_SELECTED = "() => document.getElementById('pp-theme-choice').value === 'omarchy'"
+
+_THEMES = (
+    ("smf.praxis", "#f6f1e7", "#14110f"),
+    ("smf.legal-office", "#f7f3ea", "#0f1522"),
+    ("smf.forensic", "#f4f6f8", "#121416"),
+    ("smf.education", "#f8fafc", "#0f172a"),
+    ("smf.classical", "#f5efe3", "#0a0a0f"),
+    ("smf.medical", "#f7fafa", "#0c1a1f"),
+    ("smf.dental", "#f6fbfa", "#0d1b1a"),
+    ("smf.high-contrast", "#ffffff", "#000000"),
+)
 
 _BG_IS = """(expected) => {
   const style = getComputedStyle(document.documentElement);

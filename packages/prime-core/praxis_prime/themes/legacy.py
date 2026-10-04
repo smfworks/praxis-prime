@@ -4,8 +4,9 @@
 ``smf.praxis``. Each override is checked with the same contrast rules as an
 installed theme. Lightness may move by at most 0.25 in OKLCH. Past that the
 hint is refused and the pack still installs. A hint is not applied when the
-selected theme is ``smf.praxis`` itself. Suggested built-ins that are not
-installed yet (the other six themes, M3b) fall back through this path.
+selected theme is ``smf.praxis`` itself. A suggested built-in that
+``find_theme`` already returns is used as itself. This path runs only for
+an id that is not installed.
 
 ``packs install`` from the CLI also writes ``pack.<name>`` when the hint
 passes. ``install_pack`` does not, so library callers stay free of that side

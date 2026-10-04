@@ -21,6 +21,7 @@ from praxis_prime.profiles.policy import load_layer
 from praxis_prime.state import StateDB
 from praxis_prime.themes.archive import MAX_PREVIEW_BYTES, read_dir, write_zip
 from praxis_prime.themes.cli import dispatch_theme
+from praxis_prime.themes.color import contrast_ratio
 from praxis_prime.themes.cssgen import render_css
 from praxis_prime.themes.errors import ThemeError
 from praxis_prime.themes.legacy import describe_hint, materialize_pack_theme, pack_theme_id
@@ -68,16 +69,37 @@ def _zipped(files: dict[str, bytes]) -> bytes:
     return buffer.getvalue()
 
 
+_BUILTINS = (
+    "smf.classical",
+    "smf.dental",
+    "smf.education",
+    "smf.forensic",
+    "smf.high-contrast",
+    "smf.legal-office",
+    "smf.medical",
+    "smf.praxis",
+)
+_SVG_NAMESPACES = (
+    "http://www.w3.org/2000/svg",
+    "http://www.w3.org/1999/xlink",
+)
+_URL = re.compile(r"""url\(\s*(['"]?)([^)'"]+)\1\s*\)""", re.IGNORECASE)
+
+
 def test_builtin_themes_meet_their_contrast_levels():
-    praxis = validate_dir(_BUILTIN / "smf.praxis")
-    contrast = validate_dir(_BUILTIN / "smf.high-contrast")
-    assert praxis.theme_id == "smf.praxis"
-    assert praxis.contrast == "AA"
-    assert contrast_modes(praxis.modes, "AA") == []
-    assert contrast.contrast == "AAA"
-    assert contrast_modes(contrast.modes, "AAA") == []
-    assert contrast_modes(contrast.modes, "AA") == []
-    for package in (praxis, contrast):
+    found = sorted(
+        path.name
+        for path in _BUILTIN.iterdir()
+        if path.is_dir() and not path.name.startswith((".", "_"))
+    )
+    assert found == list(_BUILTINS)
+    for theme_id in _BUILTINS:
+        package = validate_dir(_BUILTIN / theme_id)
+        level = "AAA" if theme_id == "smf.high-contrast" else "AA"
+        assert package.theme_id == theme_id
+        assert package.contrast == level
+        assert contrast_modes(package.modes, level) == []
+        assert contrast_modes(package.modes, "AA") == []
         css = render_css(package, package_hash(package.files))
         assert "--pp-bg:" in css
         assert "--pp-ring:" in css
@@ -86,9 +108,167 @@ def test_builtin_themes_meet_their_contrast_levels():
         assert "http://" not in css
         assert "https://" not in css
         assert "assets/fonts/OFL.txt" in package.files
+        licence = package.files["assets/fonts/OFL.txt"].decode("utf-8")
+        assert "SIL Open Font License" in licence
         fonts = [package.files[path] for path in package.files if path.endswith(".woff2")]
         assert fonts
         assert all(blob.startswith(b"wOF2") for blob in fonts)
+
+
+def test_every_bundled_font_is_credited():
+    credits = (_ROOT / "CREDITS.md").read_text(encoding="utf-8")
+    third = (_ROOT / "THIRD_PARTY.md").read_text(encoding="utf-8")
+    copied = third.split("## Copied-file log", 1)[1]
+    fonts = sorted(_BUILTIN.rglob("*.woff2"))
+    assert len(fonts) >= 8
+    for path in fonts:
+        repo = path.relative_to(_ROOT).as_posix()
+        packaged = path.relative_to(_ROOT / "packages" / "prime-core").as_posix()
+        assert repo in credits, repo
+        assert f"`{packaged}`" in copied, packaged
+
+# OFL section 3: a modified font may not use a Reserved Font Name.
+_FAMILY_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}$")
+_RFN = re.compile(
+    r"""Reserved Font Name\s+(?:["“']([^"”']+)["”']|([A-Za-z][^.\n]{0,80}?))(?=\.|$)""",
+    re.MULTILINE,
+)
+_NEW_THEMES = (
+    "smf.legal-office",
+    "smf.forensic",
+    "smf.education",
+    "smf.classical",
+    "smf.medical",
+    "smf.dental",
+)
+_NAMED_RFN = {
+    "smf.legal-office": {"Libre Baskerville", "Source"},
+    "smf.classical": {"Source"},
+    "smf.forensic": {"Plex"},
+    "smf.education": {"RevReading Lexend"},
+    "smf.medical": set(),
+    "smf.dental": set(),
+}
+# Name ID 0 is the copyright notice. It keeps the author's name and the
+# Reserved Font Name clause. A renamed subset has no name ID 7, which would
+# claim the subset name is a trademark of the original foundry. Every other
+# name record must not contain these strings. Lexend is not in this set.
+_RENAMED_FONTS = {
+    "LibreBaskerville.woff2",
+    "SourceSans3.woff2",
+    "SourceCodePro.woff2",
+    "IBMPlexSans.woff2",
+    "IBMPlexMono-Regular.woff2",
+    "IBMPlexMono-Bold.woff2",
+}
+_RFN_LEFTOVERS = (
+    "Libre Baskerville",
+    "LibreBaskerville",
+    "Source",
+    "IBM Plex",
+    "IBMPlex",
+)
+
+
+def _reserved_font_names(text: str) -> set[str]:
+    found: set[str] = set()
+    for match in _RFN.finditer(text):
+        name = (match.group(1) or match.group(2) or "").strip()
+        if name:
+            found.add(name)
+    return found
+
+
+def test_subset_fonts_drop_reserved_names():
+    """A subset drops a Reserved Font Name. Lexend's reserved name is longer."""
+    ttlib = pytest.importorskip("fontTools.ttLib")
+    import tomllib
+
+    third = (_ROOT / "THIRD_PARTY.md").read_text(encoding="utf-8")
+    table = third.split("## Copied-file log", 1)[0]
+    for theme_id in _NEW_THEMES:
+        root = _BUILTIN / theme_id
+        licence = (root / "assets" / "fonts" / "OFL.txt").read_text(encoding="utf-8")
+        reserved = _reserved_font_names(licence)
+        assert reserved == _NAMED_RFN[theme_id], theme_id
+        meta = tomllib.loads((root / "theme.toml").read_text(encoding="utf-8"))
+        for path in sorted((root / "assets" / "fonts").glob("*.woff2")):
+            font = ttlib.TTFont(path)
+            try:
+                by_id: dict[int, list[str]] = {}
+                for record in font["name"].names:
+                    by_id.setdefault(record.nameID, []).append(record.toUnicode())
+            finally:
+                font.close()
+            if path.name in _RENAMED_FONTS:
+                assert 7 not in by_id, (path.name, by_id.get(7))
+                for name_id, values in by_id.items():
+                    if name_id == 0:
+                        continue
+                    for value in values:
+                        leaked = [needle for needle in _RFN_LEFTOVERS if needle in value]
+                        assert not leaked, (path.name, name_id, value, leaked)
+            shown = [
+                value
+                for name_id in (1, 4, 6, 16)
+                for value in by_id.get(name_id, [])
+            ]
+            for reserved_name in reserved:
+                kept = [value for value in shown if reserved_name in value]
+                assert not kept, (path.name, reserved_name, kept)
+            family = by_id[1][0]
+            assert _FAMILY_NAME.fullmatch(family), family
+            packaged = path.relative_to(_ROOT / "packages" / "prime-core").as_posix()
+            row = next(line for line in table.splitlines() if f"`{packaged}`" in line)
+            cells = [cell.strip() for cell in row.strip("|").split("|")]
+            assert cells[2] == by_id[0][0], packaged
+            rel = path.relative_to(root).as_posix()
+            declared = [
+                str(slot["family"])
+                for slot in meta["fonts"].values()
+                if any(face.get("path") == rel for face in slot.get("files", []))
+            ]
+            assert declared, rel
+            assert all(_FAMILY_NAME.fullmatch(name) for name in declared)
+            if family.startswith("Praxis "):
+                assert set(by_id[16]) == {family}
+                assert set(declared) == {family}
+                assert family in cells[0]
+            if path.name == "Lexend.woff2":
+                assert family == "Lexend"
+                assert declared == ["Lexend"]
+
+
+def test_builtin_theme_assets_have_no_remote_urls():
+    for path in _BUILTIN.rglob("*"):
+        if path.suffix not in {".toml", ".css", ".svg"} or not path.is_file():
+            continue
+        text = path.read_text(encoding="utf-8")
+        if path.suffix == ".svg":
+            for namespace in _SVG_NAMESPACES:
+                text = text.replace(namespace, "")
+        assert "://" not in text, path
+        assert not re.search(r"(?<!:)//[A-Za-z0-9]", text), path
+        for match in _URL.finditer(text):
+            target = match.group(2).strip()
+            assert target.startswith("#") or target.startswith("assets/"), (path, target)
+
+
+def test_new_ornaments_pass_the_sanitizer_unchanged():
+    fresh = {"rule.svg", "grid.svg", "capital.svg"}
+    seen = set()
+    for path in _BUILTIN.rglob("*.svg"):
+        raw = path.read_bytes()
+        once, issue = check_svg(path.name, raw)
+        assert issue is None, path
+        twice, again = check_svg(path.name, once)
+        assert again is None
+        assert once == twice
+        assert once.startswith(b"<?xml")
+        if path.name in fresh:
+            assert raw == once, path
+            seen.add(path.name)
+    assert seen == fresh
 
 
 def test_theme_css_rejects_active_content():
@@ -183,7 +363,8 @@ def test_cli_lint_pack_install_and_set(tmp_path: Path, capsys: pytest.CaptureFix
     assert "lab.sample" in capsys.readouterr().out
 
 
-def test_lock_beats_profile_and_does_not_tighten_tools(tmp_path: Path):
+def test_lock_beats_profile_and_does_not_tighten_tools(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("PRAXIS_PRIME_OMARCHY_THEME", str(tmp_path / "missing-omarchy.json"))
     data = tmp_path / "data"
     create_profile(data, "default")
     set_profile_theme(data, "default", "smf.high-contrast", "dark")
@@ -600,6 +781,46 @@ def test_damaged_and_duplicate_zips_are_rejected():
     with pytest.raises(ThemeError) as caught:
         validate_zip(collapsed.getvalue())
     assert "zip_duplicate" in _codes(caught.value)
+
+
+def test_translucent_page_colours_are_refused():
+    files = _clone("lab.glass")
+    text = files["theme.toml"].decode("utf-8").replace('bg = "#14110f"', 'bg = "#14110f10"', 1)
+    files["theme.toml"] = text.encode("utf-8")
+    with pytest.raises(ThemeError) as caught:
+        validate_files(files)
+    opaque = [issue.message for issue in caught.value.issues]
+    assert any("must be fully opaque" in message and "bg" in message for message in opaque)
+
+    for token in ("bg", "bgRaised", "codeBg"):
+        issues = contrast_modes({"dark": {token: "#14110f10"}}, "AA")
+        messages = [issue.message for issue in issues]
+        assert any("must be fully opaque" in message and token in message for message in messages)
+
+    # Dark ink on a nearly clear latte swatch. Over white this clears 4.5:1.
+    # Over a black page it does not, and the validator has to use the worse one.
+    ink = "#3f425b"
+    wash = "#eff1f510"
+    assert contrast_ratio(ink, wash) >= 4.5
+    issues = contrast_modes({"dark": {"accent": wash, "accentFg": ink}}, "AA")
+    assert any("accentFg" in issue.message and "accent" in issue.message for issue in issues)
+
+    # selection is drawn on bg, so a translucent white highlight on a dark page
+    # stays dark and light text still clears.
+    glass = _clone("lab.selection")
+    sheet = glass["theme.toml"].decode("utf-8")
+    sheet = sheet.replace("[tokens.dark]\n", '[tokens.dark]\nselection = "#ffffff20"\n', 1)
+    glass["theme.toml"] = sheet.encode("utf-8")
+    package = validate_files(glass)
+    assert package.modes["dark"]["selection"] == "#ffffff20"
+
+
+def test_omarchy_live_id_cannot_be_installed(tmp_path: Path):
+    files = _clone("omarchy.live")
+    with pytest.raises(ThemeError) as caught:
+        install_files(files, tmp_path)
+    assert caught.value.issues[0].code == "bad_id"
+    assert "omarchy.live" in caught.value.issues[0].message
 
 
 def test_smf_namespace_cannot_shadow_a_builtin(tmp_path: Path):
