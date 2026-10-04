@@ -21,6 +21,9 @@ _BLOCKED = [
     ("http://100.100.100.200/", ["100.100.100.200"]),
     ("http://[fe80::1]/", ["fe80::1"]),
     ("http://[64:ff9b::a9fe:a9fe]/", ["64:ff9b::a9fe:a9fe"]),
+    ("http://[::169.254.169.254]/", ["::169.254.169.254"]),
+    ("http://[2002:a9fe:a9fe::]/", ["2002:a9fe:a9fe::"]),
+    ("http://[::0.1.2.3]/", ["::0.1.2.3"]),
     ("http://0.1.2.3/", ["0.1.2.3"]),
     ("http://0.0.0.0/", ["0.0.0.0"]),
     ("http://[::]/", ["::"]),
@@ -33,6 +36,7 @@ _BLOCKED = [
 _ALLOWED = [
     ("http://127.0.0.1:9/v1/models", ["127.0.0.1"], ("127.0.0.1", 9)),
     ("http://[::1]:9/v1/models", ["::1"], ("::1", 9)),
+    ("http://[::127.0.0.1]:9/v1/models", ["::127.0.0.1"], ("::127.0.0.1", 9)),
     ("http://10.1.2.3/v1/models", ["10.1.2.3"], ("10.1.2.3", 80)),
     ("http://192.168.1.5/v1/models", ["192.168.1.5"], ("192.168.1.5", 80)),
     ("http://172.16.0.4/v1/models", ["172.16.0.4"], ("172.16.0.4", 80)),
@@ -130,3 +134,62 @@ def test_https_sni_is_the_hostname_not_the_pinned_address(monkeypatch: pytest.Mo
         fetch("GET", "https://ollama.local/v1/models", timeout=0.2)
     assert seen["address"] == ("127.0.0.1", 443)
     assert seen["sni"] == "ollama.local"
+
+
+def test_probe_tries_each_allowed_address(monkeypatch: pytest.MonkeyPatch):
+    from praxis_prime.onboarding.probe import FetchResult
+
+    monkeypatch.setattr(
+        "praxis_prime.onboarding.probe._resolve",
+        lambda _host, _port: ["::1", "127.0.0.1"],
+    )
+    tried: list[str] = []
+
+    def exchange(*_args: object, **kwargs: object) -> FetchResult:
+        pinned = str(kwargs["pinned"])
+        tried.append(pinned)
+        if pinned == "::1":
+            raise OSError("refused")
+        return FetchResult(200, b"{}")
+
+    monkeypatch.setattr("praxis_prime.onboarding.probe._exchange", exchange)
+    result = fetch("GET", "http://localhost/v1/models", timeout=1)
+    assert result.status == 200
+    assert tried == ["::1", "127.0.0.1"]
+
+
+def test_probe_does_not_fail_over_a_redirect(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(
+        "praxis_prime.onboarding.probe._resolve",
+        lambda _host, _port: ["::1", "127.0.0.1"],
+    )
+    tried: list[str] = []
+
+    def exchange(*_args: object, **kwargs: object) -> None:
+        tried.append(str(kwargs["pinned"]))
+        raise ProbeError("redirect refused (302)")
+
+    monkeypatch.setattr("praxis_prime.onboarding.probe._exchange", exchange)
+    with pytest.raises(ProbeError, match="redirect refused"):
+        fetch("GET", "http://localhost/v1/models", timeout=1)
+    assert tried == ["::1"]
+
+
+def test_probe_stops_when_the_deadline_is_spent(monkeypatch: pytest.MonkeyPatch):
+    import time
+
+    monkeypatch.setattr(
+        "praxis_prime.onboarding.probe._resolve",
+        lambda _host, _port: ["::1", "127.0.0.1"],
+    )
+    tried: list[str] = []
+
+    def exchange(*_args: object, **kwargs: object) -> None:
+        tried.append(str(kwargs["pinned"]))
+        time.sleep(0.3)
+        raise TimeoutError("slow")
+
+    monkeypatch.setattr("praxis_prime.onboarding.probe._exchange", exchange)
+    with pytest.raises(ProbeError, match="timed out"):
+        fetch("GET", "http://localhost/v1/models", timeout=0.2)
+    assert tried == ["::1"]

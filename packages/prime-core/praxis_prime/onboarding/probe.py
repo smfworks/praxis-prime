@@ -59,40 +59,61 @@ def fetch(
     pin: str = "",
     capture_fingerprint: bool = False,
 ) -> FetchResult:
-    """One request. Redirects are refused. A pin is a SHA-256 of the peer cert."""
-    parts, pinned = _prepare(url)
+    """One request. Redirects are refused. A pin is a SHA-256 of the peer cert.
+
+    Every allowed address is tried, in order, until one connects or the
+    deadline passes. A blocked address in the set refuses the request
+    before any connection. Policy failures do not move on to the next address.
+    """
+    parts, addresses = _prepare(url)
     deadline = time.monotonic() + timeout
-    try:
-        return _exchange(
-            method,
-            parts,
-            body=body,
-            headers=headers or {},
-            timeout=timeout,
-            limit=limit,
-            pin=pin.strip().lower(),
-            capture_fingerprint=capture_fingerprint,
-            deadline=deadline,
-            unverified=bool(pin),
-            pinned=pinned,
-        )
-    except ProbeError:
-        raise
-    except ssl.SSLError as exc:
-        if parts.scheme != "https" or not capture_fingerprint:
+    fingerprint = ""
+    last = len(addresses) - 1
+    for index, pinned in enumerate(addresses):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ProbeError("probe timed out")
+        try:
+            return _exchange(
+                method,
+                parts,
+                body=body,
+                headers=headers or {},
+                timeout=remaining,
+                limit=limit,
+                pin=pin.strip().lower(),
+                capture_fingerprint=capture_fingerprint,
+                deadline=deadline,
+                unverified=bool(pin),
+                pinned=pinned,
+            )
+        except ProbeError:
+            raise
+        except ssl.SSLError as exc:
+            if parts.scheme == "https" and capture_fingerprint:
+                found = _fingerprint_only(parts, remaining, pinned)
+                if found:
+                    fingerprint = found
+            if index != last and time.monotonic() < deadline:
+                continue
+            if parts.scheme == "https" and capture_fingerprint:
+                raise ProbeError(
+                    "certificate is not trusted; the fingerprint was not used as trust",
+                    fingerprint=fingerprint,
+                ) from exc
             raise ProbeError(f"TLS verification failed ({exc})") from exc
-        fingerprint = _fingerprint_only(parts, timeout, pinned)
-        raise ProbeError(
-            "certificate is not trusted; the fingerprint was not used as trust",
-            fingerprint=fingerprint,
-        ) from exc
-    except TimeoutError as exc:
-        raise ProbeError("probe timed out") from exc
-    except OSError as exc:
-        raise ProbeError(f"probe failed ({exc})") from exc
+        except TimeoutError as exc:
+            if index != last and time.monotonic() < deadline:
+                continue
+            raise ProbeError("probe timed out") from exc
+        except OSError as exc:
+            if index != last and time.monotonic() < deadline:
+                continue
+            raise ProbeError(f"probe failed ({exc})") from exc
+    raise ProbeError("probe timed out")
 
 
-def _prepare(url: str) -> tuple[urlsplit, str]:
+def _prepare(url: str) -> tuple[urlsplit, list[str]]:
     parts = _validate_url(url)
     host = parts.hostname or ""
     port = parts.port or (443 if parts.scheme == "https" else 80)
@@ -100,7 +121,7 @@ def _prepare(url: str) -> tuple[urlsplit, str]:
     for address in addresses:
         if _address_blocked(address):
             raise ProbeError("that address is not allowed")
-    return parts, addresses[0]
+    return parts, addresses
 
 
 def _validate_url(url: str) -> urlsplit:
@@ -154,14 +175,33 @@ def _parse_ip(text: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None
 def _canonical(
     address: ipaddress.IPv4Address | ipaddress.IPv6Address,
 ) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
-    """Unwrap IPv4-mapped and well-known NAT64 (``64:ff9b::/96``) addresses."""
+    """Unwrap mapped, 6to4, NAT64, and IPv4-compatible forms to IPv4."""
     if isinstance(address, ipaddress.IPv6Address):
         mapped = address.ipv4_mapped
         if mapped is not None:
             return mapped
-        if address in _NAT64:
-            return ipaddress.IPv4Address(address.packed[-4:])
+        embedded = _embedded_ipv4(address)
+        if embedded is not None:
+            return embedded
     return address
+
+
+def _embedded_ipv4(address: ipaddress.IPv6Address) -> ipaddress.IPv4Address | None:
+    """IPv4 carried inside 6to4, NAT64, or the IPv4-compatible ``::/96`` prefix.
+
+    ``::`` and ``::1`` stay IPv6. Compatible form is the low 32 bits when
+    the high 96 bits are zero, which is how ``::a.b.c.d`` is written.
+    """
+    sixtofour = address.sixtofour
+    if sixtofour is not None:
+        return sixtofour
+    if address in _NAT64:
+        return ipaddress.IPv4Address(address.packed[-4:])
+    if address.is_unspecified or address.is_loopback:
+        return None
+    if int(address) >> 32 == 0:
+        return ipaddress.IPv4Address(address.packed[-4:])
+    return None
 
 
 def _blocked_ip(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:

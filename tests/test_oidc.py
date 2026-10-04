@@ -1532,6 +1532,12 @@ def test_private_resolved_addresses_are_refused(monkeypatch: pytest.MonkeyPatch)
     assert oidc_mod._address_blocked("172.32.0.1") is False
     assert oidc_mod._address_blocked("2001:4860:4860::8888") is False
     assert oidc_mod._address_blocked("::ffff:8.8.8.8") is False
+    assert oidc_mod._address_blocked("::a00:1") is True
+    assert oidc_mod._address_blocked("::10.0.0.1") is True
+    assert oidc_mod._address_blocked("2002:a9fe:a9fe::") is True
+    assert oidc_mod._address_blocked("64:ff9b::a00:1") is True
+    assert oidc_mod._address_blocked("64:ff9b::808:808") is False
+    assert oidc_mod._address_blocked("::7f00:1") is True
 
     def refuse_connect(*_args: object, **_kwargs: object) -> None:
         raise AssertionError("connected to an unchecked address")
@@ -1611,6 +1617,39 @@ def test_private_resolved_addresses_are_refused(monkeypatch: pytest.MonkeyPatch)
         )
     assert caught.value.reason == "provider_unreachable"
     assert seen == [("8.8.8.8", 443)]
+
+    tried: list[tuple[str, int]] = []
+
+    def fail_first(address: tuple[str, int], timeout: float | None = None) -> None:
+        del timeout
+        tried.append(address)
+        raise TimeoutError("slow")
+
+    monkeypatch.setattr(socket, "create_connection", fail_first)
+    monkeypatch.setattr(oidc_mod, "_resolve", lambda _host, _port: ["8.8.8.8", "1.1.1.1"])
+    with pytest.raises(OidcError) as caught:
+        oidc_mod._request(
+            "https://idp.example/jwks",
+            method="GET",
+            body=None,
+            headers={},
+            allow_http=False,
+            limit=128,
+        )
+    assert caught.value.reason == "provider_unreachable"
+    assert tried == [("8.8.8.8", 443), ("1.1.1.1", 443)]
+    monkeypatch.setattr(oidc_mod, "_resolve", lambda _host, _port: ["::a00:1"])
+    monkeypatch.setattr(socket, "create_connection", refuse_connect)
+    with pytest.raises(OidcError) as caught:
+        oidc_mod._request(
+            "https://idp.example/jwks",
+            method="GET",
+            body=None,
+            headers={},
+            allow_http=False,
+            limit=128,
+        )
+    assert caught.value.reason == "url_rejected"
 
 
 def test_jwks_refetch_is_rate_limited(

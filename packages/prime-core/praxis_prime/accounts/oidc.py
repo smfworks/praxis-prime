@@ -116,6 +116,7 @@ _BLOCKED_V4 = tuple(
         "240.0.0.0/4",
     )
 )
+_NAT64 = ipaddress.ip_network("64:ff9b::/96")
 _BLOCKED_V6 = tuple(
     ipaddress.ip_network(item)
     for item in (
@@ -1393,38 +1394,52 @@ def _request(
             raise OidcError("url_rejected")
     elif any(_address_blocked(item) for item in addresses):
         raise OidcError("url_rejected")
-    pinned = addresses[0]
     deadline = time.monotonic() + _HTTP_TIMEOUT
-    connection: http.client.HTTPConnection | None = None
-    response: http.client.HTTPResponse | None = None
-    payload = b""
-    try:
-        tls = ssl.create_default_context() if scheme == "https" else None
-        connection = _BoundConnection(
-            host,
-            port,
-            timeout=_remaining(deadline),
-            pinned=pinned,
-            tls=tls,
-        )
-        connection.request(method, path, body=body, headers=headers)
-        response = connection.getresponse()
-        if response.status in {301, 302, 303, 307, 308}:
-            _read_bounded(response, connection, 1024, deadline)
-            raise OidcError("redirect_refused")
-        payload = _read_bounded(response, connection, limit + 1, deadline)
-    except OidcError:
-        raise
-    except (OSError, http.client.HTTPException, TimeoutError) as exc:
-        raise OidcError("provider_unreachable") from exc
-    finally:
-        if connection is not None:
-            connection.close()
-    if len(payload) > limit:
-        raise OidcError("response_too_large")
-    if response is None or response.status != 200:
-        raise OidcError("provider_http")
-    return payload
+    last = len(addresses) - 1
+    unreachable: OidcError | None = None
+    for index, pinned in enumerate(addresses):
+        connection: http.client.HTTPConnection | None = None
+        response: http.client.HTTPResponse | None = None
+        payload = b""
+        try:
+            tls = ssl.create_default_context() if scheme == "https" else None
+            connection = _BoundConnection(
+                host,
+                port,
+                timeout=_remaining(deadline),
+                pinned=pinned,
+                tls=tls,
+            )
+            connection.request(method, path, body=body, headers=headers)
+            response = connection.getresponse()
+            if response.status in {301, 302, 303, 307, 308}:
+                _read_bounded(response, connection, 1024, deadline)
+                raise OidcError("redirect_refused")
+            payload = _read_bounded(response, connection, limit + 1, deadline)
+        except OidcError as exc:
+            retry = (
+                exc.reason == "provider_unreachable"
+                and index != last
+                and time.monotonic() < deadline
+            )
+            if retry:
+                unreachable = exc
+                continue
+            raise
+        except (ssl.SSLError, TimeoutError, OSError, http.client.HTTPException) as exc:
+            if index != last and time.monotonic() < deadline:
+                unreachable = OidcError("provider_unreachable")
+                continue
+            raise OidcError("provider_unreachable") from exc
+        finally:
+            if connection is not None:
+                connection.close()
+        if len(payload) > limit:
+            raise OidcError("response_too_large")
+        if response is None or response.status != 200:
+            raise OidcError("provider_http")
+        return payload
+    raise unreachable or OidcError("provider_unreachable")
 
 
 def _remaining(deadline: float) -> float:
@@ -1753,9 +1768,7 @@ def _is_loopback(ip: str) -> bool:
     parsed = _parse_ip(ip)
     if parsed is None:
         return False
-    if isinstance(parsed, ipaddress.IPv6Address) and parsed.ipv4_mapped is not None:
-        return _is_loopback(str(parsed.ipv4_mapped))
-    return bool(parsed.is_loopback)
+    return bool(_canonical_ip(parsed).is_loopback)
 
 
 def _address_blocked(ip: str) -> bool:
@@ -1763,8 +1776,7 @@ def _address_blocked(ip: str) -> bool:
     parsed = _parse_ip(ip)
     if parsed is None:
         return True
-    if isinstance(parsed, ipaddress.IPv6Address) and parsed.ipv4_mapped is not None:
-        return _address_blocked(str(parsed.ipv4_mapped))
+    parsed = _canonical_ip(parsed)
     if (
         parsed.is_unspecified
         or parsed.is_loopback
@@ -1776,6 +1788,30 @@ def _address_blocked(ip: str) -> bool:
         return True
     nets = _BLOCKED_V6 if parsed.version == 6 else _BLOCKED_V4
     return any(parsed in net for net in nets)
+
+
+def _canonical_ip(
+    address: ipaddress.IPv4Address | ipaddress.IPv6Address,
+) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
+    """Unwrap mapped, 6to4, NAT64, and IPv4-compatible embeddings.
+
+    ``::`` and ``::1`` stay IPv6 so loopback is not treated as ``0.0.0.1``.
+    """
+    if not isinstance(address, ipaddress.IPv6Address):
+        return address
+    mapped = address.ipv4_mapped
+    if mapped is not None:
+        return mapped
+    sixtofour = address.sixtofour
+    if sixtofour is not None:
+        return sixtofour
+    if address in _NAT64:
+        return ipaddress.IPv4Address(address.packed[-4:])
+    if address.is_unspecified or address.is_loopback:
+        return address
+    if int(address) >> 32 == 0:
+        return ipaddress.IPv4Address(address.packed[-4:])
+    return address
 
 
 def _parse_ip(ip: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
