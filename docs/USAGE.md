@@ -54,26 +54,30 @@ The screen is three columns: sessions, chat with a composer, and the timeline st
 
 | Key | Effect |
 |---|---|
-| F1 | Focus the chat composer |
+| F1 | Key help, including while the composer is focused |
+| Ctrl+F | Focus the chat composer |
 | F2 | Focus the timeline |
 | F3 | Focus approvals |
 | F4 | Focus sessions |
-| Enter | In the composer, send. On a session, switch. On an approval, show the card. Enter never approves. In the confirm dialog, Enter cancels. |
-| a, then ctrl+y | Approve once (`allow_once`), when the approval list is focused. `a` opens a dialog that names the id, tool, and action. Cancel is focused. ctrl+y confirms. |
-| s, then ctrl+u | Always allow (`allow_session`) in the approval's session, or for this daemon process when that session is empty. |
-| d, then ctrl+x | Deny. `d` opens the same dialog. ctrl+x confirms. |
+| Enter | In the composer, send. On a session, switch. On an approval, show the card. Enter never approves. In the confirm dialog, Enter activates the focused button. |
+| a | Approve once (`allow_once`), when the approval list is focused. Opens a dialog that names the decision, the id, and the tool. Cancel is focused. Tab to Confirm, then Enter. |
+| s | Always allow (`allow_session`) in the approval's session, or for this daemon process when that session is empty. Same dialog. |
+| d | Deny. Same dialog. |
+| v | Full sanitised text of the highlighted card. |
+| Page Down, Page Up | Scroll the card one page. Reaching the end this way allows a decision. |
+| End, Home | Jump in the card. A jump does not count as reading it. |
 | n | New session, when the session list is focused |
 | Ctrl+N | New session from anywhere. A line already sent from the draft is kept. |
-| ? or ctrl+? | Key help. ctrl+? also works while the composer is focused. |
+| ? | Key help when a list is focused. F1 is the help key from anywhere. |
 | Ctrl+Q | Quit |
 
 The card on screen is the highlighted approval, kept by id. A new card does not move that highlight. If the highlighted id leaves the list, nothing is selected and the decision keys do nothing. Each id is sent once. Holding the key does not send it again. Typed text in the approvals pane is not a command.
 
-The card heading is `Approval needed: <tool> <id>`, then risk, sandbox, the host warning, the mount, the session and the requester, then the action and the reason. Newlines inside a field are shown as ⏎. The decision keys stay off until the whole card fits, or until you scroll it to the end.
+The card heading is `Approval needed: <tool> <id>`, then risk, sandbox, the host warning, the mount, the session and the requester, then the action and the reason. Newlines inside a field are shown as ⏎. A field longer than 300 characters is cut to `...N more`. `v` opens the full sanitised text. The decision keys stay off until you have paged to the end of the card, or, when a field was cut, to the end of that full text. End and Home jump and do not satisfy that gate. A later poll of the same card does not jump the scroll back to the top.
 
-Text from the daemon (chat, the timeline, cards, session titles, status, and errors) is sanitised before it is drawn. ESC, other C0 controls, DEL, and C1 are shown as `\xHH`. Bidi overrides and zero-width characters are dropped.
+Text from the daemon (chat, the timeline, cards, session titles, status, and errors) is sanitised before it is drawn. ESC, other C0 controls, DEL, and C1 are shown as `\xHH`. Format characters, bidi controls, zero-width characters, hangul fillers, variation selectors, tags, and lone surrogates are shown as `<U+XXXX>`. At most two combining marks stay on a base character.
 
-Nothing is approved unless you complete that confirm step, or you send the matching `--plain` command. Those three strings are the only decisions the TUI sends. They use the same gateway `approvals.decide` path as the web app and Telegram, and the daemon writes the same audit row. If the daemon connection drops, the status line says `disconnected, retrying` and the client reconnects with backoff. A failed send clears the busy flag.
+Nothing is approved unless you Tab to Confirm and press Enter, or you send the matching `--plain` command. `a`, `s`, and `d` do not decide while you are typing. Those three strings are the only decisions the TUI sends. They use the same gateway `approvals.decide` path as the web app and Telegram, and the daemon writes the same audit row. If the daemon connection drops, including a closed socket, the status line says `disconnected, retrying` and the client reconnects with backoff. `--plain` retries that connect before the next send. A failed send clears the busy flag. A decision that fails after it was queued is reported and can be sent again.
 
 Sessions on this screen are the ones opened in this visit. `--session <id>` starts on that id. A new session keeps the earlier rows. Switching shows this visit's transcript for that id. The daemon has no session-list frame, so a later run does not reload old transcripts. Quitting does not cancel a turn the daemon is already running.
 
@@ -81,7 +85,7 @@ The colours come from `GET /v1/themes/active` and the stylesheet that response n
 
 ### Plain mode
 
-`praxis-prime tui --plain` is a linear transcript for screen readers. It does not take over the screen, draw boxes, or emit colour. New messages and approval cards are printed as lines. Assistant text is buffered to a newline, or to the end of the turn, and the `prime:` prefix is printed once per line. The prompt is `> `. An empty line decides nothing. `/quit` and `/exit` return at once.
+`praxis-prime tui --plain` is a linear transcript for screen readers. It does not take over the screen, draw boxes, or emit colour. New messages and approval cards are printed as lines. Assistant text is buffered to a newline, or to the end of the turn, and the `prime:` prefix is printed once per line. Text that arrived before a tool line or an approval card is printed first. The prompt is `> `. An empty line decides nothing. `/quit` and `/exit` return at once. If the socket closes, the next command retries the connect with backoff and prints `disconnected, retrying` until that succeeds.
 
 | Input | Effect |
 |---|---|

@@ -13,9 +13,9 @@ import threading
 from collections.abc import Callable
 
 from praxis_prime.gateway.client import GatewayError
+from praxis_prime.sanitize import sanitize
 from praxis_prime.tui.cards import render_card
 from praxis_prime.tui.gateway import TuiGateway
-from praxis_prime.tui.sanitize import sanitize
 from praxis_prime.tui.sessions import SessionBook
 
 ReadLine = Callable[[], str]
@@ -156,6 +156,8 @@ def _handle(
     if not ready:
         write(sanitize(blocked or "Chat is not available.") + "\n")
         return False
+    if not _ensure_connected(gateway, write):
+        return False
     _send(gateway, sessions, timeline, text, write)
     return False
 
@@ -182,13 +184,20 @@ def _send(
         if kind == "text":
             buffer.add(str(payload.get("text") or ""))
             return
+        if kind == "decision_failed":
+            buffer.flush()
+            write(sanitize(payload.get("detail") or "decision failed") + "\n")
+            return
         if kind == "approval":
+            buffer.flush()
             approval = payload.get("approval")
             if isinstance(approval, dict):
                 _write_card(approval, write)
                 approval_id = sanitize(approval.get("id", ""), newlines=False)
                 timeline.append(f"timeline: approval {approval_id}")
             return
+        if kind == "tool":
+            buffer.flush()
         if kind in {"tool", "status"}:
             line = _span(kind, payload)
             timeline.append(line)
@@ -227,6 +236,8 @@ def _send(
 
 
 def _announce(gateway: TuiGateway, write: Write) -> None:
+    if not _ensure_connected(gateway, write):
+        return
     try:
         items = gateway.list_approvals()
     except GatewayError as exc:
@@ -243,7 +254,19 @@ def _write_card(item: dict[str, object], write: Write) -> None:
     write(render_card(item) + "\n")
 
 
+def _ensure_connected(gateway: TuiGateway, write: Write) -> bool:
+    """Reconnect with the gateway backoff before the next send."""
+    if gateway.connected:
+        return True
+    if gateway.try_reconnect():
+        return True
+    write("disconnected, retrying\n")
+    return False
+
+
 def _apply_decision(gateway: TuiGateway, approval_id: str, decision: str, write: Write) -> None:
+    if not _ensure_connected(gateway, write):
+        return
     try:
         state = gateway.decide(approval_id, decision)
     except (GatewayError, ValueError) as exc:
@@ -283,6 +306,12 @@ class _PrimeBuffer:
         while "\n" in self._buf:
             line, self._buf = self._buf.split("\n", 1)
             self._emit(line)
+
+    def flush(self) -> None:
+        """Print text that arrived before a tool or an approval card."""
+        if self._buf:
+            self._emit(self._buf)
+            self._buf = ""
 
     def finish(self, final: str) -> None:
         if self._buf:

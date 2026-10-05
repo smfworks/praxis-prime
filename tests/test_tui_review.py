@@ -9,9 +9,9 @@ import threading
 import time
 
 import pytest
-from tests.test_tui_app import _app, _submit, _until
+from tests.test_tui_app import _app, _confirm, _submit, _until
 from tests.test_tui_gateway import FakeFrames, FakeHttp
-from textual.widgets import Input, Static
+from textual.widgets import Footer, Input, Static
 
 from praxis_prime.approvals.card import format_approval_card
 from praxis_prime.gateway.client import GatewayClient, GatewayError
@@ -54,7 +54,7 @@ def _assert_visible(text: str) -> None:
     assert "\u2066" not in text
 
 
-def test_sanitiser_shows_osc_csi_c1_and_drops_bidi() -> None:
+def test_sanitiser_shows_osc_csi_c1_and_escapes_bidi() -> None:
     shown = sanitize(EVIL + ERASE_LINE)
     _assert_visible(shown)
     assert "\\x1b" in shown
@@ -87,9 +87,10 @@ def test_card_flattens_newlines_and_keeps_the_hidden_command() -> None:
     assert "Session: sess-9" in text
     assert "Requester: ada" in text
     assert "Always allow in session sess-9" in text
-    assert "ctrl+y" in text and "ctrl+u" in text and "ctrl+x" in text
+    assert "ctrl+y" not in text and "ctrl+u" not in text and "ctrl+x" not in text
+    assert "Tab to Confirm" in text
     assert "/approve ap1" in text
-    assert "A text reply cannot approve this." in text
+    assert "A text reply cannot approve this." not in text
     erased = dict(CARD)
     erased["summary"] = "ls -la" + ERASE_LINE + "rm -rf ~/"
     erased_text = render_card(erased)
@@ -116,7 +117,9 @@ def test_empty_session_names_the_daemon_process() -> None:
     assert scope_label({"sessionId": ""}) == "Always allow for this daemon process"
     assert "session sess-9" in scope_label(CARD)
     assert "this daemon process" in HELP
-    assert "ctrl+y" in HELP
+    assert "Tab to Confirm" in HELP
+    assert "F1 help" in HELP
+    assert "ctrl+y" not in HELP
     assert "/approve <id>" in HELP
 
 
@@ -171,6 +174,16 @@ def test_focused_list_has_a_border_and_a_distinct_row() -> None:
                 for _ns, binding, _on, _tip in app.screen.active_bindings.values()
             ]
             assert "Help" in labels
+            assert "ctrl+y" not in app.screen.active_bindings
+            assert "ctrl+u" not in app.screen.active_bindings
+            assert "ctrl+x" not in app.screen.active_bindings
+            footer = "".join(
+                app.query_one(Footer).render_line(y).text
+                for y in range(app.query_one(Footer).size.height)
+            )
+            assert "^y" not in footer
+            assert "Confirm" not in footer
+            assert "ctrl+y" not in footer.lower()
             focus_bg = _option_background(approvals, "ap1")
             pane = approvals.styles.background
             pane_rgb = (pane.r, pane.g, pane.b)
@@ -210,11 +223,12 @@ def test_highlight_follows_the_card_and_confirm_decides_that_id() -> None:
             await pilot.press("a")
             await pilot.pause()
             await pilot.press("enter")
-            await pilot.pause(0.2)
+            await pilot.pause(0.1)
             assert frames.decisions == []
-            await pilot.press("a")
-            await pilot.pause()
-            await pilot.press("ctrl+y")
+            assert len(app.screen_stack) > 1
+            await pilot.pause(0.85)
+            await pilot.press("tab")
+            await pilot.press("enter")
             await _until(pilot, lambda: len(frames.decisions) == 1)
 
     asyncio.run(run())
@@ -234,7 +248,7 @@ def test_new_approval_does_not_steal_the_highlighted_card() -> None:
         del text, session_id, timeout, profile
         started.set()
         on_event({"kind": "approval", "approval": second})
-        deadline = time.monotonic() + 4
+        deadline = time.monotonic() + 8
         while time.monotonic() < deadline:
             decider(second)
             if any(item[0] == "ap1" for item in frames.decisions):
@@ -251,16 +265,17 @@ def test_new_approval_does_not_steal_the_highlighted_card() -> None:
         async with app.run_test(size=(110, 36)) as pilot:
             await _until(pilot, lambda: app.approval_ids() == ["ap1"])
             await _submit(pilot, app, "go")
-            assert started.wait(2)
-            await _until(pilot, lambda: "apB" in app.approval_ids())
-            card = str(app.query_one("#card", Static).content)
-            assert "ap1" in card
-            assert "rm -rf ~/" not in card
+            await _until(pilot, lambda: started.is_set() and "apB" in app.approval_ids())
+            await _until(
+                pilot,
+                lambda: (
+                    "ap1" in str(app.query_one("#card", Static).content)
+                    and "rm -rf ~/" not in str(app.query_one("#card", Static).content)
+                ),
+            )
             await pilot.press("f3")
-            await pilot.pause()
-            await pilot.press("a")
-            await pilot.pause()
-            await pilot.press("ctrl+y")
+            await _until(pilot, lambda: app.focused is not None and app.focused.id == "approvals")
+            await _confirm(pilot, "a")
             await _until(pilot, lambda: "done" in app.transcript_text())
 
     asyncio.run(run())
@@ -310,16 +325,20 @@ def test_held_key_and_typed_prose_do_not_decide() -> None:
         async with app.run_test(size=(110, 36)) as pilot:
             await _until(pilot, lambda: len(app.approval_ids()) == 3)
             await pilot.press("f3")
-            await pilot.pause()
+            await _until(pilot, lambda: app.focused is not None and app.focused.id == "approvals")
             for _ in range(5):
                 await pilot.press("a")
             await pilot.pause(0.2)
             assert frames.decisions == []
-            await pilot.press("ctrl+y")
+            await pilot.pause(0.85)
+            await pilot.press("tab")
+            await pilot.press("enter")
             await _until(pilot, lambda: len(frames.decisions) == 1)
             for _ in range(4):
                 await pilot.press("a")
                 await pilot.press("ctrl+y")
+                await pilot.press("ctrl+u")
+                await pilot.press("ctrl+x")
             await pilot.pause(0.3)
             assert len(frames.decisions) == 1
             for key in ("y", "e", "s", "space", "d", "o", "space", "i", "t"):
@@ -346,19 +365,31 @@ def test_long_card_blocks_a_decision_until_it_is_scrolled() -> None:
             scroller = app.query_one("#card-scroll")
             await pilot.press("f3")
             await pilot.pause()
-            if scroller.max_scroll_y <= 0:
-                scroller.styles.max_height = 4
-                await pilot.pause()
-            assert scroller.max_scroll_y > 0
+            scroller.styles.height = 4
+            scroller.styles.min_height = 4
+            scroller.styles.max_height = 4
+            await pilot.pause()
+            assert scroller.max_scroll_y > 1
+            assert not scroller.gate_met()
             await pilot.press("a")
             await pilot.pause(0.2)
             assert frames.decisions == []
             assert "Scroll the approval card" in app.timeline_text()
             scroller.scroll_end(animate=False)
             await pilot.pause()
+            assert not scroller.gate_met()
             await pilot.press("a")
+            await pilot.pause(0.2)
+            assert frames.decisions == []
+            scroller.scroll_home(animate=False)
             await pilot.pause()
-            await pilot.press("ctrl+y")
+            for _ in range(12):
+                if scroller.gate_met():
+                    break
+                await pilot.press("pagedown")
+                await pilot.pause()
+            assert scroller.gate_met()
+            await _confirm(pilot, "a")
             await _until(pilot, lambda: len(frames.decisions) == 1)
 
     asyncio.run(run())
@@ -502,7 +533,7 @@ def test_help_opens_from_the_composer() -> None:
             await _until(pilot, lambda: app.booted)
             app.query_one("#composer", Input).focus()
             await pilot.pause()
-            await pilot.press("ctrl+question_mark")
+            await pilot.press("f1")
             await pilot.pause()
             assert isinstance(app.screen, HelpScreen)
 

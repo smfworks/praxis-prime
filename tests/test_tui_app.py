@@ -48,6 +48,14 @@ async def _until(pilot: object, pred) -> None:
     raise AssertionError("timed out waiting for the TUI")
 
 
+async def _confirm(pilot: object, key: str) -> None:
+    """Open the dialog, wait out the arming delay, then Tab to Confirm and Enter."""
+    await pilot.press(key)  # type: ignore[attr-defined]
+    await pilot.pause(0.85)  # type: ignore[attr-defined]
+    await pilot.press("tab")  # type: ignore[attr-defined]
+    await pilot.press("enter")  # type: ignore[attr-defined]
+
+
 async def _submit(pilot: object, app: PraxisApp, text: str) -> None:
     composer = app.query_one("#composer", Input)
     composer.focus()
@@ -140,11 +148,8 @@ def _decision_pilot(key: str, decision: str) -> None:
             await _submit(pilot, app, "go")
             await _until(pilot, lambda: "ap1" in app.approval_ids())
             await pilot.press("f3")
-            await pilot.pause()
-            await pilot.press(key)
-            await pilot.pause()
-            confirm = {"a": "ctrl+y", "s": "ctrl+u", "d": "ctrl+x"}[key]
-            await pilot.press(confirm)
+            await _until(pilot, lambda: app.focused is not None and app.focused.id == "approvals")
+            await _confirm(pilot, key)
             await _until(pilot, lambda: "working done" in app.transcript_text())
 
     asyncio.run(run())
@@ -334,8 +339,10 @@ def test_plain_transcript_approves_and_denies() -> None:
     text = "".join(out)
     assert code == 0
     assert "you: hello" in text
-    assert "prime: streamed tail" in text
-    assert text.count("prime:") == 1
+    user_at = text.index("you: hello")
+    assert text.index("prime: streamed") < text.index("Approval needed", user_at)
+    assert "prime:  tail" in text
+    assert text.count("prime:") == 2
     assert "Approval needed" in text
     assert "rm tmp" in text
     assert "decision allow_once ap1" in text
