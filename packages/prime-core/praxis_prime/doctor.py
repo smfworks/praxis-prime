@@ -66,7 +66,7 @@ def collect_checks(
     detected = list(local_servers or ())
     if ollama_reachable and not any(item.startswith("ollama ") for item in detected):
         detected.append(f"ollama at {ollama_base}")
-    return [
+    checks = [
         check_python(version_info),
         check_os(os_release_text, env, which, path_exists),
         check_session(env),
@@ -75,6 +75,15 @@ def collect_checks(
         check_sandbox(bwrap_present),
         check_browser(playwright_present),
     ]
+    parsed = parse_os_release(os_release_text or "")
+    family, _detail = classify_os(parsed, env, which, path_exists)
+    if family == "omarchy":
+        # Import here so an Ubuntu doctor does not load the installer.
+        from praxis_prime.omarchy.install import doctor_setup
+
+        status, detail = doctor_setup(env)
+        checks.append(Check("Omarchy setup", status, detail))
+    return checks
 
 
 def check_python(version_info: tuple[int, int, int]) -> Check:
