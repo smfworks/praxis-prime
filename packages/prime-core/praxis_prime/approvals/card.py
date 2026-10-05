@@ -44,7 +44,7 @@ def format_approval_card(item: dict[str, object]) -> str:
         lines.append(_visible(mount))
     lines.extend(
         [
-            "A text reply cannot approve this.",
+            "A chat message cannot approve this.",
             "Use Approve, Deny, or Always this session.",
         ]
     )
@@ -52,6 +52,6 @@ def format_approval_card(item: dict[str, object]) -> str:
 
 
 def _visible(value: object) -> str:
-    from praxis_prime.tui.sanitize import sanitize
+    from praxis_prime.sanitize import sanitize
 
     return sanitize(value, newlines=False)

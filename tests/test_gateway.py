@@ -329,7 +329,7 @@ def test_cli_approvals_deny_a_pending_action(tmp_path, monkeypatch, capsys):
         listed = capsys.readouterr().out
         assert "Approval needed" in listed
         assert approval_id in listed
-        assert "A text reply cannot approve this." in listed
+        assert "A chat message cannot approve this." in listed
         assert main(["approvals", "deny", approval_id]) == 0
         assert "deny" in capsys.readouterr().out
     finally:

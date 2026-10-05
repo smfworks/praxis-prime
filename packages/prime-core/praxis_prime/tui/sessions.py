@@ -6,7 +6,7 @@ is sent back on ``chat.send`` and is not read from ``prime.db``.
 
 from __future__ import annotations
 
-from praxis_prime.tui.sanitize import sanitize
+from praxis_prime.sanitize import sanitize
 
 DRAFT = ""
 

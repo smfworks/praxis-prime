@@ -12,6 +12,7 @@ import sys
 from collections.abc import Callable
 
 from praxis_prime.gateway.client import Endpoint, GatewayError
+from praxis_prime.sanitize import sanitize as _sanitize
 from praxis_prime.tui.gateway import NOT_RUNNING, TuiGateway, resolve_profile
 from praxis_prime.tui.sessions import SessionBook
 
@@ -46,7 +47,7 @@ def run_tui(
     try:
         gateway = TuiGateway.connect(endpoint, profile=profile)
     except (OSError, GatewayError, TimeoutError) as exc:
-        print(f"praxis-prime tui: {exc}", file=sys.stderr)
+        print(f"praxis-prime tui: {_sanitize(exc)}", file=sys.stderr)
         return 1
     try:
         gateway.profile = resolve_profile(gateway.http, profile)
@@ -79,5 +80,12 @@ def _load_app():
 
 
 def _write_stdout(text: str) -> None:
-    sys.stdout.write(text)
-    sys.stdout.flush()
+    """Write text. A lone surrogate becomes a backslash escape, not a crash."""
+    data = text.encode("utf-8", errors="backslashreplace")
+    buffer = getattr(sys.stdout, "buffer", None)
+    if buffer is None:
+        sys.stdout.write(data.decode("ascii"))
+        sys.stdout.flush()
+        return
+    buffer.write(data)
+    buffer.flush()

@@ -107,7 +107,7 @@ def test_shared_card_sanitises_dynamic_fields() -> None:
     text = format_approval_card(item)
     _assert_visible(text)
     assert "rm -rf ~/" in text
-    assert "A text reply cannot approve this." in text
+    assert "A chat message cannot approve this." in text
     assert "Use Approve, Deny, or Always this session." in text
     assert "read-only" in format_approval_card({"mount": "read-only", "sandboxed": True})
 
