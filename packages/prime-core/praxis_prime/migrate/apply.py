@@ -208,7 +208,10 @@ def migrate_from_praxis(
     if unknown or not selected:
         raise MigrateError("only accepts memory, skills, packs, routines, history, settings")
     root = Path(source).expanduser()
-    if lstat_kind(root) is not StatKind.DIR:
+    kind = lstat_kind(root)
+    if kind is StatKind.SYMLINK:
+        raise MigrateError("refusing a symlinked praxis source")
+    if kind is not StatKind.DIR:
         raise MigrateError("praxis source is not a directory")
     data = Path(data_root)
     if _same_tree(root, data):

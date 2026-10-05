@@ -12,7 +12,12 @@ from pathlib import Path
 import pytest
 
 from praxis_prime.cli import main
-from praxis_prime.migrate.apply import migrate_from_praxis, render_summary, report_json
+from praxis_prime.migrate.apply import (
+    MigrateError,
+    migrate_from_praxis,
+    render_summary,
+    report_json,
+)
 from praxis_prime.migrate.source import file_sha256, source_fingerprint
 from praxis_prime.profiles.home import ProfileHome, create_profile
 from praxis_prime.profiles.migrate import MigrationBusy
@@ -588,6 +593,18 @@ def test_wal_rows_are_read_and_the_source_stays_unchanged(tmp_path: Path) -> Non
         db.close()
     assert "only in the wal" in stored
     assert "checkpointed" in stored
+
+
+def test_symlinked_source_is_refused(tmp_path: Path) -> None:
+    source = tmp_path / "praxis"
+    _build(source)
+    link = tmp_path / "linked-praxis"
+    link.symlink_to(source, target_is_directory=True)
+    before = source_fingerprint(source)
+    with pytest.raises(MigrateError, match="symlinked"):
+        _import(link, tmp_path / "data", tmp_path / "config")
+    assert source_fingerprint(source) == before
+    assert not (tmp_path / "data").exists()
 
 
 def test_only_memory_skips_skills_and_packs(tmp_path: Path) -> None:

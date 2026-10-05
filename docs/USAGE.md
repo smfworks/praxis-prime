@@ -184,7 +184,7 @@ Scopes default to `openid email profile` and must include `openid`. `--preset go
 
 ## Import from Praxis
 
-`praxis-prime migrate --from-praxis` copies a SMF Praxis home into one profile. The source defaults to `~/.praxis` and is only read. Stop `praxis-primed` first. The command exits 1 when the daemon is running or when the profile database is open.
+`praxis-prime migrate --from-praxis` copies a SMF Praxis home into one profile. The source defaults to `~/.praxis` and is only read. A symlink at that path is refused; pass the real directory to `--source`. Stop `praxis-primed` first. The command exits 1 when the daemon is running or when the profile database is open.
 
 ```bash
 praxis-prime migrate --from-praxis --dry-run
