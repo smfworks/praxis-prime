@@ -242,14 +242,35 @@ class TuiGateway:
         self._next_try = 0.0
 
     @classmethod
-    def connect(cls, endpoint: Endpoint, *, profile: str = "") -> TuiGateway:
+    def connect(
+        cls,
+        endpoint: Endpoint,
+        *,
+        profile: str = "",
+        discover: Callable[[], Endpoint | None] | None = None,
+    ) -> TuiGateway:
+        """Connect once. Each later attempt calls ``discover`` for a fresh endpoint.
+
+        The token and socket path live in the runtime directory. A reconnect
+        that reused ``endpoint`` would keep a token the daemon has rotated.
+        """
         frames, http = _open_pair(endpoint)
+
+        def connector() -> tuple[GatewayFrames, LoopbackHttp]:
+            current = endpoint
+            if discover is not None:
+                found = discover()
+                if found is None:
+                    raise GatewayError("daemon is not running")
+                current = found
+            return _open_pair(current)
+
         return cls(
             frames,
             http,
             profile=profile,
             port=endpoint.port,
-            connector=lambda: _open_pair(endpoint),
+            connector=connector,
         )
 
     def close(self) -> None:
@@ -297,6 +318,9 @@ class TuiGateway:
             old = self.frames
             self.frames = frames
             self.http = http
+            port = getattr(http, "port", None)
+            if isinstance(port, int):
+                self.port = port
             self._connected = True
             self._backoff = 0.5
             self._next_try = 0.0

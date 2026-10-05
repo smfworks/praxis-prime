@@ -113,8 +113,8 @@ def test_connect_error_is_sanitised(
     def discover() -> Endpoint:
         return Endpoint("127.0.0.1", 1, "tok")
 
-    def boom(endpoint: Endpoint, *, profile: str = "") -> TuiGateway:
-        del endpoint, profile
+    def boom(endpoint: Endpoint, *, profile: str = "", discover: object = None) -> TuiGateway:
+        del endpoint, profile, discover
         raise GatewayError("nope\x1b]0;owned\x07")
 
     monkeypatch.setattr("praxis_prime.tui.TuiGateway.connect", boom)

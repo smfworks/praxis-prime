@@ -77,7 +77,7 @@ The card heading is `Approval needed: <tool> <id>`, then risk, sandbox, the host
 
 Text from the daemon (chat, the timeline, cards, session titles, status, and errors) is sanitised before it is drawn. ESC, other C0 controls, DEL, and C1 are shown as `\xHH`. Format characters, bidi controls, zero-width characters, hangul fillers, variation selectors, tags, and lone surrogates are shown as `<U+XXXX>`. At most two combining marks stay on a base character.
 
-Nothing is approved unless you Tab to Confirm and press Enter, or you send the matching `--plain` command. `a`, `s`, and `d` do not decide while you are typing. Those three strings are the only decisions the TUI sends. They use the same gateway `approvals.decide` path as the web app and Telegram, and the daemon writes the same audit row. If the daemon connection drops, including a closed socket, the status line says `disconnected, retrying` and the client reconnects with backoff. `--plain` retries that connect before the next send. A failed send clears the busy flag. A decision that fails after it was queued is reported and can be sent again.
+Nothing is approved unless you Tab to Confirm and press Enter, or you send the matching `--plain` command. `a`, `s`, and `d` do not decide while you are typing. Those three strings are the only decisions the TUI sends. They use the same gateway `approvals.decide` path as the web app and Telegram, and the daemon writes the same audit row. If the daemon connection drops, including a closed socket, the status line says `disconnected, retrying` and the client reads `gateway.token` and the socket path again, then reconnects with backoff. `--plain` retries that connect before the next send. A failed send clears the busy flag. A decision that fails after it was queued is reported and can be sent again.
 
 Sessions on this screen are the ones opened in this visit. `--session <id>` starts on that id. A new session keeps the earlier rows. Switching shows this visit's transcript for that id. The daemon has no session-list frame, so a later run does not reload old transcripts. Quitting does not cancel a turn the daemon is already running.
 
@@ -85,7 +85,7 @@ The colours come from `GET /v1/themes/active` and the stylesheet that response n
 
 ### Plain mode
 
-`praxis-prime tui --plain` is a linear transcript for screen readers. It does not take over the screen, draw boxes, or emit colour. New messages and approval cards are printed as lines. Assistant text is buffered to a newline, or to the end of the turn, and the `prime:` prefix is printed once per line. Text that arrived before a tool line or an approval card is printed first. The prompt is `> `. An empty line decides nothing. `/quit` and `/exit` return at once. If the socket closes, the next command retries the connect with backoff and prints `disconnected, retrying` until that succeeds.
+`praxis-prime tui --plain` is a linear transcript for screen readers. It does not take over the screen, draw boxes, or emit colour. New messages and approval cards are printed as lines. Assistant text is buffered to a newline, or to the end of the turn, and the `prime:` prefix is printed once per line. Text that arrived before a tool line or an approval card is printed first. The prompt is `> `. An empty line decides nothing. `/quit` and `/exit` return at once. If the socket closes, the next command reads the token again and retries the connect with backoff, and prints `disconnected, retrying` until that succeeds.
 
 | Input | Effect |
 |---|---|

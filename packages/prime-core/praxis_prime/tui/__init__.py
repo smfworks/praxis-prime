@@ -38,14 +38,15 @@ def run_tui(
     if discover is None:
         from praxis_prime.gateway.discover import discover as default_discover
 
-        endpoint = default_discover()
+        finder = default_discover
     else:
-        endpoint = discover()
+        finder = discover
+    endpoint = finder()
     if endpoint is None:
         sys.stderr.write(NOT_RUNNING)
         return 1
     try:
-        gateway = TuiGateway.connect(endpoint, profile=profile)
+        gateway = TuiGateway.connect(endpoint, profile=profile, discover=finder)
     except (OSError, GatewayError, TimeoutError) as exc:
         print(f"praxis-prime tui: {_sanitize(exc)}", file=sys.stderr)
         return 1
