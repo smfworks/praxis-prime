@@ -26,19 +26,43 @@ class TokenUnreadable(OSError):
 
 
 def load_or_create_token(path: Path) -> str:
-    """Read the token file, or create one. The file mode is forced to 0600."""
+    """Read the token file, or create one. The file mode is forced to 0600.
+
+    The open uses ``O_NOFOLLOW``. A symlink raises ``TokenUnreadable`` and is
+    left in place. A regular file this user owns is read, then ``fchmod``
+    tightens a looser mode. The error does not include the token.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
         os.chmod(path.parent, 0o700)
     except OSError:
         pass
-    if path.is_file():
-        token = path.read_text(encoding="utf-8").strip()
-        if token:
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags)
+    except FileNotFoundError:
+        descriptor = None
+    except OSError as exc:
+        raise TokenUnreadable() from exc
+    if descriptor is not None:
+        try:
+            info = os.fstat(descriptor)
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+                raise TokenUnreadable()
             try:
-                os.chmod(path, 0o600)
-            except OSError:
-                pass
+                blob = os.read(descriptor, _TOKEN_CAP + 1)
+            except OSError as exc:
+                raise TokenUnreadable() from exc
+            if stat.S_IMODE(info.st_mode) & 0o077:
+                os.fchmod(descriptor, 0o600)
+        finally:
+            os.close(descriptor)
+        if len(blob) > _TOKEN_CAP:
+            raise TokenUnreadable()
+        token = blob.decode("utf-8", errors="replace").strip()
+        if token:
             return token
     token = secrets.token_urlsafe(32)
     _write_private(path, token)

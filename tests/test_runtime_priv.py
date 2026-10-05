@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from praxis_prime.gateway.auth import TokenUnreadable, read_token
+from praxis_prime.gateway.auth import TokenUnreadable, load_or_create_token, read_token
 from praxis_prime.paths import RuntimeDirError, ensure_private_runtime, runtime_dir
 
 _SECRET = "super-secret-token"
@@ -70,6 +70,27 @@ def test_read_token_rejects_other_owner(tmp_path: Path, monkeypatch: pytest.Monk
         read_token(path)
     assert _SECRET not in str(caught.value)
     assert _SECRET not in repr(caught.value)
+
+
+def test_load_or_create_token_does_not_follow_a_symlink(tmp_path: Path) -> None:
+    real = tmp_path / "real"
+    _write_token(real, 0o644)
+    link = tmp_path / "gateway.token"
+    link.symlink_to(real)
+    with pytest.raises(TokenUnreadable) as caught:
+        load_or_create_token(link)
+    assert _SECRET not in str(caught.value)
+    assert real.read_text(encoding="utf-8") == _SECRET + "\n"
+    assert stat.S_IMODE(real.stat().st_mode) == 0o644
+    assert link.is_symlink()
+
+
+def test_load_or_create_token_tightens_a_regular_file(tmp_path: Path) -> None:
+    path = tmp_path / "gateway.token"
+    _write_token(path, 0o644)
+    assert load_or_create_token(path) == _SECRET
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert load_or_create_token(path) == _SECRET
 
 
 def test_daemon_runtime_dir_error_has_no_traceback(
