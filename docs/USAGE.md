@@ -48,6 +48,8 @@ praxis-prime tui --profile default --session <id>
 
 `praxis-prime tui` needs a running daemon. It is a gateway client: the same loopback WebSocket and the same bearer token as the CLI (`gateway.token`). There is no `--local` mode. If `praxis-primed` is not running, the command prints how to start it and, when no provider is chosen yet, points at `praxis-prime setup` or the web wizard at `http://127.0.0.1:18790/`. A connect or auth failure prints that error. It does not claim the provider is missing.
 
+The full-screen UI is the optional extra `praxis-prime[tui]` (`pip install 'praxis-prime[tui]'`). Without Textual, `praxis-prime tui` prints that install line and exits. `praxis-prime tui --plain` does not import Textual.
+
 The screen is three columns: sessions, chat with a composer, and the timeline stacked with the approval card and the pending list. A status line and a key footer sit at the edges. A banner appears when the daemon reports that inference is not ready. Chat sends are refused until a provider is configured and verified. Approvals still work. `praxis-prime setup` remains the interactive CLI wizard.
 
 | Key | Effect |
@@ -56,40 +58,46 @@ The screen is three columns: sessions, chat with a composer, and the timeline st
 | F2 | Focus the timeline |
 | F3 | Focus approvals |
 | F4 | Focus sessions |
-| Enter | In the composer, send. On a session, switch. On an approval, show the card. Enter never approves. |
-| a | Approve once (`allow_once`), when the approval list is focused |
-| s | Approve for this session (`allow_session`) |
-| d | Deny |
+| Enter | In the composer, send. On a session, switch. On an approval, show the card. Enter never approves. In the confirm dialog, Enter cancels. |
+| a, then ctrl+y | Approve once (`allow_once`), when the approval list is focused. `a` opens a dialog that names the id, tool, and action. Cancel is focused. ctrl+y confirms. |
+| s, then ctrl+u | Always allow (`allow_session`) in the approval's session, or for this daemon process when that session is empty. |
+| d, then ctrl+x | Deny. `d` opens the same dialog. ctrl+x confirms. |
 | n | New session, when the session list is focused |
-| Ctrl+N | New session from anywhere |
-| ? | Key help. Ignored while the composer is focused. |
+| Ctrl+N | New session from anywhere. A line already sent from the draft is kept. |
+| ? or ctrl+? | Key help. ctrl+? also works while the composer is focused. |
 | Ctrl+Q | Quit |
 
-Nothing is approved unless you press `a`, `s`, or `d`, or you send the matching `--plain` command. Those three strings are the only decisions the TUI sends. They use the same gateway `approvals.decide` path as the web app and Telegram, and the daemon writes the same audit row.
+The card on screen is the highlighted approval, kept by id. A new card does not move that highlight. If the highlighted id leaves the list, nothing is selected and the decision keys do nothing. Each id is sent once. Holding the key does not send it again. Typed text in the approvals pane is not a command.
+
+The card heading is `Approval needed: <tool> <id>`, then risk, sandbox, the host warning, the mount, the session and the requester, then the action and the reason. Newlines inside a field are shown as ⏎. The decision keys stay off until the whole card fits, or until you scroll it to the end.
+
+Text from the daemon (chat, the timeline, cards, session titles, status, and errors) is sanitised before it is drawn. ESC, other C0 controls, DEL, and C1 are shown as `\xHH`. Bidi overrides and zero-width characters are dropped.
+
+Nothing is approved unless you complete that confirm step, or you send the matching `--plain` command. Those three strings are the only decisions the TUI sends. They use the same gateway `approvals.decide` path as the web app and Telegram, and the daemon writes the same audit row. If the daemon connection drops, the status line says `disconnected, retrying` and the client reconnects with backoff. A failed send clears the busy flag.
 
 Sessions on this screen are the ones opened in this visit. `--session <id>` starts on that id. A new session keeps the earlier rows. Switching shows this visit's transcript for that id. The daemon has no session-list frame, so a later run does not reload old transcripts. Quitting does not cancel a turn the daemon is already running.
 
-The colours come from `GET /v1/themes/active` and the stylesheet that response names, including System (Omarchy). The TUI does not read the Omarchy theme file. The palette is the theme engine's checked colours. A palette that fails WCAG 2.2 AA falls back to `smf.praxis`. `NO_COLOR` uses the terminal's ANSI theme and does not register RGB colours. When the active theme mode is system, `COLORFGBG` picks light (background 7 or 15) or dark.
+The colours come from `GET /v1/themes/active` and the stylesheet that response names, including System (Omarchy). The TUI does not read the Omarchy theme file. The palette is the theme engine's checked colours. A palette that fails WCAG 2.2 AA falls back to `smf.praxis`. Each palette is registered under its own theme name, so a live change repaints. `NO_COLOR` keeps that RGB theme. Textual's own filter then drops the colours, so the cells are not painted black on black. When the active theme mode is system, `COLORFGBG` picks light (background 7 or 15) or dark.
 
 ### Plain mode
 
-`praxis-prime tui --plain` is a linear transcript for screen readers. It does not take over the screen, draw boxes, or emit colour. New messages and approval cards are printed as lines. The prompt is `> `. An empty line decides nothing.
+`praxis-prime tui --plain` is a linear transcript for screen readers. It does not take over the screen, draw boxes, or emit colour. New messages and approval cards are printed as lines. Assistant text is buffered to a newline, or to the end of the turn, and the `prime:` prefix is printed once per line. The prompt is `> `. An empty line decides nothing. `/quit` and `/exit` return at once.
 
 | Input | Effect |
 |---|---|
 | `/help` | List commands |
-| `/quit` or `/exit` | Leave |
+| `/quit` or `/exit` | Leave immediately |
 | `/sessions` | List sessions opened in this visit |
 | `/session <id>` | Switch. An unknown id is added as "resumed". |
-| `/new` | Start an empty transcript and keep the earlier rows |
+| `/new` | Start an empty transcript and keep the earlier rows, including a line already sent from the draft |
 | `/approvals` | List pending cards |
 | `/timeline` | Print the activity lines for this visit |
 | `/approve <id>` | Approve once |
-| `/session-approve <id>` | Approve for this session |
+| `/session-approve <id>` | Always allow in that approval's session, or for this daemon process when the session is empty |
 | `/deny <id>` | Deny |
 | any other non-empty line | Send as chat |
 
-A decision during a turn is queued and sent once on the gateway, the same way the full-screen keys are. Other typed lines wait until that turn finishes.
+A decision command during a turn is sent then. The command names the id. Other typed lines wait until that turn finishes. Quitting does not cancel a turn the daemon is already running.
 
 ## Approvals
 

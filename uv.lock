@@ -488,7 +488,6 @@ dependencies = [
     { name = "cryptography" },
     { name = "joserfc" },
     { name = "pyotp" },
-    { name = "textual" },
     { name = "tinycss2" },
     { name = "webauthn" },
 ]
@@ -501,6 +500,10 @@ dev = [
     { name = "hatchling" },
     { name = "pytest" },
     { name = "ruff" },
+    { name = "textual" },
+]
+tui = [
+    { name = "textual" },
 ]
 
 [package.metadata]
@@ -513,11 +516,12 @@ requires-dist = [
     { name = "pyotp", specifier = ">=2.9.0,<3" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.3" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.8" },
-    { name = "textual", specifier = ">=8.2,<9" },
+    { name = "textual", marker = "extra == 'dev'", specifier = ">=8.2,<9" },
+    { name = "textual", marker = "extra == 'tui'", specifier = ">=8.2,<9" },
     { name = "tinycss2", specifier = ">=1.4,<2" },
     { name = "webauthn", specifier = ">=3.0.0,<4" },
 ]
-provides-extras = ["browser", "dev"]
+provides-extras = ["browser", "dev", "tui"]
 
 [[package]]
 name = "pyasn1"

@@ -28,13 +28,13 @@ dependencies = [
   "cryptography>=49,<51",
   "joserfc>=1.6,<2",
   "pyotp>=2.9.0,<3",
-  "textual>=8.2,<9",
   "tinycss2>=1.4,<2",
   "webauthn>=3.0.0,<4",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.3", "ruff>=0.8", "hatchling>=1.26"]
+tui = ["textual>=8.2,<9"]
+dev = ["pytest>=8.3", "ruff>=0.8", "hatchling>=1.26", "textual>=8.2,<9"]
 browser = ["playwright>=1.48"]
 
 [project.urls]

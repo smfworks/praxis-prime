@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 import tarfile
+import tomllib
 import zipfile
 from contextlib import chdir
 from pathlib import Path
@@ -39,12 +40,19 @@ def test_resource_texts_override_the_source_tree(monkeypatch):
     assert loaded[0].source.startswith("praxis_prime/_data/packs/compliance/")
 
 
+def test_textual_is_an_optional_extra() -> None:
+    project = tomllib.loads((_REPO / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+    required = project["dependencies"]
+    extras = project["optional-dependencies"]
+    assert all(not item.startswith("textual") for item in required)
+    assert extras["tui"] == ["textual>=8.2,<9"]
+    assert "textual>=8.2,<9" in extras["dev"]
+
+
 def test_wheel_and_sdist_ship_compliance_packs(tmp_path: Path):
     from hatchling.build import build_sdist, build_wheel
 
-    expected = sorted(
-        path.name for path in (_REPO / "packs" / "compliance").glob("*.toml")
-    )
+    expected = sorted(path.name for path in (_REPO / "packs" / "compliance").glob("*.toml"))
     assert "hipaa.toml" in expected
     sdist_dir = tmp_path / "sdist"
     wheel_dir = tmp_path / "wheel"

@@ -141,6 +141,7 @@ No TypeSafe source is vendored in `praxis_prime.decide`.
 | mdurl | MIT | Transitive dependency of markdown-it-py. No source is copied into this repository. |
 | platformdirs | MIT | Transitive dependency of textual. No source is copied into this repository. |
 | linkify-it-py | MIT | Transitive dependency of markdown-it-py. No source is copied into this repository. |
+| pygments | BSD-2-Clause | Transitive dependency of rich. No source is copied into this repository. |
 
 ## Bundled fonts
 
