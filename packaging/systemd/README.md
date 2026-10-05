@@ -21,3 +21,5 @@ praxis-prime service uninstall
 | `praxis-prime-decide.timer` | Nightly Decision Engine recalibration. |
 
 `loginctl enable-linger` stays documented and off by default. Do not enable linger from a package script.
+
+The `.deb` and the AUR `praxis-prime-git` package copy these units to `/usr/lib/systemd/user/`. They do not enable the units and they do not enable linger. `praxis-prime service install` is still the command that enables the daemon for a user.

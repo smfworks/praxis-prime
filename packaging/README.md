@@ -1,14 +1,14 @@
 # Packaging
 
-Placeholders for the layout in ARCHITECTURE §27. No package is built or published by CI.
+Local installers live next to the layout in ARCHITECTURE §27. Nothing here is published. There is no APT repository and no AUR submission. `get.smfworks.com` and `apt.smfworks.com` are not live.
 
-| Path | What it will become |
+| Path | What it is |
 |---|---|
-| `deb/` | Debian source package (`debian/` control files) |
-| `apt-repo/` | Signed APT repository notes |
-| `appimage/` | Tauri AppImage notes |
-| `aur/` | `praxis-prime-git` / `praxis-prime-bin` PKGBUILD notes |
-| `flatpak/` | Later UI-only Flatpak notes |
-| `systemd/` | `systemd --user` units |
+| `deb/` | Debian binary package. `deb/build-deb.sh` builds a `.deb` with `dpkg-deb` and no root. |
+| `aur/` | `praxis-prime-git` PKGBUILD. `praxis-prime-bin` is a note until a release tarball exists. |
+| `systemd/` | `systemd --user` units. Packages copy them to `/usr/lib/systemd/user/` and do not enable them. |
+| `apt-repo/` | Signed APT repository notes. Not a running repo. |
+| `appimage/` | Tauri AppImage notes. Not built. |
+| `flatpak/` | Later UI-only Flatpak notes. Not built. |
 
-The Python package installs `praxis-prime`, `pprime`, and `praxis-primed` with pip. That is the only install path that works today.
+A development checkout can still use pip. See the repository README.
