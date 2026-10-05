@@ -27,7 +27,16 @@ boundary onto the real data root. ``PRAXIS_PRIME_UI_DIR``,
 ``PRAXIS_PRIME_BUNDLED_SKILLS``, and ``PRAXIS_PRIME_STUB_REPLIES`` are
 not data directories. An inherited value under the real home is cleared
 so the suite keeps the bundled UI, the bundled skills, and the normal
-provider map.
+provider map. ``PRAXIS_PRIME_BWRAP_LOG`` is handled the same way: it is
+an append-only evidence log that CI points at ``$RUNNER_TEMP`` and reads
+after the run, so it passes through untouched unless it names a path
+under the real home.
+
+Playwright finds its browsers under ``$XDG_CACHE_HOME/ms-playwright``
+(or ``~/.cache/ms-playwright``). ``real_playwright_browsers`` records that
+folder, or an inherited ``PLAYWRIGHT_BROWSERS_PATH``, before isolation,
+and ``isolate_user_dirs`` sets ``PLAYWRIGHT_BROWSERS_PATH`` to it so the
+browser tests still find the installed Chromium.
 """
 
 from __future__ import annotations
@@ -45,7 +54,6 @@ _INHERITED_PATH_ENV = {
     "PRAXIS_PRIME_SECRETS_FILE": "secrets.env",
     "PRAXIS_PRIME_WORKER_DATA": "worker-data",
     "PRAXIS_PRIME_OMARCHY_THEME": "omarchy-theme.json",
-    "PRAXIS_PRIME_BWRAP_LOG": "bwrap.log",
 }
 
 # Not base directories. Drop an inherited path that still names the real home.
@@ -53,6 +61,8 @@ _CLEAR_UNDER_HOME = (
     "PRAXIS_PRIME_UI_DIR",
     "PRAXIS_PRIME_BUNDLED_SKILLS",
     "PRAXIS_PRIME_STUB_REPLIES",
+    # Append-only CI evidence log, read by ci.yml after pytest exits.
+    "PRAXIS_PRIME_BWRAP_LOG",
 )
 
 
@@ -100,11 +110,27 @@ def real_user_dirs() -> RealUserDirs:
     )
 
 
+@pytest.fixture(scope="session")
+def real_playwright_browsers() -> str:
+    """Record where Playwright keeps its browsers, before isolation.
+
+    An inherited ``PLAYWRIGHT_BROWSERS_PATH`` wins. Otherwise use the
+    folder Playwright would pick on Linux from the real cache directory.
+    """
+    inherited = os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "").strip()
+    if inherited:
+        return inherited
+    cache = os.environ.get("XDG_CACHE_HOME", "").strip()
+    cache_root = Path(cache) if cache else _resolved_home() / ".cache"
+    return str(cache_root / "ms-playwright")
+
+
 @pytest.fixture(autouse=True)
 def isolate_user_dirs(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     real_user_dirs: RealUserDirs,
+    real_playwright_browsers: str,
 ) -> Path:
     """Point HOME and the XDG base directories at ``tmp_path``."""
     root = tmp_path / "isolate"
@@ -125,6 +151,8 @@ def isolate_user_dirs(
     monkeypatch.setenv("XDG_STATE_HOME", str(state))
     monkeypatch.setenv("XDG_CACHE_HOME", str(cache))
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(runtime))
+    # Keep the installed browsers reachable after XDG_CACHE_HOME moves.
+    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", real_playwright_browsers)
 
     # Both variables together freeze a process-wide profile boundary.
     # Clear the profile first, then move a data root that was inherited.

@@ -24,14 +24,16 @@ def test_runtime_and_project_dirs(tmp_path):
 
 
 def test_resolved_dirs_stay_off_the_real_home(real_user_dirs):
-    """Fail if a base directory resolves under the home captured before isolation.
+    """Fail if a base directory resolves into the real praxis-prime folders.
 
     ``real_user_dirs`` is recorded in ``tests/conftest.py`` before
     ``isolate_user_dirs`` remaps HOME and the XDG variables. This test
     runs after that remap, and ``data_dir()`` with no argument reads the
-    remapped environment. A path under the captured home, or still equal
-    to the pre-isolation directory, means a CLI test can open the user's
-    ``prime.db``. Runtime is included so the shared
+    remapped environment. A path equal to, or under, one of the
+    pre-isolation data, config, state, cache, or runtime folders means a
+    CLI test can open the user's ``prime.db``. Being under the real home
+    alone is not a failure: pytest's basetemp can live there (for
+    example ``TMPDIR=~/tmp``). Runtime is included so the shared
     ``/tmp/praxis-prime-<uid>`` fallback cannot pass just because it sits
     outside the home directory.
     """
@@ -52,8 +54,11 @@ def test_resolved_dirs_stay_off_the_real_home(real_user_dirs):
     }
     for name, path in current.items():
         resolved = path.resolve()
-        assert not resolved.is_relative_to(home), f"{name} {resolved} is under {home}"
         assert resolved != captured[name], f"{name} still uses {resolved}"
+        for real_name, real_path in captured.items():
+            assert not resolved.is_relative_to(real_path), (
+                f"{name} {resolved} is under the real {real_name} folder {real_path}"
+            )
     assert Path(os.environ["HOME"]).resolve() != home
     assert data_dir() == Path(os.environ["XDG_DATA_HOME"]) / "praxis-prime"
     assert config_dir() == Path(os.environ["XDG_CONFIG_HOME"]) / "praxis-prime"
