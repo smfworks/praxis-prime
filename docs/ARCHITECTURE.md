@@ -735,7 +735,7 @@ Each dial is a **bundle of controls**: data classes, retention, residency, egres
 | **State data-security** | NY SHIELD, MA 201 CMR 17.00 WISP | **Reuse** Praxis. |
 | **OWASP Agentic Top-10** | always-on report (not a dial) | **Reuse** Praxis `docs/OWASP_AGENTIC_COVERAGE.md` mapping. |
 
-> **Praxis regulated packs are bundled (approved by Michael, 2026-09-29).** Praxis 0.29.0 (2026-07-19) moved the regulated verticals (legal/law firm, medical/medical office, behavioral health, school system, homeschool, forensic) out of the open-core wheel into private repos (for example `praxis-legal`, `praxis-medical`), which register through the `praxis.verticals` entry point. Praxis Prime brings them into its own `packs/` tree and may modify them. Licensing is covered in §32; Michael still needs to confirm what license those private repos currently carry.
+> **Praxis regulated packs ship as data (approved by Michael, 2026-09-29; vendored 2026-10-05).** Praxis 0.29.0 (2026-07-19) moved the regulated verticals (legal/law firm, medical/medical office, behavioral health, school system, homeschool, forensic) out of the open-core wheel. The six public repositories are MIT, Copyright (c) 2026 SMF Works. Their `pack.json` and `knowledge.md` live under `packs/regulated/` and in the wheel. Python modules and dashboard JavaScript are not included. Compliance dials stay off. See `docs/PACKS-LEGACY.md` and §32.
 
 ### 17.1 Policy-as-code example
 
@@ -1061,8 +1061,8 @@ praxis-prime/                       # github.com/smfworks/praxis-prime (proposed
 ├─ packs/
 │  ├─ general/                      # MIT, always bundled
 │  ├─ jurisdictions/                # 13 Praxis states + nc.py (NEW) — MIT
-│  └─ regulated/                    # Praxis regulated packs (legal, medical, behavioral_health,
-│     └─ LICENSE                    #   school_system, homeschool, forensic) — license per §32
+│  └─ regulated/                    # six MIT packs as data (pack.json, knowledge.md);
+│     └─ LICENSE                    #   Python and dashboard JS excluded; dials off (§32)
 ├─ plugins/                         # first-party plugins
 │  ├─ channels/{telegram,signal,email,slack,discord,webhook,...}
 │  ├─ providers/{openai,anthropic,xai,ollama,llamacpp,vllm,...}
@@ -1194,7 +1194,7 @@ curl -fsSL https://get.smfworks.com/praxis-prime/install.sh | bash      # URL is
 sudo install -d -m 0755 /etc/apt/keyrings
 curl -fsSL https://apt.smfworks.com/key.gpg | sudo tee /etc/apt/keyrings/smfworks.gpg >/dev/null
 echo "deb [signed-by=/etc/apt/keyrings/smfworks.gpg] https://apt.smfworks.com stable main" | sudo tee /etc/apt/sources.list.d/praxis-prime.list
-sudo apt update && sudo apt install praxis-prime praxis-prime-desktop     # praxis-prime-voice, praxis-prime-packs optional
+sudo apt update && sudo apt install praxis-prime praxis-prime-desktop     # praxis-prime-voice optional; regulated pack data is in praxis-prime
 systemctl --user enable --now praxis-primed
 ```
 
@@ -1327,7 +1327,7 @@ Registering or removing a passkey, enrolling TOTP, and disabling TOTP over HTTP 
 | Persona-only juries are correlated (one base model) | overconfident consensus | require ≥2 base models where possible; weight judges by measured Brier score; the Skeptic always seated for safety templates |
 | Judge and model licenses (Llama, Gemma custom terms) | redistribution limits | download on first run after consent; prefer Apache/MIT models (Qwen3, Phi-4-mini, ModernBERT, DeBERTa) — verify each |
 | NC and other state law data partly unverified (S/U rows) or changing (2025–26 bills) | incorrect guidance | per-field confidence and source URL; watchlist; counsel review before enforce mode is marketed |
-| Praxis regulated packs: license status in the private repos unknown; earlier MIT-released copies exist | relicensing confusion | confirm repo licenses; separate pack directory and package; NOTICE explaining history (§32) |
+| Further private Praxis pack repos, if any remain besides the six public MIT packs | license unknown | the six public packs are MIT and ship as data under `packs/regulated/`; do not copy a private tree until its license is confirmed (§32) |
 | Wayland input injection is fragmented (portal support varies; uinput permissions; ydotool AGPL) | computer use unreliable | virtual desktop by default; portal-first; `praxis-prime doctor`; AGPL tools only as external binaries |
 | Always-on mic privacy | trust | separate service, local-only, indicators, hard mute, off by default |
 | Tauri/WebKitGTK rendering or Wayland quirks | desktop bugs | the SPA also runs in a browser; Electron fallback kept viable |
@@ -1341,7 +1341,7 @@ Registering or removing a passkey, enrolling TOTP, and disabling TOTP over HTTP 
 2. **Tauri 2 vs Electron.** Tauri is recommended; Electron is the fallback (and what Hermes's desktop uses).
 3. **Repo strategy:** a new `smfworks/praxis-prime` repo that vendors Praxis's governance modules (recommended), or evolve `smf-praxis` in place into v1.0? And should `praxis-agent` continue as the lightweight edition or be retired?
 4. **Build on Hermes (fork or extend) vs our own kernel with attributed reuse.** Recommended: our own kernel, grown from Praxis, plus attributed modules from Hermes and Swarm.
-5. **Pack license choice** (§32): MIT for everything, or a separate source-available license for the regulated packs? Also, **please confirm the current LICENSE of the private pack repos** (`praxis-legal`, `praxis-medical`, …) and that SMF Works holds all rights in them.
+5. **Pack license choice** (§32): decided 2026-10-05. The six public packs are MIT and ship as data in the main package under `packs/regulated/`. Further private pack repositories stay out until their licenses are confirmed.
 6. **"HBHC"** (Swarm 2.0 ADR-0001, Phase 2 "cryptographic revocation"): what does it stand for, and should it shape spawn tokens and judge identities?
 7. **Minimum hardware target for the Decision Engine:** must the full Jury run on CPU-only laptops, or is an 8 GB GPU the reference machine?
 8. **Legal review:** who reviews the NC pack (S/U rows) and the Praxis state-pack data before enforce mode is recommended to customers?
@@ -1355,18 +1355,17 @@ Registering or removing a passkey, enrolling TOTP, and disabling TOTP over HTTP 
 
 **Recommendation.**
 - **Core: MIT**, under the `smfworks/praxis-prime` repo, © SMF Works.
-- **Regulated packs: their own directory and package**, so their license can be chosen independently of the core:
-  - directory: `packs/regulated/` with its own `LICENSE`;
-  - package: `praxis-prime-packs` (Debian and AUR: `praxis-prime-packs`);
-  - loading: through the plugin entry point `praxis_prime.packs`, the successor to Praxis's `praxis.verticals`.
+- **Regulated packs: data in the main package.** On 2026-10-05 Michael decided to ship the six public MIT packs as data inside `praxis-prime`, under `packs/regulated/`. There is no separate `praxis-prime-packs` package. The directory keeps its own `LICENSE` (MIT, SMF Works). Each pack directory also keeps the upstream LICENSE and NOTICE. The loader reads `pack.json` and `knowledge.md`. It does not import pack Python or serve dashboard JavaScript. Compliance dials stay off.
+
+  The earlier layout, kept here so the history stays readable, was a separate directory and package so the license could change later:
+  - directory: `packs/regulated/` with its own `LICENSE` (this is where the data now lives);
+  - the package name `praxis-prime-packs` is not used;
+  - loading: through `praxis_prime.packs`, as data. The old `praxis.verticals` entry points are not executed.
 
   The core never imports pack code directly.
 
 **Why SMF can do this.** SMF Works owns SMF Praxis (MIT © 2026 SMF Works) and its extracted regulated packs, so Michael can relicense them. Three caveats:
-1. **Confirm ownership and current license in the repos.**
-   - The public `smf-praxis` repo is MIT.
-   - The regulated packs have lived in **private repos** since Praxis 0.29.0 (2026-07-19), for example `praxis-legal` and `praxis-medical`; SECURITY.md and QUICKSTART.md refer to them.
-   - I could not see their LICENSE files. Michael should check each one, and confirm that every contributor (human or agent-operated account) assigned rights to SMF Works.
+1. **The six public repositories are MIT.** Checked 2026-10-05: `smfworks/smf-praxis-{homeschool,education,forensic,legal,medical,mbh}` are MIT, Copyright (c) 2026 SMF Works. Their data is under `packs/regulated/`. Any further private pack repository is still out of this tree until its license is confirmed. The public `smf-praxis` repo is also MIT. Release 0.29.0 (2026-07-19) had moved these verticals out of that wheel.
 2. **Earlier versions stay MIT.**
    - Before 0.29.0 the vertical code lived in the public MIT repo. `hybridagent/vertical_templates.py` and `hybridagent/jurisdictions/` are still there today.
    - Anyone who received those versions keeps MIT rights to them. A new license can only govern **new or modified** pack versions.
@@ -1403,7 +1402,7 @@ Registering or removing a passkey, enrolling TOTP, and disabling TOTP over HTTP 
 - **Identifiers:**
   - repo `smfworks/praxis-prime` (proposed)
   - Python distribution `praxis-prime`, import package `praxis_prime`
-  - Debian packages `praxis-prime`, `praxis-prime-desktop`, `praxis-prime-voice`, `praxis-prime-packs`
+  - Debian packages `praxis-prime` (includes the regulated pack data), `praxis-prime-desktop`, `praxis-prime-voice`
   - AUR `praxis-prime-bin` / `praxis-prime-git`
   - daemon `praxis-primed`; systemd `praxis-prime.service`, `praxis-prime-voice.service`, `praxis-prime-gateway@.service`, `praxis-prime-sweeper.timer`
   - XDG `~/.config/praxis-prime/`, `~/.local/share/praxis-prime/`, `~/.local/state/praxis-prime/`, `~/.cache/praxis-prime/`, socket `$XDG_RUNTIME_DIR/praxis-prime/prime.sock`

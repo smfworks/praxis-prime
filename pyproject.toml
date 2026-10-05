@@ -54,15 +54,18 @@ path = "packages/prime-core/praxis_prime/__init__.py"
 [tool.hatch.build.targets.wheel]
 packages = ["packages/prime-core/praxis_prime"]
 
-# Repo-root TOML is outside the import package. Force it into the wheel so
+# Repo-root pack data is outside the import package. Force it into the wheel so
 # importlib.resources can read it after a normal install. The sdist keeps the
-# same files at packs/compliance so a wheel built from the sdist still works.
+# same files at packs/compliance and packs/regulated so a wheel built from the
+# sdist still works.
 [tool.hatch.build.targets.wheel.force-include]
 "packs/compliance" = "praxis_prime/_data/packs/compliance"
+"packs/regulated" = "praxis_prime/_data/packs/regulated"
 "ui/dist" = "praxis_prime/_data/ui"
 
 [tool.hatch.build.targets.sdist.force-include]
 "packs/compliance" = "packs/compliance"
+"packs/regulated" = "packs/regulated"
 "ui/dist" = "ui/dist"
 
 [tool.uv]

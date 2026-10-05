@@ -14,8 +14,14 @@ from pathlib import Path
 
 from praxis_prime.audit.log import AuditLog
 from praxis_prime.packs.catalog import PUBLIC_PACKS, known_names, resolve_public
-from praxis_prime.packs.install import install_pack, installed_index, list_installed
-from praxis_prime.packs.legacy import PackError
+from praxis_prime.packs.install import (
+    builtin_pack_dir,
+    bundled_commit,
+    install_pack,
+    installed_index,
+    list_installed,
+)
+from praxis_prime.packs.legacy import PackError, load_legacy_pack
 from praxis_prime.packs.model import PERSONA_BOUNDARY, LegacyPack
 from praxis_prime.paths import data_dir
 from praxis_prime.profiles.home import resolve_runtime_layout
@@ -45,7 +51,7 @@ def add_packs_parsers(commands: argparse._SubParsersAction[argparse.ArgumentPars
     info = sub.add_parser(
         "info",
         parents=[common],
-        help="Show the mapping report for an installed pack.",
+        help="Show the mapping report for an installed or built-in pack.",
     )
     info.add_argument("name", help="Pack name or catalog alias.")
 
@@ -98,17 +104,25 @@ def _format_list(data: Path) -> str:
         lines.append("  (none)")
     for pack in installed:
         commit = pack.provenance.commit[:12] if pack.provenance.commit else "-"
-        lines.append(
-            f"  {pack.name}  {pack.version}  {pack.provenance.license}  commit {commit}"
-        )
+        lines.append(f"  {pack.name}  {pack.version}  {pack.provenance.license}  commit {commit}")
     lines.append("")
-    lines.append("Public MIT packs:")
+    lines.append("Built-in regulated packs:")
     have = {pack.name for pack in installed}
     for public in PUBLIC_PACKS:
-        state = "installed" if public.pack_name in have or public.key in have else "not installed"
+        present = public.pack_name in have or public.key in have
+        bundled = builtin_pack_dir(public) is not None
+        if bundled and present:
+            state = "built in, installed"
+        elif bundled:
+            state = "built in"
+        elif present:
+            state = "installed"
+        else:
+            state = "not installed"
         lines.append(f"  {public.key}  {public.pack_name}  {public.license}  {state}")
     lines.append("")
     lines.append("Install with: praxis-prime packs install <name|path|git-url>")
+    lines.append("A built-in name copies the bundled pack. It does not clone git.")
     return "\n".join(lines)
 
 
@@ -119,6 +133,16 @@ def _format_info(data: Path, name: str) -> str:
         public = resolve_public(name)
         if public is not None and public.pack_name in index:
             pack = index[public.pack_name]
+        elif public is not None:
+            bundled = builtin_pack_dir(public)
+            if bundled is not None:
+                pack = load_legacy_pack(
+                    bundled,
+                    wanted_name=public.pack_name,
+                    repo=public.repo,
+                    commit=bundled_commit(bundled),
+                    source="built-in",
+                )
     if pack is None:
         known = ", ".join(known_names())
         raise PackError(f"pack {name!r} is not installed. Known names: {known}")

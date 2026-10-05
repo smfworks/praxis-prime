@@ -271,9 +271,7 @@ def find_manifests(root: Path) -> list[Path]:
     base = Path(root)
     for dirpath, dirnames, filenames in os.walk(base):
         dirnames[:] = [
-            name
-            for name in dirnames
-            if name not in _SKIP_DIRS and not name.startswith(".")
+            name for name in dirnames if name not in _SKIP_DIRS and not name.startswith(".")
         ]
         if "pack.json" in filenames:
             found.append(Path(dirpath) / "pack.json")
@@ -375,9 +373,7 @@ def _scan_tree(root: Path) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str,
     modules: list[str] = []
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [
-            name
-            for name in dirnames
-            if name not in _SKIP_DIRS and not name.startswith(".")
+            name for name in dirnames if name not in _SKIP_DIRS and not name.startswith(".")
         ]
         current = Path(dirpath)
         for name in filenames:
@@ -406,9 +402,7 @@ def _warn_assets(
     warnings: list[PackWarning],
 ) -> None:
     for relative in javascript:
-        message = (
-            f"Ignored pack JavaScript {relative}; dashboard code is not loaded or served"
-        )
+        message = f"Ignored pack JavaScript {relative}; dashboard code is not loaded or served"
         logger.warning("%s", message)
         warnings.append(PackWarning("javascript_ignored", message))
     for relative in dashboard:
@@ -457,11 +451,7 @@ def _find_pyproject(root: Path) -> Path | None:
         raise PackError("refusing symlink pyproject.toml")
     if direct.is_file():
         return direct
-    matches = [
-        path
-        for path in root.glob("*/pyproject.toml")
-        if ".git" not in path.parts
-    ]
+    matches = [path for path in root.glob("*/pyproject.toml") if ".git" not in path.parts]
     for path in matches:
         if _is_symlink(path):
             raise PackError("refusing symlink pyproject.toml")
@@ -535,9 +525,7 @@ def _skills(
             name = _unique_skill(name, used)
         used.add(name)
         if name != original:
-            warnings.append(
-                PackWarning("skill_renamed", f"Skill {original!r} is loaded as {name}")
-            )
+            warnings.append(PackWarning("skill_renamed", f"Skill {original!r} is loaded as {name}"))
         trigger = _one_line(_text(item.get("trigger"))) or f"Skill {name} from pack {pack_name}"
         body = item.get("body")
         body_text = body if isinstance(body, str) else ""

@@ -1,8 +1,10 @@
 """Install a legacy pack as data.
 
-A local directory is copied. A git URL is cloned with ``git clone --depth 1``
-and no pack script is run. JavaScript, dashboard files, and Python modules
-are recorded and left out of the install directory.
+A catalog name copies the built-in pack under ``packs/regulated`` (wheel
+path ``praxis_prime/_data/packs/regulated``) and does not clone git. A local
+directory is copied. A git URL is cloned with ``git clone --depth 1`` and no
+pack script is run. JavaScript, dashboard files, and Python modules are
+recorded and left out of the install directory.
 
 TODO: ARCHITECTURE §17 and §32. Addendum A §7.
 """
@@ -16,9 +18,11 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import tomllib
 import zipfile
 from collections.abc import Callable
 from dataclasses import dataclass, replace
+from importlib.resources import files
 from pathlib import Path
 
 from praxis_prime.audit.log import AuditLog
@@ -60,6 +64,70 @@ class InstalledPack:
 
 def vertical_packs_dir(data: Path) -> Path:
     return Path(data) / "vertical-packs"
+
+
+def bundled_regulated_root() -> Path | None:
+    """Built-in regulated pack directory, or None.
+
+    An installed wheel is read from ``praxis_prime/_data/packs/regulated``
+    through ``importlib.resources``. A source checkout that has not been
+    packaged still uses ``packs/regulated``, found by walking up from this
+    file. That is the same split ``compliance.packs.bundled_pack_dir`` uses
+    for ``packs/compliance``.
+    """
+    resource = _resource_regulated_root()
+    if resource is not None:
+        return resource
+    return _source_regulated_root()
+
+
+def builtin_pack_dir(public: PublicPack) -> Path | None:
+    """Filesystem directory of one built-in pack, or None."""
+    root = bundled_regulated_root()
+    if root is None:
+        return None
+    candidate = root / public.pack_name
+    manifest = candidate / "pack.json"
+    if manifest.is_file() and not manifest.is_symlink():
+        return candidate
+    return None
+
+
+def bundled_commit(directory: Path) -> str:
+    """Full commit recorded in ``SOURCE.toml``, or empty."""
+    path = Path(directory) / "SOURCE.toml"
+    if not path.is_file() or path.is_symlink():
+        return ""
+    try:
+        loaded = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError):
+        return ""
+    commit = loaded.get("commit", "")
+    if isinstance(commit, str):
+        return commit.strip()
+    return ""
+
+
+def _resource_regulated_root() -> Path | None:
+    root = files("praxis_prime").joinpath("_data", "packs", "regulated")
+    try:
+        if not root.is_dir():
+            return None
+    except (FileNotFoundError, NotADirectoryError, OSError, TypeError):
+        return None
+    candidate = root if isinstance(root, Path) else Path(str(root))
+    if not candidate.is_dir() or not any(candidate.glob("*/pack.json")):
+        return None
+    return candidate
+
+
+def _source_regulated_root() -> Path | None:
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        candidate = parent / "packs" / "regulated"
+        if candidate.is_dir() and any(candidate.glob("*/pack.json")):
+            return candidate
+    return None
 
 
 def install_pack(
@@ -173,6 +241,9 @@ def _stage(
         raise PackError(f"pack source is not a directory or zip: {source}")
     public = resolve_public(source)
     if public is not None:
+        bundled = builtin_pack_dir(public)
+        if bundled is not None:
+            return bundled.resolve(), public.repo, bundled_commit(bundled), public.pack_name
         dist_root = _materialize_distribution(public, tmp / "dist")
         if dist_root is not None:
             return dist_root, public.repo, "", public.pack_name

@@ -217,7 +217,7 @@ makepkg -si
 # praxis-prime omarchy install
 ```
 
-Planned later: `praxis-prime-desktop` (Tauri), `praxis-prime-voice`, `praxis-prime-packs`, an APT repository, and `praxis-prime-bin`. Unit files live under [packaging/systemd](packaging/systemd).
+The six regulated packs ship in the main package under [packs/regulated](packs/regulated). Dials stay off. There is no separate `praxis-prime-packs` package. Planned later: `praxis-prime-desktop` (Tauri), `praxis-prime-voice`, an APT repository, and `praxis-prime-bin`. Unit files live under [packaging/systemd](packaging/systemd).
 
 ### From this git checkout (development)
 
@@ -266,7 +266,7 @@ praxis-prime/
 └─ docs/
 ```
 
-The kernel subpackages (`loop`, `gateway`, `decide`, `swarm`, and the rest) match [ARCHITECTURE §24](docs/ARCHITECTURE.md). Each one points at the blueprint section that will fill it in. Upstream trees are not vendored.
+The kernel subpackages (`loop`, `gateway`, `decide`, `swarm`, and the rest) match [ARCHITECTURE §24](docs/ARCHITECTURE.md). Each one points at the blueprint section that will fill it in. Hermes, OpenClaw, and Omarchy are not vendored. The six regulated packs are the exception: their data lives under `packs/regulated/`.
 
 ## Credits
 
@@ -277,4 +277,4 @@ The local `.deb` and AUR packages bundle the locked PyPI runtime dependencies un
 
 MIT. Copyright (c) 2026 SMF Works. See [LICENSE](LICENSE).
 
-Hermes Agent, OpenClaw, and Omarchy belong to their authors. SMF Works wrote SMF Praxis and SMF Swarm 2.0. The six public MIT vertical packs are not vendored here. `praxis-prime packs install` loads them as data. See [docs/PACKS-LEGACY.md](docs/PACKS-LEGACY.md).
+Hermes Agent, OpenClaw, and Omarchy belong to their authors. SMF Works wrote SMF Praxis and SMF Swarm 2.0. The six public MIT vertical packs ship as data under [packs/regulated](packs/regulated). `praxis-prime packs install legal` copies that bundled data and does not clone git. Dials stay off. See [docs/PACKS-LEGACY.md](docs/PACKS-LEGACY.md).

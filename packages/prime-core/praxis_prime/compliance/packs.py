@@ -9,7 +9,8 @@ A file in ``~/.config/praxis-prime/packs`` or ``.prime/packs`` with the same
 pack id replaces the bundled one. Packs are starter policy, not legal advice.
 
 TODO: ARCHITECTURE §17 and §32. Vertical packs in the old ``pack.json``
-format load through ``praxis_prime.packs`` and are not copied into this tree.
+format load through ``praxis_prime.packs``. Their data ships under
+``packs/regulated``. This module does not load that data.
 """
 
 from __future__ import annotations
@@ -21,9 +22,7 @@ from pathlib import Path
 
 from praxis_prime.compliance.detectors import DetectorSpec
 
-_ACTIONS = frozenset(
-    {"block", "require_approval", "redact", "route_local", "egress_deny"}
-)
+_ACTIONS = frozenset({"block", "require_approval", "redact", "route_local", "egress_deny"})
 _STYLES = frozenset({"mask", "last4"})
 _BUNDLED: tuple[PolicyPack, ...] | None = None
 
@@ -127,9 +126,7 @@ def packs_for_dials(
     positions: dict[str, str],
 ) -> tuple[PolicyPack, ...]:
     active = {
-        dial_id
-        for dial_id, position in positions.items()
-        if position in {"monitor", "enforce"}
+        dial_id for dial_id, position in positions.items() if position in {"monitor", "enforce"}
     }
     return tuple(pack for pack in packs if pack.dial in active)
 
@@ -144,9 +141,7 @@ def parse_pack_text(text: str, source: str) -> tuple[PolicyPack, ...]:
         raise ValueError(f"{source} is not a TOML document")
     raw_pack = loaded.get("pack")
     if isinstance(raw_pack, list):
-        return tuple(
-            _one_pack(item, source) for item in raw_pack if isinstance(item, dict)
-        )
+        return tuple(_one_pack(item, source) for item in raw_pack if isinstance(item, dict))
     if isinstance(raw_pack, dict):
         body = dict(raw_pack)
         body.setdefault("detectors", loaded.get("detectors", []))
@@ -186,9 +181,7 @@ def _one_pack(raw: dict[str, object], source: str) -> PolicyPack:
         title=_text(raw.get("title")) or pack_id,
         disclaimer=disclaimer,
         legal_references=_strings(meta.get("legal_references")),
-        detectors=tuple(
-            _detector(item) for item in _rows(raw.get("detectors")) if _detector(item)
-        ),
+        detectors=tuple(_detector(item) for item in _rows(raw.get("detectors")) if _detector(item)),
         rules=tuple(_rule(item) for item in _rows(raw.get("rules")) if _rule(item)),
         retention_days=retention_days,
         required_events=_strings(audit.get("required_events")),

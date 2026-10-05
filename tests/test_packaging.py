@@ -49,6 +49,36 @@ def test_textual_is_an_optional_extra() -> None:
     assert "textual>=8.2,<9" in extras["dev"]
 
 
+_REGULATED_PACKS = (
+    "behavioral_health",
+    "forensic",
+    "homeschool",
+    "law_firm",
+    "medical_office",
+    "school_system",
+)
+
+_REGULATED_CHILD = """
+from praxis_prime.packs.install import bundled_regulated_root
+root = bundled_regulated_root()
+assert root is not None, "installed wheel has no regulated packs"
+text = str(root)
+assert "_data/packs/regulated" in text
+names = sorted(path.name for path in root.iterdir() if (path / "pack.json").is_file())
+print("\\n".join(names))
+"""
+
+
+def test_pyproject_force_includes_regulated_packs() -> None:
+    loaded = tomllib.loads((_REPO / "pyproject.toml").read_text(encoding="utf-8"))
+    targets = loaded["tool"]["hatch"]["build"]["targets"]
+    wheel = targets["wheel"]["force-include"]
+    sdist = targets["sdist"]["force-include"]
+    assert wheel["packs/regulated"] == "praxis_prime/_data/packs/regulated"
+    assert sdist["packs/regulated"] == "packs/regulated"
+    assert wheel["packs/compliance"] == "praxis_prime/_data/packs/compliance"
+
+
 def test_wheel_and_sdist_ship_compliance_packs(tmp_path: Path):
     from hatchling.build import build_sdist, build_wheel
 
@@ -65,6 +95,14 @@ def test_wheel_and_sdist_ship_compliance_packs(tmp_path: Path):
         names = archive.getnames()
     for filename in expected:
         assert any(name.endswith(f"packs/compliance/{filename}") for name in names)
+    for pack_name in _REGULATED_PACKS:
+        assert any(name.endswith(f"packs/regulated/{pack_name}/pack.json") for name in names)
+        assert any(name.endswith(f"packs/regulated/{pack_name}/knowledge.md") for name in names)
+    regulated_sdist = [
+        name for name in names if "/packs/regulated/" in name or name.endswith("/packs/regulated")
+    ]
+    for name in regulated_sdist:
+        assert not name.endswith((".py", ".js", ".mjs", ".wasm", ".css", ".html"))
 
     extract = tmp_path / "src"
     extract.mkdir()
@@ -79,6 +117,13 @@ def test_wheel_and_sdist_ship_compliance_packs(tmp_path: Path):
         archived = set(archive.namelist())
     for filename in expected:
         assert f"praxis_prime/_data/packs/compliance/{filename}" in archived
+    for pack_name in _REGULATED_PACKS:
+        assert f"praxis_prime/_data/packs/regulated/{pack_name}/pack.json" in archived
+        assert f"praxis_prime/_data/packs/regulated/{pack_name}/knowledge.md" in archived
+    regulated_wheel = [name for name in archived if "praxis_prime/_data/packs/regulated/" in name]
+    assert regulated_wheel
+    for name in regulated_wheel:
+        assert not name.endswith((".py", ".js", ".mjs", ".wasm", ".css", ".html"))
     for theme_id in (
         "smf.classical",
         "smf.dental",
@@ -121,6 +166,15 @@ def test_wheel_and_sdist_ship_compliance_packs(tmp_path: Path):
         env=env,
     )
     installed_ids = json.loads(completed.stdout)
+    regulated = subprocess.run(
+        [sys.executable, "-c", _REGULATED_CHILD],
+        check=True,
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert regulated.stdout.splitlines() == sorted(_REGULATED_PACKS)
     pack_module._BUNDLED = None
     checkout_ids = sorted(pack.id for pack in bundled_packs())
     assert installed_ids == checkout_ids

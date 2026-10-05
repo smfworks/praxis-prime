@@ -1,0 +1,39 @@
+repo = "https://github.com/smfworks/smf-praxis-legal.git"
+commit = "afc2340578138de71b9af6dc935dc288cf068fbe"
+source_path = "hybridagent_praxis_legal/packs/law_firm"
+license = "MIT"
+copyright = "Copyright (c) 2026 SMF Works"
+upstream_model_removed = "ollama-cloud/kimi-k2.7-code:cloud"
+
+# Copied into this directory: pack.json (model and provider keys removed),
+# knowledge.md, LICENSE, and NOTICE. Those four files are the pack data.
+# Praxis Prime does not import pack Python or serve pack JavaScript.
+# Porting the modules to Praxis plugins remains a follow-up.
+
+[[excluded]]
+path = "hybridagent_praxis_legal/modules, hybridagent_praxis_legal/personas, hybridagent_praxis_legal/__init__.py, hybridagent_praxis_legal/registration.py"
+reason = "Pack Python. Praxis Prime does not import it. Porting these modules to Praxis plugins remains a follow-up."
+
+[[excluded]]
+path = "hybridagent_praxis_legal/web/ (law_firm.css, law_firm.js)"
+reason = "Dashboard JavaScript and CSS. Praxis Prime does not load or serve pack JavaScript."
+
+[[excluded]]
+path = "pyproject.toml"
+reason = "Upstream package metadata and the praxis.verticals entry point. Not executed."
+
+[[excluded]]
+path = "scripts/"
+reason = "Upstream release scripts. Not pack data."
+
+[[excluded]]
+path = "tests/"
+reason = "Upstream tests. Not pack data."
+
+[[excluded]]
+path = "README.md"
+reason = "Upstream repository README. Not pack data."
+
+[[excluded]]
+path = ".gitignore"
+reason = "Upstream ignore file. Not pack data."

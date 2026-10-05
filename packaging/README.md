@@ -14,6 +14,8 @@ Local installers live next to the layout in ARCHITECTURE §27. Nothing here is p
 
 A development checkout can still use pip. See the repository README.
 
+The six regulated packs ship in the main package as wheel data (`packs/regulated` → `praxis_prime/_data/packs/regulated`). There is no `praxis-prime-packs` package. Compliance dials stay off.
+
 ## Regenerating hashed runtime requirements
 
 `packaging/requirements-runtime.txt` is the locked runtime set with hashes. The `.deb` build prefers `uv export` from `uv.lock` at build time. The pip fallback and the PKGBUILD install this file with `pip install --require-hashes`, then the project wheel with `--no-deps`. After `uv.lock` changes, regenerate the file from the repository root:
