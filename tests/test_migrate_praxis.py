@@ -534,6 +534,50 @@ def test_history_redacts_a_channel_thread_secret(tmp_path: Path) -> None:
     assert "ok" in stored
 
 
+def test_wal_rows_are_read_and_the_source_stays_unchanged(tmp_path: Path) -> None:
+    source = tmp_path / "praxis"
+    source.mkdir()
+    db_path = source / "praxis.db"
+    held = sqlite3.connect(db_path)
+    held.execute("PRAGMA journal_mode=WAL")
+    held.execute("PRAGMA wal_autocheckpoint=0")
+    held.execute(
+        """
+        CREATE TABLE channel_threads (
+            thread_key TEXT PRIMARY KEY,
+            messages_json TEXT NOT NULL
+        )
+        """
+    )
+    held.execute(
+        "INSERT INTO channel_threads VALUES ('kept', ?)",
+        (json.dumps([{"role": "user", "content": "checkpointed"}]),),
+    )
+    held.commit()
+    held.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    held.execute(
+        "INSERT INTO channel_threads VALUES ('wal', ?)",
+        (json.dumps([{"role": "user", "content": "only in the wal"}]),),
+    )
+    held.commit()
+    assert (source / "praxis.db-wal").is_file()
+    before = source_fingerprint(source)
+    try:
+        report = _import(source, tmp_path / "data", tmp_path / "config", only={"history"})
+        assert source_fingerprint(source) == before
+    finally:
+        held.close()
+    assert report.categories["history"].imported == 2
+    home = ProfileHome(tmp_path / "data", "default")
+    db = StateDB(home.db_path)
+    try:
+        stored = [row["content"] for row in db.conn.execute("SELECT content FROM messages")]
+    finally:
+        db.close()
+    assert "only in the wal" in stored
+    assert "checkpointed" in stored
+
+
 def test_only_memory_skips_skills_and_packs(tmp_path: Path) -> None:
     source = tmp_path / "praxis"
     _build(source)

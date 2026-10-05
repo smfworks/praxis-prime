@@ -1,8 +1,12 @@
 """Read a SMF Praxis home directory without changing it.
 
-``praxis.db`` is opened with the SQLite URI ``mode=ro&immutable=1``. If that
-open fails, the file is copied to a temp path and the copy is read. Nothing
-under the source directory is created, replaced, or chmodded.
+``praxis.db`` is opened with the SQLite URI ``mode=ro&immutable=1`` when no
+``praxis.db-wal`` file is present. A WAL file is copied aside with the
+database and that copy is opened ``mode=ro`` without ``immutable=1``, so
+frames that exist only in the WAL are visible. The source directory is not
+written. If an open fails, the main file is copied to a temp path and the
+copy is read. Nothing under the source directory is created, replaced, or
+chmodded.
 """
 
 from __future__ import annotations
@@ -130,15 +134,18 @@ class PraxisDB:
         self.sha256 = ""
         self._conn: sqlite3.Connection | None = None
         self._temp: Path | None = None
+        self._snapshot: Path | None = None
 
     def __enter__(self) -> PraxisDB:
         if lstat_kind(self.path) is not StatKind.FILE:
             raise SourceError("praxis.db is not a regular file")
         self.sha256 = file_sha256(self.path)
-        self._conn = _open_readonly(self.path)
+        self._conn, self._snapshot = _open_readonly(self.path)
         if self._conn is None:
             self._temp = _copy_aside(self.path)
-            self._conn = _open_readonly(self._temp)
+            self._conn, extra = _open_readonly(self._temp)
+            if extra is not None:
+                self._snapshot = extra
         if self._conn is None:
             raise SourceError("could not open praxis.db read-only")
         return self
@@ -147,6 +154,9 @@ class PraxisDB:
         if self._conn is not None:
             self._conn.close()
             self._conn = None
+        if self._snapshot is not None:
+            shutil.rmtree(self._snapshot, ignore_errors=True)
+            self._snapshot = None
         if self._temp is not None:
             self._temp.unlink(missing_ok=True)
             self._temp = None
@@ -187,9 +197,25 @@ class PraxisDB:
         return self._conn
 
 
-def _open_readonly(path: Path) -> sqlite3.Connection | None:
+def _open_readonly(path: Path) -> tuple[sqlite3.Connection | None, Path | None]:
+    """Open ``path`` without writing next to it.
+
+    A sibling ``-wal`` file is copied with the database into a temp directory
+    and opened without ``immutable=1``. Opening the source that way can create
+    ``-shm`` beside it. The returned directory, when set, owns that copy.
+    """
+    wal = Path(f"{path}-wal")
+    if lstat_kind(wal) is StatKind.FILE:
+        conn, directory = _open_wal_snapshot(path)
+        if conn is not None:
+            return conn, directory
+    return _connect_readonly(path, immutable=True), None
+
+
+def _connect_readonly(path: Path, *, immutable: bool) -> sqlite3.Connection | None:
     quoted = urllib.parse.quote(str(Path(path).resolve()), safe="/")
-    uri = f"file:{quoted}?mode=ro&immutable=1"
+    query = "mode=ro&immutable=1" if immutable else "mode=ro"
+    uri = f"file:{quoted}?{query}"
     try:
         conn = sqlite3.connect(uri, uri=True)
     except sqlite3.Error:
@@ -202,6 +228,23 @@ def _open_readonly(path: Path) -> sqlite3.Connection | None:
         conn.close()
         return None
     return conn
+
+
+def _open_wal_snapshot(path: Path) -> tuple[sqlite3.Connection | None, Path | None]:
+    """Copy the database and its WAL, then open the copy read-only."""
+    directory = Path(tempfile.mkdtemp(prefix="praxis-db-"))
+    dest = directory / path.name
+    try:
+        shutil.copyfile(path, dest)
+        shutil.copyfile(Path(f"{path}-wal"), directory / f"{path.name}-wal")
+    except OSError:
+        shutil.rmtree(directory, ignore_errors=True)
+        return None, None
+    conn = _connect_readonly(dest, immutable=False)
+    if conn is None:
+        shutil.rmtree(directory, ignore_errors=True)
+        return None, None
+    return conn, directory
 
 
 def _copy_aside(path: Path) -> Path:

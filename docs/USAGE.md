@@ -193,7 +193,7 @@ praxis-prime migrate --from-praxis --only memory,skills
 praxis-prime migrate --from-praxis --json
 ```
 
-`--dry-run` prints counts, skips, and conflicts and writes nothing. `--only` takes `memory`, `skills`, `packs`, `routines`, `history`, and `settings`. `--json` prints the same plan. Exit 2 is a usage error. `--data-dir` and `--config-dir` select the Praxis Prime roots. They default to the XDG paths.
+`--dry-run` prints counts, skips, and conflicts and writes nothing. `--only` takes `memory`, `skills`, `packs`, `routines`, `history`, and `settings`. `--json` prints the same plan. Exit 2 is a usage error. `--data-dir` and `--config-dir` select the Praxis Prime roots. They default to the XDG paths. A `praxis.db-wal` file beside the database is copied aside with it and read, so rows that live only in the WAL are included. The source directory is left unchanged.
 
 | Praxis | Praxis Prime |
 |---|---|

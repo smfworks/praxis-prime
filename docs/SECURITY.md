@@ -24,7 +24,7 @@ Stop `praxis-primed` before the first `account create`. That command moves `prim
 
 ## Importing a Praxis home
 
-`praxis-prime migrate --from-praxis` reads a SMF Praxis directory, default `~/.praxis`. The source is not modified. `praxis.db` is opened with the SQLite URI `mode=ro&immutable=1`. If that open fails, the importer copies the file to a temp path and reads the copy. It does not write, chmod, move, or lock anything under the source directory.
+`praxis-prime migrate --from-praxis` reads a SMF Praxis directory, default `~/.praxis`. The source is not modified. `praxis.db` is opened with the SQLite URI `mode=ro&immutable=1` when `praxis.db-wal` is absent. When that WAL file is a regular file beside the database, the importer copies the database and the WAL to a temp directory and opens the copy with `mode=ro` and without `immutable=1`, so rows that are only in the WAL are read. The source is not opened in a mode that would create `-shm` next to it. If an open fails, the importer copies the main file to a temp path and reads the copy. It does not write, chmod, move, or lock anything under the source directory.
 
 Stop `praxis-primed` before the import. A published daemon is refused. The profile database is then locked exclusively, the same non-blocking flock `profile migrate` uses, and the command stops when that lock is held.
 
