@@ -425,7 +425,11 @@ def _uninstall(
         elif kind == "absent":
             print(f"{_PREFIX} template is not installed")
         elif kind == "symlink" and force:
-            theme_remove = True
+            keep = _template_symlink_keep_reason(template_path(env))
+            if keep is None:
+                theme_remove = True
+            else:
+                print(f"{_PREFIX} {keep}")
 
     key_edits: list[KeyEdit] = []
     if do_key:
@@ -576,8 +580,7 @@ def _maybe_refresh(refresh: str | None, *, yes: bool, offer: bool) -> bool:
         return False
     if not _allow("Run omarchy-theme-refresh so the current theme renders now?", yes=yes):
         print(
-            f"{_PREFIX} skipped omarchy-theme-refresh. "
-            "Switch themes once to render the template."
+            f"{_PREFIX} skipped omarchy-theme-refresh. Switch themes once to render the template."
         )
         return False
     print(f"{_PREFIX} running {refresh}")
@@ -598,8 +601,7 @@ def _maybe_reload(hyprctl: str | None, *, yes: bool) -> bool:
         return False
     if not _allow("Reload Hyprland with hyprctl reload?", yes=yes):
         print(
-            f"{_PREFIX} skipped hyprctl reload. "
-            "The keybind applies the next time Hyprland reloads."
+            f"{_PREFIX} skipped hyprctl reload. The keybind applies the next time Hyprland reloads."
         )
         return False
     print(f"{_PREFIX} running {hyprctl} reload")
@@ -626,7 +628,8 @@ def _write_template(path: Path, *, force: bool) -> None:
 
 
 def _remove_template(path: Path, *, force: bool) -> None:
-    # A symlinked template is the link itself. --force drops that link and
+    # A symlinked template is the link itself. --force drops that link only
+    # when its target is a regular file matching the shipped template, and
     # leaves the file it names. A symlinked parent is followed only with --force.
     if lstat_kind(path) is StatKind.SYMLINK:
         if not force:
@@ -634,6 +637,10 @@ def _remove_template(path: Path, *, force: bool) -> None:
                 f"{path} is a symlink ({_link_target(path)}). "
                 "Refusing to remove it without --force."
             )
+        keep = _template_symlink_keep_reason(path)
+        if keep is not None:
+            print(f"{_PREFIX} {keep}")
+            return
         path.unlink()
         print(f"{_PREFIX} removed symlink {path}")
         return
@@ -838,11 +845,7 @@ def find_conflict(text: str, layout: str) -> str | None:
 def _block(layout: str, command: str) -> str:
     if layout == "conf":
         return f"{CONF_BEGIN}\nbindd = SUPER ALT, A, Praxis Prime, exec, {command}\n{CONF_END}\n"
-    return (
-        f"{LUA_BEGIN}\n"
-        f'o.bind("SUPER + ALT + A", "Praxis Prime", "{command}")\n'
-        f"{LUA_END}\n"
-    )
+    return f'{LUA_BEGIN}\no.bind("SUPER + ALT + A", "Praxis Prime", "{command}")\n{LUA_END}\n'
 
 
 def _markers(layout: str) -> tuple[str, str]:
@@ -947,6 +950,45 @@ def _state_reason(state: str) -> str:
     if state.startswith("unreadable:"):
         return state.split(":", 1)[1].strip()
     return state
+
+
+def _template_symlink_keep_reason(path: Path) -> str | None:
+    """Why a template symlink must stay, or ``None`` when --force may drop it.
+
+    The link is removable only when it names a regular file whose bytes equal
+    the shipped template. Custom targets, dangling links, and non-files stay.
+    """
+    label = _link_target(path)
+    try:
+        resolved = path.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        return (
+            f"template is a symlink ({label}) that could not be resolved ({exc}). Left it in place."
+        )
+    resolved = Path(os.path.realpath(resolved))
+    if lstat_kind(resolved) is not StatKind.FILE:
+        return (
+            f"template is a symlink ({label}) pointing at {resolved}, "
+            "which is not a regular file. Left it in place."
+        )
+    try:
+        current = _read_regular(resolved)
+    except (OmarchyInstallError, OSError) as exc:
+        return (
+            f"template is a symlink ({label}) pointing at {resolved}, "
+            f"which cannot be read ({exc}). Left it in place."
+        )
+    if current is None:
+        return (
+            f"template is a symlink ({label}) pointing at {resolved}, "
+            "which is not a regular file. Left it in place."
+        )
+    if current != shipped_template():
+        return (
+            f"template is a symlink ({label}) pointing at {resolved}, "
+            "which differs from the shipped copy. Left it in place."
+        )
+    return None
 
 
 def _template_state(path: Path) -> str:
@@ -1096,7 +1138,13 @@ def _plan_symlink_key(path: Path, *, force: bool) -> KeyEdit | None:
                 "and leaves the link in place."
             )
         return None
-    target = _resolve_bindings_target(path)
+    try:
+        target = _resolve_bindings_target(path)
+    except OmarchyInstallError as exc:
+        # Dangling / non-file / unreadable targets must not abort uninstall;
+        # the theme step should still run.
+        print(f"{_PREFIX} {exc}", file=sys.stderr)
+        return None
     if not _file_has_mark(target):
         return None
     return KeyEdit(path=target, link=path)
@@ -1457,7 +1505,6 @@ def _atomic_write(path: Path, data: bytes, *, mode: int | None = None) -> None:
         except OSError:
             pass
         raise
-    os.chmod(path, mode)
 
 
 def _ensure_dir(path: Path) -> None:

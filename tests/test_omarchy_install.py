@@ -284,7 +284,6 @@ def test_keybind_lua_is_idempotent_and_refuses_a_conflict(
     path = _bindings()
     path.parent.mkdir(parents=True)
     path.write_text(user, encoding="utf-8")
-    before = path.stat().st_mtime_ns
     assert _install(keybind=True, yes=True) == 0
     text = path.read_text(encoding="utf-8")
     assert text.count("praxis-prime keybind") == 2
@@ -295,10 +294,9 @@ def test_keybind_lua_is_idempotent_and_refuses_a_conflict(
     assert _baks(path)[0].read_text(encoding="utf-8") == user
     assert not _bindings("bindings.conf").exists()
 
-    again = path.stat().st_mtime_ns
-    assert again != before
+    inode = path.stat().st_ino
     assert _install(keybind=True, yes=True) == 0
-    assert path.stat().st_mtime_ns == again
+    assert path.stat().st_ino == inode
     assert len(_baks(path)) == 1
 
     changed = text.replace("/usr/bin/praxis-prime", "/elsewhere/praxis-prime")
@@ -555,6 +553,34 @@ def test_uninstall_removes_only_our_bytes(capsys: pytest.CaptureFixture[str]) ->
     assert real.read_bytes() == shipped_template()
 
 
+def test_uninstall_force_keeps_a_custom_template_symlink(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    custom = b'{"my":"custom"}\n'
+    real = _home() / "custom-template.json"
+    real.write_bytes(custom)
+    link = _template()
+    link.parent.mkdir(parents=True, exist_ok=True)
+    if link.exists() or link.is_symlink():
+        link.unlink()
+    link.symlink_to(real)
+    link_text = os.readlink(link)
+
+    assert _uninstall(theme=True, yes=True) == 1
+    assert link.is_symlink()
+    assert real.read_bytes() == custom
+
+    assert _uninstall(theme=True, yes=True, force=True) == 0
+    out = capsys.readouterr().out
+    assert "differs from the shipped copy" in out
+    assert "Left it in place" in out
+    assert link.is_symlink()
+    assert os.readlink(link) == link_text
+    assert real.read_bytes() == custom
+    assert not _baks(real)
+    assert not _baks(link)
+
+
 def _foreign_binds(layout: str) -> tuple[str, str, str]:
     """``(filename, non-Praxis bytes, managed block)`` for one layout."""
     command = (
@@ -621,31 +647,44 @@ def test_uninstall_force_strips_the_symlink_target(
     assert not _baks(link)
 
 
-def test_uninstall_force_refuses_a_bindings_symlink_that_is_not_a_file() -> None:
+def test_uninstall_force_skips_a_bindings_symlink_that_is_not_a_file(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     _version("4.0.0")
     folder = _home() / "bindings-dir"
     folder.mkdir()
     link = _bindings()
     link.parent.mkdir(parents=True, exist_ok=True)
     link.symlink_to(folder)
-    assert _uninstall(keybind=True, yes=True, force=True) == 1
+    _template().parent.mkdir(parents=True, exist_ok=True)
+    _template().write_bytes(shipped_template())
+    assert _uninstall(keybind=True, theme=True, yes=True, force=True) == 0
+    err = capsys.readouterr().err
+    assert "not a regular file" in err
     assert link.is_symlink()
     assert os.readlink(link) == str(folder)
     assert folder.is_dir()
     assert not _baks(folder)
+    assert not _template().exists()
 
     missing = _home() / "missing-bindings.lua"
     link.unlink()
     link.symlink_to(missing)
+    _template().write_bytes(shipped_template())
     assert _uninstall(keybind=True, yes=True) == 0
     assert link.is_symlink()
-    assert _uninstall(keybind=True, yes=True, force=True) == 1
+    assert _uninstall(keybind=True, theme=True, yes=True, force=True) == 0
+    err = capsys.readouterr().err
+    assert "cannot resolve symlink" in err or "No such file" in err
     assert link.is_symlink()
     assert os.readlink(link) == str(missing)
     assert not missing.exists()
+    assert not _template().exists()
 
 
-def test_uninstall_force_refuses_an_unreadable_symlink_target() -> None:
+def test_uninstall_force_skips_an_unreadable_symlink_target(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     if os.geteuid() == 0:
         pytest.skip("root can read mode 000 files")
     _version("4.0.0")
@@ -657,11 +696,16 @@ def test_uninstall_force_refuses_an_unreadable_symlink_target() -> None:
     link = _bindings()
     link.parent.mkdir(parents=True, exist_ok=True)
     link.symlink_to(target)
+    _template().parent.mkdir(parents=True, exist_ok=True)
+    _template().write_bytes(shipped_template())
     try:
-        assert _uninstall(keybind=True, yes=True, force=True) == 1
+        assert _uninstall(keybind=True, theme=True, yes=True, force=True) == 0
+        err = capsys.readouterr().err
+        assert "cannot be read" in err or "Permission" in err or "cannot read" in err
         assert link.is_symlink()
         assert os.readlink(link) == str(target)
         assert not _baks(target)
+        assert not _template().exists()
     finally:
         target.chmod(0o644)
     assert target.read_bytes() == original
