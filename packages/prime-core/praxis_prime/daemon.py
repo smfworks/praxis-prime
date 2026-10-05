@@ -45,8 +45,9 @@ from praxis_prime.gateway.protocol import DEFAULT_LISTEN, ListenError, parse_lis
 from praxis_prime.gateway.server import GatewayServer
 from praxis_prime.host import Host
 from praxis_prime.observe import JsonLogger
-from praxis_prime.paths import config_dir, data_dir, runtime_dir, state_dir
+from praxis_prime.paths import RuntimeDirError, config_dir, data_dir, runtime_dir, state_dir
 from praxis_prime.runtime import build_runtime
+from praxis_prime.sanitize import sanitize
 from praxis_prime.scheduler.service import scheduler_for
 from praxis_prime.service import daemon_exec
 
@@ -101,7 +102,11 @@ def serve(
         ttl = 900.0
 
     logger = JsonLogger(log_path(environ))
-    runtime_root = runtime_dir(environ)
+    try:
+        runtime_root = runtime_dir(environ)
+    except RuntimeDirError as exc:
+        print(f"praxis-primed: {sanitize(exc)}", file=sys.stderr)
+        return 1
     runtime_root.mkdir(parents=True, exist_ok=True)
     try:
         os.chmod(runtime_root, 0o700)
@@ -588,9 +593,7 @@ def resolve_listen(explicit: str | None, env: Mapping[str, str]) -> tuple[str, i
 
 def resolve_ttl(env: Mapping[str, str]) -> float:
     raw = (
-        env.get("PRAXIS_PRIME_APPROVAL_TTL")
-        or _config_value(env, "approval_ttl_seconds")
-        or "900"
+        env.get("PRAXIS_PRIME_APPROVAL_TTL") or _config_value(env, "approval_ttl_seconds") or "900"
     )
     try:
         number = float(raw)

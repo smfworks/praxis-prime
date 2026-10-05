@@ -182,6 +182,37 @@ praxis-prime oidc remove google
 
 Scopes default to `openid email profile` and must include `openid`. `--preset google` uses `https://accounts.google.com`. `--preset entra` needs `--tenant` and uses `https://login.microsoftonline.com/<tenant>/v2.0`, and it maps the `roles` claim `Praxis.Admin`, `Praxis.Operator`, `Praxis.Viewer`, and `Praxis.Auditor` unless you pass `--no-role-map`. `--preset authentik` and `--preset keycloak` need `--issuer`. A fixed preset issuer is rejected when `--issuer` names a different URL. `--dev-loopback` allows an `http://127.0.0.1` or `http://localhost` issuer for a local provider. `--allow-email user@example.com` (repeatable) is the only way a verified email can link or create an account. The address is matched with ASCII lowercasing. Omit it and sign-in requires a pre-linked `iss`+`sub`. An owner or admin is not linked from that list. Running `oidc add` again for an id that already exists exits 2, leaves the stored client secret unchanged, and tells you to `oidc remove` that id before adding it again. `oidc remove` exits 2 and leaves the provider in place when a linked account would lose its last sign-in factor. The sign-in page is `http://127.0.0.1:18790` once `ui/dist` is present. See [SECURITY.md](SECURITY.md).
 
+## Import from Praxis
+
+`praxis-prime migrate --from-praxis` copies a SMF Praxis home into one profile. The source defaults to `~/.praxis` and is only read. A symlink at that path is refused; pass the real directory to `--source`. Stop `praxis-primed` first. The command exits 1 when the daemon is running or when the profile database is open.
+
+```bash
+praxis-prime migrate --from-praxis --dry-run
+praxis-prime migrate --from-praxis --source ~/.praxis --profile default
+praxis-prime migrate --from-praxis --only memory,skills
+praxis-prime migrate --from-praxis --json
+```
+
+`--dry-run` prints counts, skips, and conflicts and writes nothing. `--only` takes `memory`, `skills`, `packs`, `routines`, `history`, and `settings`. `--json` prints the same plan. Exit 2 is a usage error. `--data-dir` and `--config-dir` select the Praxis Prime roots. They default to the XDG paths. A `praxis.db-wal` file beside the database is copied aside with it and read, so rows that live only in the WAL are included. The source directory is left unchanged.
+
+| Praxis | Praxis Prime |
+|---|---|
+| `memory_items` tier `working` | Skipped. |
+| `memory_items` tier `episodic` | Episodic memory. Expires at the earlier of the Praxis time and 90 days. |
+| `memory_items` tier `durable`, kind fact, preference, or decision | Profile memory. |
+| Other durable memory, and `vectors` text | Semantic memory. Embeddings are not copied. |
+| `skills/<name>/SKILL.md` | That profile's `skills/` directory. Parsed as data. Not executed. A Praxis `trigger` is written as `description` when the file has none, so the Prime loader can read it. The source file is not edited. `credentials.json`, `secrets.env`, and files ending in `.pem`, `.key`, `.keyring`, `.p12`, or `.pfx` are not copied. |
+| `packs/<name>/pack.json` | `vertical-packs/<name>`. Regulated packs move mapped dials from off to monitor and record a `dial_change` audit event. `config.toml` is backed up before that rewrite. |
+| `cron_jobs` | A paused routine. Delivery targets are not copied. |
+| `channel_threads` chat messages | A new local session, plus a mode-0400 `history.jsonl` archive. Message bodies use the memory secret redaction, including a bare `sk-` or `ghp_` token, and control characters are stored in visible form. |
+| `praxis.json` providers and model | Names only. The model is not selected. Run `praxis-prime setup`. |
+
+A row that is expired, redacted, already imported, or a duplicate of the same tier and scope is skipped. An existing skill or pack name is left in place. A quarantined Praxis skill is skipped. Unknown tables are counted and not imported. Each imported row records source `praxis`, the original table and id, the source file sha256, the run id, and the time. Running the command again skips those rows.
+
+Provider keys and `auth-profiles.json` are not copied. The output names the providers and tells you to run `praxis-prime setup`. `--include-secrets` writes a key into `secrets.env` (mode 0600) only when that provider already has a secrets-file name and the value is stored in `auth-profiles.json`. An environment reference is not read. The value is not printed.
+
+The report is `migrations/praxis/<run-id>/report.json` and `summary.txt` under the data root. One `praxis.import` audit event records the counts. Imported text is untrusted: it does not change a profile allow list, enable a tool, or grant anything. A new `default` profile still starts with `allow = ["*"]`, which is the existing create rule. Any other new profile starts empty. An enforce dial is not changed. See [SECURITY.md](SECURITY.md).
+
 ## Setup
 
 `praxis-prime setup` is the first-run wizard. The web UI uses the same backend. Nothing is preselected. A fresh install has no provider, and chat answers with "No model provider is configured. Run `praxis-prime setup` or open the web UI." If `config.toml` already names a provider that has not passed the setup test, chat names that spec and tells you to run `praxis-prime setup`. Rules and other non-LLM features keep working.

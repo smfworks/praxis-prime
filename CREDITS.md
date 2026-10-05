@@ -49,6 +49,7 @@ How to add an entry (people and agents alike):
 | tox-dev (platformdirs) | https://github.com/tox-dev/platformdirs | MIT | Platform directories, pulled in by textual. Installed, not vendored. | `pyproject.toml` | 4.12.3 |
 | tsutsu3 (linkify-it-py) | https://github.com/tsutsu3/linkify-it-py | MIT | Link detection, pulled in by markdown-it-py. Installed, not vendored. | `pyproject.toml` | 2.2.0 |
 | Georg Brandl and Pygments contributors (Pygments) | https://github.com/pygments/pygments | BSD-2-Clause | Syntax highlighting, pulled in by rich. Installed, not vendored. | `pyproject.toml` | 2.21.0 |
+| SMF Praxis (praxis-agent / hybridagent, SMF Works) | https://github.com/smfworks/smf-praxis | MIT | SQLite schema and `~/.praxis` pack, skills, and config layout mapping used by `migrate --from-praxis`. The mapping is original. No Praxis source was copied. | `packages/prime-core/praxis_prime/migrate/` | 69121b2 |
 
 Python packages and runtime programs are installed or invoked, not copied into
 this tree. Their notices are in [THIRD_PARTY.md](THIRD_PARTY.md).

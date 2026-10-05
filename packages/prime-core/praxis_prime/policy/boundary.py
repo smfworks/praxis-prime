@@ -32,7 +32,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
-from praxis_prime.paths import config_dir, data_dir, runtime_dir
+from praxis_prime.paths import RuntimeDirError, config_dir, data_dir, runtime_dir
 from praxis_prime.statfile import StatKind, lstat_kind, stat_kind
 
 _log = logging.getLogger(__name__)
@@ -122,9 +122,7 @@ class _BrowserProfile:
     deny: tuple[str, ...]
 
 
-def _profile(
-    scan: tuple[str, ...], deny: tuple[str, ...] | None = None
-) -> _BrowserProfile:
+def _profile(scan: tuple[str, ...], deny: tuple[str, ...] | None = None) -> _BrowserProfile:
     prefix = scan if deny is None else deny
     if scan[: len(prefix)] != prefix:
         raise ValueError(f"inode scan {scan} is outside direct-read prefix {prefix}")
@@ -163,9 +161,7 @@ _BROWSER_PROFILES: tuple[_BrowserProfile, ...] = (
     _profile((".var", "app", "com.google.Chrome", "config")),
     _profile((".var", "app", "com.google.ChromeDev", "config")),
     _profile((".var", "app", "org.chromium.Chromium", "config")),
-    _profile(
-        (".var", "app", "io.github.ungoogled_software.ungoogled_chromium", "config")
-    ),
+    _profile((".var", "app", "io.github.ungoogled_software.ungoogled_chromium", "config")),
     _profile((".var", "app", "com.github.Eloston.UngoogledChromium", "config")),
     _profile((".var", "app", "org.mozilla.firefox", ".mozilla")),
     _profile((".var", "app", "org.mozilla.firefox", "config")),
@@ -992,9 +988,7 @@ def _reset_data_roots() -> None:
     with _data_root_lock:
         if current:
             tokens = {token for token, _path in current}
-            _process_data_roots[:] = [
-                item for item in _process_data_roots if item[0] not in tokens
-            ]
+            _process_data_roots[:] = [item for item in _process_data_roots if item[0] not in tokens]
     _local_data_roots.set(())
 
 
@@ -1106,9 +1100,12 @@ def _owned_runtime_files() -> list[Path]:
 
     A missing runtime directory still names the files, so a hard link is
     not treated as absent. A symlink, or a directory owned by someone else,
-    is omitted.
+    is omitted. ``RuntimeDirError`` returns no paths instead of raising.
     """
-    runtime = runtime_dir()
+    try:
+        runtime = runtime_dir()
+    except RuntimeDirError:
+        return []
     paths = [runtime / name for name in _RUNTIME_SECRET_FILES]
     try:
         info = os.lstat(runtime)
@@ -1236,9 +1233,7 @@ def _load_private_snapshot(
         _data_inode_scans += 1
         inodes, linked, problem, stamp, cacheable = _scan_private_inodes(root)
         if cacheable:
-            _data_inode_snapshots[key] = _InodeSnapshot(
-                key, stamp, inodes, linked, problem
-            )
+            _data_inode_snapshots[key] = _InodeSnapshot(key, stamp, inodes, linked, problem)
             while len(_data_inode_snapshots) > _INODE_CACHE_MAX:
                 oldest = next(iter(_data_inode_snapshots))
                 if oldest == key:
@@ -1362,9 +1357,7 @@ def _collect_tree_inodes(
         entries = listed
         for entry in entries:
             if len(found) > _PRIVATE_INODE_CAP:
-                return (
-                    f"more than {_PRIVATE_INODE_CAP} files under the account data directory"
-                )
+                return f"more than {_PRIVATE_INODE_CAP} files under the account data directory"
             try:
                 st = entry.stat(follow_symlinks=False)
             except FileNotFoundError:
@@ -1992,12 +1985,7 @@ def _is_flatpak_keyring_dir(path: Path) -> bool:
     if len(parts) < 5:
         return False
     tail = parts[-5:]
-    return (
-        tail[0] == ".var"
-        and tail[1] == "app"
-        and tail[3] == "data"
-        and tail[4] == "keyrings"
-    )
+    return tail[0] == ".var" and tail[1] == "app" and tail[3] == "data" and tail[4] == "keyrings"
 
 
 def _inode_candidates() -> list[Path] | _CapHit:
@@ -2027,10 +2015,15 @@ def _inode_candidates() -> list[Path] | _CapHit:
     )
     try:
         paths.append(runtime_dir() / "gateway.token")
-        paths.append(config_dir() / "secrets.env")
-        paths.append(config_dir() / "secrets.env.age")
     except OSError:
         pass
+    try:
+        config = config_dir()
+    except OSError:
+        config = None
+    if config is not None:
+        paths.append(config / "secrets.env")
+        paths.append(config / "secrets.env.age")
     return paths
 
 
@@ -2496,9 +2489,7 @@ def _is_browser_scan_root(path: Path) -> bool:
     ``_is_lexical_browser_root``.
     """
     home = Path.home()
-    return any(
-        _same_resolved(path, candidate) for candidate in _browser_scan_candidates(home)
-    )
+    return any(_same_resolved(path, candidate) for candidate in _browser_scan_candidates(home))
 
 
 def _is_lexical_browser_root(path: Path, *, include_gcloud: bool) -> bool:
