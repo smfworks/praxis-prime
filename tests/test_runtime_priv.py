@@ -72,6 +72,29 @@ def test_read_token_rejects_other_owner(tmp_path: Path, monkeypatch: pytest.Monk
     assert _SECRET not in repr(caught.value)
 
 
+def test_daemon_runtime_dir_error_has_no_traceback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from praxis_prime.daemon import serve
+
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "run"))
+
+    def refuse(env: object = None) -> Path:
+        del env
+        raise RuntimeDirError("refusing runtime directory /tmp/bad\x1b[0m")
+
+    monkeypatch.setattr("praxis_prime.daemon.runtime_dir", refuse)
+    assert serve() == 1
+    err = capsys.readouterr().err
+    assert "Traceback" not in err
+    assert "\x1b" not in err
+    assert "praxis-primed: refusing runtime directory" in err
+    assert "\\x1b" in err
+
+
 def test_private_runtime_creates_0700(tmp_path: Path) -> None:
     path = tmp_path / "runtime"
     assert ensure_private_runtime(path) == path
