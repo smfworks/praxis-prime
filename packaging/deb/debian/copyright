@@ -10,4 +10,9 @@ License: MIT
  in /usr/share/common-licenses/MIT.
  .
  Upstream attribution for projects SMF Works does not own is in NOTICE and
- THIRD_PARTY.md. No upstream source is vendored in the pre-alpha skeleton.
+ THIRD_PARTY.md. The source package does not vendor third-party Python trees.
+ The binary package built by packaging/deb/build-deb.sh installs the locked
+ runtime dependencies from PyPI into /opt/praxis-prime. Those distributions
+ keep their own licenses under each *.dist-info directory and are listed in
+ /usr/share/doc/praxis-prime/python-licenses.txt. They are not relicensed
+ as MIT.

@@ -2,17 +2,29 @@ Source: praxis-prime
 Section: python
 Priority: optional
 Maintainer: SMF Works <maintainers@praxis-prime.invalid>
-Build-Depends: debhelper-compat (= 13), python3 (>= 3.12)
+Build-Depends: python3 (>= 3.12), dpkg
 Standards-Version: 4.7.0
 Homepage: https://github.com/smfworks/praxis-prime
 Rules-Requires-Root: no
 
 Package: praxis-prime
-Architecture: all
-Depends: ${python3:Depends}, python3 (>= 3.12)
-Description: local-first autonomous AI agent (pre-alpha skeleton)
- Praxis Prime is a local-first autonomous AI agent for Ubuntu and Omarchy.
- This binary package is a packaging placeholder. It is not published.
+Architecture: any
+Depends: python3 (>= 3.12)
+Description: local-first autonomous AI agent
+ Praxis Prime is a local-first autonomous AI agent for Linux (pre-alpha).
+ The binary package installs a virtual environment at /opt/praxis-prime
+ and puts praxis-prime, pprime, and praxis-primed on PATH.
  .
- The working install path today is a Python virtualenv. See the repository
- README.
+ The optional Textual TUI (extra [tui]) is not part of this package.
+ systemd user units are installed under /usr/lib/systemd/user and are
+ not enabled. The package does not enable linger.
+ .
+ Build it with packaging/deb/build-deb.sh. That script does not need
+ debhelper or root. The built binary is architecture-specific (the host
+ dpkg architecture) because cryptography and argon2-cffi include compiled
+ extensions, and it Depends on the interpreter it was linked against
+ (python3.12 on Ubuntu 24.04). This source stanza stays Architecture: any
+ so the same script can be run on another Debian architecture.
+ .
+ Not published to an APT repository. The maintainer address uses the
+ reserved .invalid domain and does not receive mail.

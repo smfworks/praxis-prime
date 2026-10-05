@@ -1,5 +1,10 @@
-praxis-prime (0.0.1) UNRELEASED; urgency=low
+praxis-prime (0.1.0) UNRELEASED; urgency=low
 
-  * Pre-alpha skeleton. Not published.
+  * Local binary package built by packaging/deb/build-deb.sh.
+  * Install a Python virtual environment under /opt/praxis-prime and put
+    praxis-prime, pprime, and praxis-primed on PATH.
+  * Ship systemd user units under /usr/lib/systemd/user without enabling
+    them and without linger.
+  * Not published to an APT repository.
 
- -- SMF Works <maintainers@praxis-prime.invalid>  Tue, 29 Sep 2026 23:30:00 +0000
+ -- SMF Works <maintainers@praxis-prime.invalid>  Mon, 05 Oct 2026 16:00:00 +0000

@@ -1,4 +1,8 @@
 #!/usr/bin/make -f
-# Placeholder. CI does not run dpkg-buildpackage.
-%:
-	dh $@
+# Praxis Prime does not use debhelper. Build the binary package with
+# packaging/deb/build-deb.sh, which needs no root. See packaging/deb/README.md.
+
+.PHONY: binary build clean
+binary build clean:
+	@echo "praxis-prime: run packaging/deb/build-deb.sh (debhelper is not required)." >&2
+	@exit 1
