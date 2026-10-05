@@ -84,7 +84,7 @@ With `XDG_CONFIG_HOME` unset, those paths are under `~/.config/praxis-prime/`. E
 | Gateway | One typed WebSocket protocol for CLI, TUI, web, desktop, channels, and nodes. Loopback only. | Loopback HTTP and WebSocket, token auth, Telegram channel, the local web app, and `praxis-prime tui` (`praxis_prime.tui`). [§4](docs/ARCHITECTURE.md) |
 | Jarvis voice layer | Optional wake word, local STT/TTS, Home Assistant, desktop control. Separate user service, off by default. | Package stub. [§19](docs/ARCHITECTURE.md) |
 | Desktop and web UI | One React SPA inside a Tauri 2 shell, also served by the daemon. | The SPA is served by the daemon from `ui/dist`. The Tauri shell is still a stub. [§21](docs/ARCHITECTURE.md) |
-| Packaging | `.deb`, APT repo, AppImage, AUR, systemd user units, Omarchy bar plugin. | User unit `praxis-prime.service` installs with `praxis-prime service install`. Packages are not published. [§26](docs/ARCHITECTURE.md), [§27](docs/ARCHITECTURE.md) |
+| Packaging | `.deb`, APT repo, AppImage, AUR, systemd user units, Omarchy bar plugin. | Local `.deb` (`packaging/deb/build-deb.sh`) and AUR `praxis-prime-git` PKGBUILD. Not published to APT or the AUR. User unit installs with `praxis-prime service install`. [§26](docs/ARCHITECTURE.md), [§27](docs/ARCHITECTURE.md) |
 
 The full comparison with Hermes, OpenClaw, Praxis, Swarm 2.0, and the Jev reference column is in [docs/CAPABILITY-MATRIX.md](docs/CAPABILITY-MATRIX.md).
 
@@ -168,9 +168,41 @@ Dials produce technical controls and evidence. They are not legal certifications
 
 ## Install
 
-**Nothing below is published.** There is no APT repository, no AUR package, and no install script host yet. The commands are the intended shape from the blueprint so packaging work has a target. Do not run them.
+**The package is not published.** There is no APT repository, no AUR submission, and no install script host. `get.smfworks.com` and `apt.smfworks.com` do not serve Praxis Prime. Do not run the commented commands in the "Published install" section.
 
-### Ubuntu 22.04 / 24.04 (placeholder)
+You can build a local `.deb`, or use the Arch PKGBUILD, from this checkout. Those packages are not in the Ubuntu or Arch repositories. The maintainer address `maintainers@praxis-prime.invalid` does not receive mail.
+
+### Ubuntu 24.04: build a local .deb
+
+The build does not need root. Installing the `.deb` does.
+
+```bash
+packaging/deb/build-deb.sh --help
+packaging/deb/build-deb.sh
+sudo apt install ./dist/praxis-prime_0.1.0_amd64.deb
+```
+
+On x86_64 the file is `amd64` because the virtualenv under `/opt/praxis-prime` bundles compiled wheels (`cryptography`, `argon2-cffi`). It depends on the system interpreter used at build time (`python3.12` on Ubuntu 24.04) and on `bubblewrap`. `praxis-prime`, `pprime`, and `praxis-primed` land on `PATH`. The package installs `praxis-prime.service` and `praxis-prime-workers.slice` under `/usr/lib/systemd/user/` and does not enable them or linger. It does not ship pip. The optional Textual TUI is added afterwards with `ensurepip` (see [packaging/deb/README.md](packaging/deb/README.md)).
+
+Details: [packaging/deb/README.md](packaging/deb/README.md).
+
+### Omarchy / Arch: local PKGBUILD
+
+`praxis-prime-git` is not submitted to the AUR. Do not `yay -S` it. `praxis-prime-bin` waits on a release tarball and is not implemented.
+
+```bash
+repo=$(git rev-parse --show-toplevel)
+mkdir -p /tmp/praxis-prime-aur && cd /tmp/praxis-prime-aur
+cp "$repo/packaging/aur/PKGBUILD" .
+sed -i "s|git+https://github.com/smfworks/praxis-prime.git|git+file://${repo}|" PKGBUILD
+makepkg -si
+```
+
+`makepkg` runs on Arch, not on Ubuntu. Details: [packaging/aur/README.md](packaging/aur/README.md).
+
+The future Omarchy installer would add a Quickshell bar plugin, a theme template, a Hyprland keybind, and an optional default-agent registration, asking before each step. That installer is not part of this package. The theme template stub is [apps/omarchy/praxis-prime.json.tpl](apps/omarchy/praxis-prime.json.tpl).
+
+### Published install (not available)
 
 ```bash
 # Placeholder URL. get.smfworks.com is not a Praxis Prime installer.
@@ -179,21 +211,15 @@ Dials produce technical controls and evidence. They are not legal certifications
 # Placeholder APT repo. apt.smfworks.com does not serve this package.
 # sudo apt update && sudo apt install praxis-prime praxis-prime-desktop
 # systemctl --user enable --now praxis-prime.service
-```
 
-Planned packages: `praxis-prime` (CLI and daemon), `praxis-prime-desktop` (Tauri), `praxis-prime-voice` (optional), `praxis-prime-packs` (regulated packs, not imported yet). Files live under [packaging/deb](packaging/deb) and [packaging/systemd](packaging/systemd).
-
-### Omarchy / Arch (placeholder)
-
-```bash
-# Not in the AUR. Do not yay -S this yet.
+# Not in the AUR.
 # yay -S praxis-prime-bin
 # praxis-prime omarchy install
 ```
 
-The future Omarchy installer would add a Quickshell bar plugin, a theme template, a Hyprland keybind, and an optional default-agent registration, asking before each step. The theme template stub is [apps/omarchy/praxis-prime.json.tpl](apps/omarchy/praxis-prime.json.tpl). PKGBUILD notes are in [packaging/aur](packaging/aur).
+Planned later: `praxis-prime-desktop` (Tauri), `praxis-prime-voice`, `praxis-prime-packs`, an APT repository, and `praxis-prime-bin`. Unit files live under [packaging/systemd](packaging/systemd).
 
-### From this git checkout (works today)
+### From this git checkout (development)
 
 ```bash
 python3 -m venv .venv
@@ -245,6 +271,7 @@ The kernel subpackages (`loop`, `gateway`, `decide`, `swarm`, and the rest) matc
 ## Credits
 
 Work reused or adapted from other people is listed in [CREDITS.md](CREDITS.md).
+The local `.deb` and AUR packages bundle the locked PyPI runtime dependencies under each project's own license. Optional Textual is not included in those packages.
 
 ## License
 

@@ -119,3 +119,90 @@ jobs:
         env:
           PRAXIS_PRIME_BROWSER: "1"
         run: pytest tests/test_web_smoke.py tests/test_web_spa.py tests/test_web_wizard.py
+
+  packaging-deb:
+    name: deb package build and install smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3.12 python3-venv python3-pip dpkg-dev bubblewrap
+
+      - name: Build the .deb
+        env:
+          XAI_API_KEY: ""
+        run: |
+          unset XAI_API_KEY
+          bash packaging/deb/build-deb.sh --python /usr/bin/python3.12
+
+      - name: Inspect the package before install
+        run: |
+          set -euo pipefail
+          deb=(dist/praxis-prime_*.deb)
+          test -f "${deb[0]}"
+          depends=$(dpkg-deb -f "${deb[0]}" Depends)
+          echo "Depends: ${depends}"
+          printf '%s\n' "${depends}" | grep -q bubblewrap
+          dpkg-deb -c "${deb[0]}" | tee "${RUNNER_TEMP}/deb-contents.txt"
+          grep -F './usr/share/doc/praxis-prime/CREDITS.md' "${RUNNER_TEMP}/deb-contents.txt"
+          grep -F './usr/lib/systemd/user/praxis-prime.service' "${RUNNER_TEMP}/deb-contents.txt"
+          grep -F './usr/lib/systemd/user/praxis-prime-workers.slice' "${RUNNER_TEMP}/deb-contents.txt"
+          if grep -F '/home/' "${RUNNER_TEMP}/deb-contents.txt"; then
+            echo "package listing contains a /home path"
+            exit 1
+          fi
+          if grep -E 'praxis-prime-voice|praxis-prime-gateway|praxis-prime-decide|praxis-prime-sweeper' \
+            "${RUNNER_TEMP}/deb-contents.txt"; then
+            echo "package ships a stub unit"
+            exit 1
+          fi
+          if grep -E 'site-packages/pip/|site-packages/pip-[^/]*\.dist-info' \
+            "${RUNNER_TEMP}/deb-contents.txt"; then
+            echo "package ships pip"
+            exit 1
+          fi
+          ctrl=$(dpkg-deb --ctrl-tarfile "${deb[0]}" | tar -t)
+          echo "${ctrl}"
+          if printf '%s\n' "${ctrl}" | grep -E 'postinst|preinst|prerm|postrm'; then
+            echo "package ships a maintainer script"
+            exit 1
+          fi
+          extract=$(mktemp -d)
+          dpkg-deb -x "${deb[0]}" "${extract}"
+          if grep -r -I -n -F '/home/' "${extract}"; then
+            echo "extracted package contains a /home path"
+            exit 1
+          fi
+
+      - name: Install and smoke-test
+        run: |
+          set -euo pipefail
+          deb=(dist/praxis-prime_*.deb)
+          sudo dpkg -i "${deb[0]}"
+          praxis-prime --help
+          test "$(command -v praxis-primed)" = /usr/bin/praxis-primed
+          test "$(readlink /usr/bin/praxis-primed)" = /opt/praxis-prime/bin/praxis-primed
+          for cmd in praxis-prime pprime praxis-primed; do
+            shebang=$(head -n 1 "/opt/praxis-prime/bin/${cmd}")
+            echo "${cmd}: ${shebang}"
+            case "${shebang}" in
+              '#!/opt/praxis-prime/bin/python'*) ;;
+              *) echo "entry point ${cmd} is not under /opt/praxis-prime"; exit 1 ;;
+            esac
+          done
+          sudo dpkg -r praxis-prime
+          test ! -e /opt/praxis-prime
+          test ! -e /usr/bin/praxis-prime
+          test ! -e /usr/bin/pprime
+          test ! -e /usr/bin/praxis-primed
+          test ! -e /usr/lib/systemd/user/praxis-prime.service
+          status=$(dpkg-query -W -f '${Status}' praxis-prime 2>/dev/null || true)
+          echo "status after remove: ${status:-absent}"
+          case "${status}" in
+            ""|*"not-installed"*) ;;
+            *) echo "expected praxis-prime to be removed"; exit 1 ;;
+          esac

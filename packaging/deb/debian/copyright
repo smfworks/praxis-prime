@@ -9,5 +9,11 @@ License: MIT
  The MIT license is in the repository LICENSE file and, on Debian systems,
  in /usr/share/common-licenses/MIT.
  .
- Upstream attribution for projects SMF Works does not own is in NOTICE and
- THIRD_PARTY.md. No upstream source is vendored in the pre-alpha skeleton.
+ Upstream attribution for projects SMF Works does not own is in NOTICE,
+ THIRD_PARTY.md, and CREDITS.md. The source package does not vendor
+ third-party Python trees. The binary package built by
+ packaging/deb/build-deb.sh bundles the locked runtime wheels from PyPI
+ into /opt/praxis-prime under each project's own license. Those
+ distributions keep their licenses under each *.dist-info directory and
+ are listed in /usr/share/doc/praxis-prime/python-licenses.txt. CREDITS.md
+ is installed beside this file. They are not relicensed as MIT.

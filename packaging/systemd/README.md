@@ -21,3 +21,5 @@ praxis-prime service uninstall
 | `praxis-prime-decide.timer` | Nightly Decision Engine recalibration. |
 
 `loginctl enable-linger` stays documented and off by default. Do not enable linger from a package script.
+
+The `.deb` and the AUR `praxis-prime-git` package install only the two units that run today: `praxis-prime.service` and `praxis-prime-workers.slice`. The voice, gateway, decide, and sweeper files in this directory are stubs (`ExecStart=/bin/echo ... not implemented`, with `[Install]` on some of them) and stay in the repository until they are real. Packages do not install them. Nothing in the package enables a unit or linger. `praxis-prime service install` is still the command that enables the daemon for a user.

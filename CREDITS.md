@@ -60,3 +60,27 @@ Projects whose design ideas Praxis Prime follows (Hermes Agent, OpenClaw, SMF Pr
 No upstream source code is copied in. The only copied files are the bundled
 OFL-1.1 fonts listed above, logged in THIRD_PARTY.md's copied-file log with the
 OFL text kept beside them in each theme's `assets/fonts/OFL.txt`.
+
+### Runtime wheels bundled by the `.deb` and AUR package
+
+The `.deb` and `praxis-prime-git` packages bundle these locked distributions into `/opt/praxis-prime`. The git tree does not contain their source. Versions match `uv.lock` and `packaging/requirements-runtime.txt`. Each project keeps its own license. The package build writes the installed inventory to `python-licenses.txt` (Debian: `/usr/share/doc/praxis-prime/python-licenses.txt`; AUR: `/usr/share/licenses/praxis-prime-git/python-licenses.txt`). [THIRD_PARTY.md](THIRD_PARTY.md) lists the same projects.
+
+| Source (name, handle) | Link | License | What we used | Where it lives here | Commit / version |
+|---|---|---|---|---|---|
+| Hynek Schlawack (argon2-cffi) | https://github.com/hynek/argon2-cffi | MIT | Password hashing for local accounts. Bundled in `/opt/praxis-prime` via locked wheels. | `pyproject.toml`, `packaging/requirements-runtime.txt` | 25.1.0 |
+| pyca (cryptography) | https://github.com/pyca/cryptography | Apache-2.0 OR BSD-3-Clause | AES-GCM and signature checks. Bundled in `/opt/praxis-prime` via locked wheels. | `pyproject.toml`, `packaging/requirements-runtime.txt` | 50.0.2 |
+| Authlib (joserfc) | https://github.com/authlib/joserfc | BSD-3-Clause | JWT and JWKS checks. Bundled in `/opt/praxis-prime` via locked wheels. | `pyproject.toml`, `packaging/requirements-runtime.txt` | 1.7.5 |
+| PyOTP contributors (pyotp) | https://github.com/pyauth/pyotp | MIT | Local TOTP codes. Bundled in `/opt/praxis-prime` via locked wheels. | `pyproject.toml`, `packaging/requirements-runtime.txt` | 2.10.0 |
+| Kozea (tinycss2) | https://github.com/Kozea/tinycss2 | BSD-3-Clause | CSS parser for theme stylesheets. Bundled in `/opt/praxis-prime` via locked wheels. | `pyproject.toml`, `packaging/requirements-runtime.txt` | 1.5.1 |
+| Duo Labs (webauthn, py_webauthn) | https://github.com/duo-labs/py_webauthn | BSD-3-Clause | Local WebAuthn. Bundled in `/opt/praxis-prime` via locked wheels. | `pyproject.toml`, `packaging/requirements-runtime.txt` | 3.0.1 |
+
+Notable transitive wheels in that same virtualenv (locked; not a second copy in git):
+
+- argon2-cffi-bindings 26.1.0 (MIT, https://github.com/hynek/argon2-cffi-bindings) and cffi 2.1.1 (MIT-0, https://github.com/python-cffi/cffi), pulled in by argon2-cffi and cryptography
+- pycparser 3.0 (BSD-3-Clause, https://github.com/eliben/pycparser), pulled in by cffi
+- cbor2 6.1.5 (MIT, https://github.com/agronholm/cbor2), pyOpenSSL 26.4.0 (Apache-2.0, https://github.com/pyca/pyopenssl), pyasn1 0.6.4 (BSD-2-Clause, https://github.com/pyasn1/pyasn1), and pyasn1-modules 0.4.2 (BSD, https://github.com/pyasn1/pyasn1-modules), pulled in by webauthn
+- typing-extensions 4.16.0 (PSF-2.0, https://github.com/python/typing_extensions), pulled in by pyOpenSSL when Python is older than 3.13
+- webencodings 0.6.1 (BSD, https://github.com/gsnedders/python-webencodings), pulled in by tinycss2
+
+The Textual rows above are an optional `[tui]` extra. They are not shipped in the `.deb` or AUR package. The `.deb` and AUR packages still bundle the locked runtime wheels under each project's own license, as listed in this section and in `python-licenses.txt`.
+

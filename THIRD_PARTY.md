@@ -119,29 +119,35 @@ alias. TypeSafe's MIT SDKs are optional compatibility clients, not a
 dependency. The Jev model weights are proprietary and must not be copied.
 No TypeSafe source is vendored in `praxis_prime.decide`.
 
-## Python packages installed, not vendored
+## Python packages bundled in the `.deb` and AUR package
+
+The git tree does not vendor these projects as source. The `.deb` and AUR `praxis-prime-git` packages bundle the locked runtime wheels from `uv.lock` (also `packaging/requirements-runtime.txt`) into `/opt/praxis-prime`. Each wheel keeps its own license. Package builds write that inventory to `python-licenses.txt`. Optional `[tui]` packages are not part of that bundle.
 
 | Package | License | Note |
 |---|---|---|
-| argon2-cffi | MIT | Password hashing for local accounts. The Argon2 reference implementation it binds is CC0 or Apache-2.0. Neither tree is copied into this repository. |
-| webauthn (`duo-labs/py_webauthn`) | BSD-3-Clause | Local WebAuthn registration and authentication. No source is copied into this repository. |
-| pyotp | MIT | Local TOTP codes (RFC 6238). No source is copied into this repository. |
-| cryptography | Apache-2.0 OR BSD-3-Clause | AES-GCM for TOTP seeds in `accounts.db`, and the signature checks `webauthn` already needs. `webauthn` 3.0.x requires `cryptography>=49`. No source is copied into this repository. |
-| joserfc | BSD-3-Clause | JWT and JWKS checks for owner-configured OpenID Connect providers. No source is copied into this repository. |
-| cbor2 | MIT | Transitive dependency of `webauthn` for CBOR. No source is copied into this repository. |
-| pyOpenSSL | Apache-2.0 | Transitive dependency of `webauthn` 3.0.x (`pyOpenSSL>=26.3`). No source is copied into this repository. |
-| pyasn1 | BSD-2-Clause | Transitive dependency of `webauthn` for attestation structures. No source is copied into this repository. |
-| pyasn1-modules | BSD | Transitive dependency of `webauthn` for ASN.1 modules. No source is copied into this repository. |
-| tinycss2 | BSD-3-Clause | CSS parser for the theme `theme.css` allowlist. No source is copied into this repository. |
-| webencodings | BSD | Transitive dependency of tinycss2. No source is copied into this repository. |
-| textual | MIT | Full-screen terminal UI for `praxis-prime tui`. No source is copied into this repository. |
-| rich | MIT | Transitive dependency of textual. No source is copied into this repository. |
-| markdown-it-py | MIT | Transitive dependency of textual (via rich). No source is copied into this repository. |
-| mdit-py-plugins | MIT | Transitive dependency of markdown-it-py. No source is copied into this repository. |
-| mdurl | MIT | Transitive dependency of markdown-it-py. No source is copied into this repository. |
-| platformdirs | MIT | Transitive dependency of textual. No source is copied into this repository. |
-| linkify-it-py | MIT | Transitive dependency of markdown-it-py. No source is copied into this repository. |
-| pygments | BSD-2-Clause | Transitive dependency of rich. No source is copied into this repository. |
+| argon2-cffi | MIT | Password hashing for local accounts. Bundled in `/opt/praxis-prime` via locked wheels. The Argon2 reference implementation it binds is CC0 or Apache-2.0. |
+| argon2-cffi-bindings | MIT | Transitive dependency of argon2-cffi. Bundled in `/opt/praxis-prime` via locked wheels. |
+| cffi | MIT-0 | Transitive dependency of argon2-cffi-bindings and cryptography. Bundled in `/opt/praxis-prime` via locked wheels. |
+| pycparser | BSD-3-Clause | Transitive dependency of cffi. Bundled in `/opt/praxis-prime` via locked wheels. |
+| webauthn (`duo-labs/py_webauthn`) | BSD-3-Clause | Local WebAuthn registration and authentication. Bundled in `/opt/praxis-prime` via locked wheels. |
+| pyotp | MIT | Local TOTP codes (RFC 6238). Bundled in `/opt/praxis-prime` via locked wheels. |
+| cryptography | Apache-2.0 OR BSD-3-Clause | AES-GCM for TOTP seeds in `accounts.db`, and the signature checks `webauthn` already needs. `webauthn` 3.0.x requires `cryptography>=49`. Bundled in `/opt/praxis-prime` via locked wheels. |
+| joserfc | BSD-3-Clause | JWT and JWKS checks for owner-configured OpenID Connect providers. Bundled in `/opt/praxis-prime` via locked wheels. |
+| cbor2 | MIT | Transitive dependency of `webauthn` for CBOR. Bundled in `/opt/praxis-prime` via locked wheels. |
+| pyOpenSSL | Apache-2.0 | Transitive dependency of `webauthn` 3.0.x (`pyOpenSSL>=26.3`). Bundled in `/opt/praxis-prime` via locked wheels. |
+| pyasn1 | BSD-2-Clause | Transitive dependency of `webauthn` for attestation structures. Bundled in `/opt/praxis-prime` via locked wheels. |
+| pyasn1-modules | BSD | Transitive dependency of `webauthn` for ASN.1 modules. Bundled in `/opt/praxis-prime` via locked wheels. |
+| typing-extensions | PSF-2.0 | Transitive dependency of pyOpenSSL when Python is older than 3.13. Bundled in `/opt/praxis-prime` via locked wheels on those interpreters. |
+| tinycss2 | BSD-3-Clause | CSS parser for the theme `theme.css` allowlist. Bundled in `/opt/praxis-prime` via locked wheels. |
+| webencodings | BSD | Transitive dependency of tinycss2. Bundled in `/opt/praxis-prime` via locked wheels. |
+| textual | MIT | Optional extra `[tui]` for `praxis-prime tui`. Not shipped in the `.deb` or AUR package. |
+| rich | MIT | Optional `[tui]` transitive of textual. Not shipped in the `.deb` or AUR package. |
+| markdown-it-py | MIT | Optional `[tui]` transitive of textual (via rich). Not shipped in the `.deb` or AUR package. |
+| mdit-py-plugins | MIT | Optional `[tui]` transitive of markdown-it-py. Not shipped in the `.deb` or AUR package. |
+| mdurl | MIT | Optional `[tui]` transitive of markdown-it-py. Not shipped in the `.deb` or AUR package. |
+| platformdirs | MIT | Optional `[tui]` transitive of textual. Not shipped in the `.deb` or AUR package. |
+| linkify-it-py | MIT | Optional `[tui]` transitive of markdown-it-py. Not shipped in the `.deb` or AUR package. |
+| pygments | BSD-2-Clause | Optional `[tui]` transitive of rich. Not shipped in the `.deb` or AUR package. |
 
 ## Bundled fonts
 

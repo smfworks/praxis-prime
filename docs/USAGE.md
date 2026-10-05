@@ -10,6 +10,8 @@ source .venv/bin/activate
 python -m pip install -e ".[dev]"
 ```
 
+A local `.deb` and an Arch `praxis-prime-git` PKGBUILD build from this repository. They are not published to APT or the AUR. `get.smfworks.com` and `apt.smfworks.com` are not live. See the Install section in the repository README, [packaging/deb/README.md](../packaging/deb/README.md), and [packaging/aur/README.md](../packaging/aur/README.md).
+
 ## Chat and one-shot ask
 
 ```bash

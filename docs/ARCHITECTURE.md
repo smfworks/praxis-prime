@@ -1182,6 +1182,8 @@ WantedBy=default.target
 
 ## 27. Packaging & install
 
+Local packages build from this tree and are not published. On Ubuntu, `packaging/deb/build-deb.sh` writes a `.deb` that installs a virtual environment under `/opt/praxis-prime` (host architecture, because the runtime wheels include compiled extensions) and puts `praxis-prime`, `pprime`, and `praxis-primed` on `PATH`. On Arch, `packaging/aur/PKGBUILD` is `praxis-prime-git`. `get.smfworks.com` and `apt.smfworks.com` are not live, and neither package name is in the AUR or the Ubuntu archive. The blocks below are the published-install shape, not something to run today.
+
 ### 27.1 Ubuntu (22.04+/24.04+; glibc 2.35 floor, like OpenClaw's Linux app)
 
 ```bash
@@ -1197,7 +1199,7 @@ systemctl --user enable --now praxis-primed
 ```
 
 - Packages:
-  - `praxis-prime` (daemon + CLI `praxis-prime` with alias `pprime`; bundles its own Python via a relocatable build, e.g. a PyInstaller or python-build-standalone venv under `/opt/praxis-prime`)
+  - `praxis-prime` (daemon + CLI `praxis-prime` with alias `pprime`). The local `.deb` installs a virtual environment at `/opt/praxis-prime` linked to the system Python 3.12+ on the build host. A fully vendored interpreter (PyInstaller or python-build-standalone) remains a later option.
   - `praxis-prime-desktop` (Tauri)
   - `praxis-prime-voice` (ML models downloaded on first run, with a size prompt)
 - **AppImage** for non-APT distros (Tauri bundler + signed self-updater, as OpenClaw does).
@@ -1207,11 +1209,14 @@ systemctl --user enable --now praxis-primed
 ### 27.2 Omarchy (Arch + Hyprland)
 
 ```bash
-# AUR (until/unless accepted into pkgs.omarchy.org)
-yay -S praxis-prime-bin            # or praxis-prime-git
+# AUR (until/unless accepted into pkgs.omarchy.org). Not submitted yet.
+# yay -S praxis-prime-bin            # release tarball; not implemented
+# yay -S praxis-prime-git            # PKGBUILD in packaging/aur/; build locally with makepkg
 # Omarchy-style installer (mirrors omarchy-install-ai-hermes / -openclaw)
 praxis-prime omarchy install       # installs bar plugin, theme template, keybind, sets default agent (asks first)
 ```
+
+`packaging/aur/PKGBUILD` is `praxis-prime-git` and builds a `/opt/praxis-prime` virtualenv. It is not in the AUR. `praxis-prime-bin` waits on a release tarball and is not implemented. `praxis-prime omarchy install` (bar plugin, theme, keybind) is not part of the package.
 
 `praxis-prime omarchy install` does the following. Each step is printed first and asked about:
 1. Installs the **Quickshell bar plugin** to the Omarchy plugins dir, then runs `omarchy plugin validate` / `omarchy plugin enable` and `omarchy-shell shell rescanPlugins` (the OpenClaw `apps/linux/omarchy/install.sh` pattern).
