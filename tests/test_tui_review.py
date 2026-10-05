@@ -225,10 +225,8 @@ def test_highlight_follows_the_card_and_confirm_decides_that_id() -> None:
             await pilot.press("enter")
             await pilot.pause(0.1)
             assert frames.decisions == []
-            assert len(app.screen_stack) > 1
-            await pilot.pause(0.85)
-            await pilot.press("tab")
-            await pilot.press("enter")
+            assert len(app.screen_stack) == 1
+            await _confirm(pilot, "a")
             await _until(pilot, lambda: len(frames.decisions) == 1)
 
     asyncio.run(run())

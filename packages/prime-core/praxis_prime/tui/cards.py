@@ -7,6 +7,9 @@ Long fields are capped; the full text is a separate screen.
 
 from __future__ import annotations
 
+import hashlib
+import json
+
 from praxis_prime.approvals.card import HOST_FULL_WRITE
 from praxis_prime.sanitize import sanitize
 
@@ -37,6 +40,12 @@ def clip(text: str, limit: int) -> str:
 def card_truncated(item: dict[str, object]) -> bool:
     """True when the on-screen card hides the tail of a field."""
     return any(len(_plain(item, key)) > FIELD_LIMIT for key in _CAPPED)
+
+
+def approval_digest(item: dict[str, object]) -> str:
+    """Hash every raw field, including text the card cuts off."""
+    payload = json.dumps(item, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def render_card(item: dict[str, object], *, full: bool = False) -> str:

@@ -16,7 +16,14 @@ from textual.widgets._option_list import Option
 
 from praxis_prime.gateway.client import GatewayError
 from praxis_prime.sanitize import sanitize
-from praxis_prime.tui.cards import ACTION_LIMIT, card_truncated, clip, render_card, scope_label
+from praxis_prime.tui.cards import (
+    ACTION_LIMIT,
+    approval_digest,
+    card_truncated,
+    clip,
+    render_card,
+    scope_label,
+)
 from praxis_prime.tui.gateway import Readiness, TuiGateway
 from praxis_prime.tui.palette import Palette, fallback_palette, palette_from_http, resolve_mode
 from praxis_prime.tui.sessions import SessionBook
@@ -36,7 +43,8 @@ HELP = "\n".join(
         "Nothing is approved for you.",
         "Approvals, when that pane is focused:",
         "  a  approve once     s  always allow     d  deny",
-        "  Each opens a dialog on Cancel. Tab to Confirm, then Enter.",
+        "  Each opens a dialog on Cancel. Cancel closes at once.",
+        "  Tab to Confirm, then Enter. Confirm waits a moment.",
         "  Those keys do nothing in the middle of typing.",
         "  Enter on a row shows the card and does not decide.",
         "  v  shows the full text. Page to the end when the card was cut.",
@@ -85,6 +93,12 @@ class ConfirmDecision(ModalScreen[bool]):
         Binding("a", "noop", show=False),
         Binding("s", "noop", show=False),
         Binding("d", "noop", show=False),
+        Binding("up", "body_line_up", show=False),
+        Binding("down", "body_line_down", show=False),
+        Binding("pageup", "body_page_up", show=False),
+        Binding("pagedown", "body_page_down", show=False),
+        Binding("home", "body_home", show=False),
+        Binding("end", "body_end", show=False),
     ]
     DEFAULT_CSS = """
     ConfirmDecision {
@@ -151,7 +165,8 @@ class ConfirmDecision(ModalScreen[bool]):
             lines.append(self.scope)
         lines.append("Cancel is selected. Tab to Confirm, then press Enter.")
         with Vertical(id="confirm-box"):
-            with VerticalScroll(id="confirm-body"):
+            # The body stays out of the tab cycle. Keys and the mouse scroll it.
+            with VerticalScroll(id="confirm-body", can_focus=False, can_focus_children=False):
                 yield Static("\n".join(lines), id="confirm-text", markup=False)
             with Horizontal(id="confirm-actions"):
                 yield Button("Cancel", id="cancel", variant="primary")
@@ -162,15 +177,39 @@ class ConfirmDecision(ModalScreen[bool]):
         self.query_one("#cancel", Button).focus()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        if time.monotonic() - self._opened_at < _ARM_DELAY:
+        if event.button.id == "confirm":
+            if time.monotonic() - self._opened_at < _ARM_DELAY:
+                return
+            self.dismiss(True)
             return
-        self.dismiss(event.button.id == "confirm")
+        self.dismiss(False)
 
     def action_cancel(self) -> None:
         self.dismiss(False)
 
     def action_noop(self) -> None:
         return
+
+    def _body(self) -> VerticalScroll:
+        return self.query_one("#confirm-body", VerticalScroll)
+
+    def action_body_line_up(self) -> None:
+        self._body().scroll_up(animate=False)
+
+    def action_body_line_down(self) -> None:
+        self._body().scroll_down(animate=False)
+
+    def action_body_page_up(self) -> None:
+        self._body().scroll_page_up(animate=False)
+
+    def action_body_page_down(self) -> None:
+        self._body().scroll_page_down(animate=False)
+
+    def action_body_home(self) -> None:
+        self._body().scroll_home(animate=False)
+
+    def action_body_end(self) -> None:
+        self._body().scroll_end(animate=False)
 
 
 class SessionSwitch(Message):
@@ -567,7 +606,8 @@ class PraxisApp(App[None]):
         self._last_decide_at = 0.0
         self._card_key: tuple[str, str] | None = None
         self._truncated_id: str | None = None
-        self._full_read_id: str | None = None
+        self._full_read_key: tuple[str, str] | None = None
+        self._pending_key: tuple[str, str] | None = None
         self._transcript_timer: object | None = None
         self._transcript_dirty = False
         self._shown_lines: list[str] | None = None
@@ -691,15 +731,16 @@ class PraxisApp(App[None]):
             return
         if self._selected_id != approval_id:
             return
+        item = self._find_approval(approval_id) or {}
+        seen = approval_digest(item)
         if self._truncated_id == approval_id:
-            if self._full_read_id != approval_id:
+            if self._full_read_key != (approval_id, seen):
                 self._timeline_add("Press v and page through the full text before deciding.")
                 return
         elif not self._card_at_end():
             self._timeline_add("Scroll the approval card to the end before deciding.")
             return
         self._last_decide_at = now
-        item = self._find_approval(approval_id) or {}
         dialog = ConfirmDecision(
             approval_id=sanitize(approval_id, newlines=False),
             tool=sanitize(item.get("tool") or "", newlines=False),
@@ -709,14 +750,20 @@ class PraxisApp(App[None]):
         )
 
         def done(confirmed: bool | None) -> None:
+            if self._pending_key == (approval_id, seen):
+                self._pending_key = None
             if not confirmed or approval_id in self._latched:
                 return
-            if self._find_approval(approval_id) is None:
+            current = self._find_approval(approval_id)
+            if current is None or approval_digest(current) != seen:
+                self._timeline_add("The approval changed. Read it again before deciding.")
                 return
             self._latched.add(approval_id)
             self._send_decision(approval_id, event.decision)
 
+        self._pending_key = (approval_id, seen)
         self.push_screen(dialog, done)
+        self._refuse_if_approval_moved(approval_id, seen)
 
     @on(ApprovalView)
     def _on_approval_view(self, event: ApprovalView) -> None:
@@ -726,12 +773,20 @@ class PraxisApp(App[None]):
         if item is None:
             return
         self._selected_id = event.approval_id
+        seen = approval_digest(item)
 
         def done(met: bool | None) -> None:
-            if met and self._truncated_id == event.approval_id:
-                self._full_read_id = event.approval_id
+            if self._pending_key == (event.approval_id, seen):
+                self._pending_key = None
+            current = self._find_approval(event.approval_id)
+            if not met or current is None or approval_digest(current) != seen:
+                return
+            if self._truncated_id == event.approval_id:
+                self._full_read_key = (event.approval_id, seen)
 
+        self._pending_key = (event.approval_id, seen)
         self.push_screen(FullTextScreen(render_card(item, full=True)), done)
+        self._refuse_if_approval_moved(event.approval_id, seen)
 
     def _new_session(self) -> None:
         self.sessions.new()
@@ -1062,7 +1117,7 @@ class PraxisApp(App[None]):
         ids = [str(item.get("id") or "") for item in cleaned]
         self._latched.intersection_update(ids)
         if ids == self._approval_ids and all(
-            render_card(old) == render_card(new)
+            approval_digest(old) == approval_digest(new)
             for old, new in zip(self._approvals, cleaned, strict=True)
         ):
             self._approvals = cleaned
@@ -1126,12 +1181,16 @@ class PraxisApp(App[None]):
             widget.update("")
             self._card_key = None
             self._truncated_id = None
-            self._full_read_id = None
+            self._full_read_key = None
             scroller.furthest = 0.0
+            pending = self._pending_key
+            if pending is not None and self._find_approval(pending[0]) is None:
+                self._close_review("The approval changed. Read it again before deciding.")
             return
         approval_id = str(item.get("id") or "")
+        digest = approval_digest(item)
         text = render_card(item)
-        key = (approval_id, text)
+        key = (approval_id, digest)
         if key == self._card_key:
             return
         widget.update(text)
@@ -1139,7 +1198,29 @@ class PraxisApp(App[None]):
         scroller.scroll_home(animate=False)
         self._card_key = key
         self._truncated_id = approval_id if card_truncated(item) else None
-        self._full_read_id = None
+        self._full_read_key = None
+        self._dismiss_stale_review(approval_id, digest)
+
+    def _refuse_if_approval_moved(self, approval_id: str, seen: str) -> None:
+        current = self._find_approval(approval_id)
+        digest = approval_digest(current) if current is not None else ""
+        if current is not None and digest == seen:
+            return
+        self._dismiss_stale_review(approval_id, digest)
+
+    def _dismiss_stale_review(self, approval_id: str, digest: str) -> None:
+        """Close a confirm or full-text screen that is showing an older approval."""
+        pending = self._pending_key
+        if pending is None or pending == (approval_id, digest):
+            return
+        self._close_review("The approval changed. Read it again before deciding.")
+
+    def _close_review(self, message: str) -> None:
+        screen = self.screen
+        if not isinstance(screen, (ConfirmDecision, FullTextScreen)):
+            return
+        self._timeline_add(message)
+        screen.dismiss(False)
 
     def _card_at_end(self) -> bool:
         try:
