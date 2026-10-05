@@ -185,8 +185,7 @@ def refuse_misplaced_database(path: Path) -> None:
     parent = candidate.parent
     if _is_profiles_directory(parent):
         raise ValueError(
-            "refusing to use a profiles directory as the data directory; "
-            "pass the account data root"
+            "refusing to use a profiles directory as the data directory; pass the account data root"
         )
     profiles = parent.parent
     if profiles.name != "profiles" and not _same_directory(profiles, _known_profiles_dir()):
