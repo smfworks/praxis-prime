@@ -240,6 +240,11 @@ def _profile_choice(data_root: Path, profile: str) -> tuple[str, str]:
     return section.get("id", ""), section.get("mode", "")
 
 
+def profile_choice(data_root: Path, profile: str) -> tuple[str, str]:
+    """Theme id and mode stored for ``profile``. Same result as the selector."""
+    return _profile_choice(data_root, profile)
+
+
 def _read(path: Path, table: str, child: str) -> dict[str, str]:
     if lstat_kind(path) is not StatKind.FILE:
         return {}

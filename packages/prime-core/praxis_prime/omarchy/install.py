@@ -74,6 +74,14 @@ class Host:
     layout: str  # ``lua``, ``conf``, or ``unknown``
 
 
+@dataclass(frozen=True, slots=True)
+class KeyEdit:
+    """A bindings file to strip. ``link`` stays when the path is its target."""
+
+    path: Path
+    link: Path | None = None
+
+
 def shipped_template() -> bytes:
     """Bytes of the template inside the wheel."""
     return files("praxis_prime.omarchy").joinpath(TEMPLATE_NAME).read_bytes()
@@ -83,8 +91,8 @@ def status_command() -> int:
     """Print the Omarchy setup. Always exits 0."""
     try:
         sys.stdout.write(format_status() + "\n")
-    except OSError as exc:
-        print(f"{_PREFIX} {exc}", file=sys.stderr)
+    except (OSError, UnicodeDecodeError, OmarchyInstallError) as exc:
+        sys.stdout.write(f"Omarchy: unreadable ({exc})\n")
     return 0
 
 
@@ -110,7 +118,11 @@ def doctor_setup(env: Mapping[str, str]) -> tuple[str, str]:
     if home is None:
         return "warn", "HOME is unset. Run `praxis-prime omarchy install`."
     host = detect_host(env)
-    template = _template_state(template_path(env))
+    try:
+        template_state = _template_state(template_path(env))
+    except (OSError, UnicodeDecodeError) as exc:
+        template_state = f"unreadable: {exc}"
+    template = _plain_state(template_state)
     key_text, key_ok = _doctor_key(env, host)
     if template == "match":
         template_text = "template matches the shipped copy"
@@ -118,6 +130,10 @@ def doctor_setup(env: Mapping[str, str]) -> tuple[str, str]:
         template_text = "template differs from the shipped copy"
     elif template == "symlink":
         template_text = "template path is a symlink"
+    elif template == "unreadable":
+        template_text = f"template is unreadable ({_state_reason(template_state)})"
+    elif template == "other":
+        template_text = "template is not a regular file"
     else:
         template_text = "template is not installed"
     ready = template == "match" and key_ok
@@ -205,16 +221,43 @@ def bindings_path(env: Mapping[str, str], layout: str) -> Path:
 
 
 def praxis_prime_command() -> str:
-    """The ``praxis-prime`` on PATH, or this process's absolute ``argv[0]``."""
-    found = shutil.which("praxis-prime")
+    """Absolute path of an executable ``praxis-prime`` file.
+
+    The entry point beside the running interpreter wins when that file
+    exists and is executable. Otherwise the ``praxis-prime`` on ``PATH``
+    is used. Anything else is refused.
+    """
+    sibling = Path(sys.executable).parent / "praxis-prime"
+    found = _executable_command(sibling)
     if found:
-        return os.path.abspath(found)
-    raw = sys.argv[0]
-    if not raw or raw.startswith("-"):
-        raise OmarchyInstallError(
-            "praxis-prime is not on PATH, and this process has no usable argv[0]"
-        )
-    return os.path.abspath(raw)
+        return found
+    located = shutil.which("praxis-prime")
+    if located:
+        found = _executable_command(Path(located))
+        if found:
+            return found
+    raise OmarchyInstallError(
+        "praxis-prime was not found as an executable file next to this "
+        "Python interpreter or on PATH"
+    )
+
+
+def _executable_command(path: Path) -> str | None:
+    """Absolute path when ``path`` resolves to an executable regular file."""
+    try:
+        resolved = path.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return None
+    try:
+        info = os.stat(resolved)
+    except OSError:
+        return None
+    if not stat.S_ISREG(info.st_mode):
+        return None
+    candidate = os.path.abspath(path)
+    if os.access(candidate, os.X_OK) or os.access(resolved, os.X_OK):
+        return candidate
+    return None
 
 
 def launch_command() -> str:
@@ -263,7 +306,10 @@ def _install(
     theme_action = _theme_action(template_path(env)) if do_theme else "skip"
     key_action = _key_action(env, layout, command) if do_key else "skip"
     refresh = shutil.which("omarchy-theme-refresh") if do_theme else None
-    hyprctl = shutil.which("hyprctl") if do_key else None
+    # hyprctl is offered only when a keybind write can change Hyprland.
+    hyprctl = None
+    if do_key and key_action not in {"skip", "noop"}:
+        hyprctl = shutil.which("hyprctl")
     profile_action = _profile_action(profile) if profile else "skip"
 
     _print_plan(
@@ -291,7 +337,7 @@ def _install(
         theme_action=theme_action,
         key_action=key_action,
         refresh=refresh,
-        hyprctl=hyprctl if key_action != "noop" else None,
+        hyprctl=hyprctl,
         profile_action=profile_action,
     )
     if needs_user and not yes and not _isatty():
@@ -343,8 +389,6 @@ def _install(
 
     if do_key and wrote_key:
         failed = _maybe_reload(hyprctl, yes=yes) or failed
-    elif do_key and key_action == "noop" and not hyprctl:
-        pass
     return 1 if failed else 0
 
 
@@ -360,49 +404,47 @@ def _uninstall(
     host = detect_host(env)
     print(f"{_PREFIX} {_host_phrase(host)}")
     theme_remove = False
-    theme_keep = False
     if do_theme:
         state = _template_state(template_path(env))
-        if state == "symlink" and not force:
+        kind = _plain_state(state)
+        if kind == "unreadable":
+            raise OmarchyInstallError(_state_reason(state))
+        if kind == "symlink" and not force:
             raise OmarchyInstallError(
                 f"{template_path(env)} is a symlink. Refusing to remove it without --force."
             )
-        if state == "match":
+        if kind == "match":
             theme_remove = True
-        elif state == "differ" and force:
+        elif kind == "differ" and force:
             theme_remove = True
-        elif state == "differ":
-            theme_keep = True
+        elif kind == "differ":
             print(
                 f"{_PREFIX} template differs from the shipped copy. "
                 "Left it in place. Re-run with --force to remove it."
             )
-        elif state == "absent":
+        elif kind == "absent":
             print(f"{_PREFIX} template is not installed")
-        elif state == "symlink" and force:
+        elif kind == "symlink" and force:
             theme_remove = True
 
-    key_hits: list[Path] = []
-    key_unlinks: list[Path] = []
+    key_edits: list[KeyEdit] = []
     if do_key:
-        key_hits, key_unlinks = _plan_key_removal(env, force=force)
-        if not key_hits and not key_unlinks:
+        key_edits = _plan_key_removal(env, force=force)
+        if not key_edits:
             print(f"{_PREFIX} keybind block is not installed")
 
     if dry_run:
         if theme_remove:
             removing = template_path(env)
-            kind = "symlink " if lstat_kind(removing) is StatKind.SYMLINK else ""
-            print(f"{_PREFIX} dry-run: would remove {kind}{removing}")
-        for path in key_unlinks:
-            print(f"{_PREFIX} dry-run: would remove symlink {path}")
-        for path in key_hits:
-            print(f"{_PREFIX} dry-run: would remove the managed block from {path}")
+            kind_word = "symlink " if lstat_kind(removing) is StatKind.SYMLINK else ""
+            print(f"{_PREFIX} dry-run: would remove {kind_word}{removing}")
+        for edit in key_edits:
+            print(f"{_PREFIX} dry-run: {_key_edit_phrase(edit)}")
         print(f"{_PREFIX} dry-run: wrote nothing")
         print(f"{_PREFIX} {THEME_CLEAR_HINT}")
         return 0
 
-    needs = theme_remove or bool(key_hits) or bool(key_unlinks)
+    needs = theme_remove or bool(key_edits)
     if needs and not yes and not _isatty():
         print(
             f"{_PREFIX} no terminal, so nothing was changed. "
@@ -416,23 +458,15 @@ def _uninstall(
     elif theme_remove:
         print(f"{_PREFIX} skipped the theme template")
 
-    for path in key_unlinks:
-        if _allow(f"Remove the symlink {path.name}? The file it points at stays.", yes=yes):
-            path.unlink()
-            print(f"{_PREFIX} removed symlink {path}")
+    for edit in key_edits:
+        if _allow(_key_edit_prompt(edit), yes=yes):
+            _strip_keybind(edit.path, force=force, link=edit.link)
         else:
-            print(f"{_PREFIX} skipped {path}")
-    for path in key_hits:
-        if _allow(f"Remove the managed keybind block from {path.name}?", yes=yes):
-            _strip_keybind(path, force=force)
-        else:
-            print(f"{_PREFIX} skipped {path}")
+            print(f"{_PREFIX} skipped {edit.link or edit.path}")
 
     if do_theme or do_key:
         print(f"{_PREFIX} profile selections were left unchanged")
         print(f"{_PREFIX} {THEME_CLEAR_HINT}")
-    if theme_keep:
-        return 0
     return 0
 
 
@@ -479,13 +513,22 @@ def _print_plan(
         print(f"{_PREFIX} {THEME_SET_HINT}")
     if do_key:
         path = bindings_path(os.environ, layout)
-        print(f"{_PREFIX} {label}keybind file {path} ({key_action})")
+        target = _followed_bindings(path)
+        if lstat_kind(path) is StatKind.SYMLINK:
+            if target == path:
+                shown = f"{path} (symlink; target was not resolved)"
+            else:
+                shown = f"{target} through symlink {path}"
+            verb = "would edit" if dry_run else "edit"
+            print(f"{_PREFIX} {label}{verb} {shown} ({key_action})")
+        else:
+            print(f"{_PREFIX} {label}keybind file {path} ({key_action})")
         if command:
             print(f"{_PREFIX} {label}command: {command}")
-        if hyprctl and key_action != "noop":
+        if hyprctl:
             verb = "would run" if dry_run else "can run"
             print(f"{_PREFIX} {label}{verb} hyprctl reload")
-        elif key_action != "noop":
+        elif key_action not in {"skip", "noop"}:
             print(f"{_PREFIX} the keybind applies the next time Hyprland reloads")
 
 
@@ -503,7 +546,7 @@ def _needs_user(
         return True
     if refresh and theme_action != "skip":
         return True
-    if hyprctl and key_action not in {"skip", "noop"}:
+    if hyprctl:
         return True
     return profile_action not in {"skip", "noop"}
 
@@ -623,8 +666,10 @@ def _write_keybind(env: Mapping[str, str], layout: str, command: str, *, force: 
     print(f"{_PREFIX} wrote {destination}")
 
 
-def _strip_keybind(path: Path, *, force: bool) -> None:
-    destination = _destination(path, force=force)
+def _strip_keybind(path: Path, *, force: bool, link: Path | None = None) -> None:
+    # ``link`` means ``path`` is already the resolved regular file. Do not
+    # replace the symlink that names it.
+    destination = path if link is not None else _destination(path, force=force)
     layout = "conf" if destination.name.endswith(".conf") else "lua"
     begin, end = _markers(layout)
     current = _read_text(destination)
@@ -635,12 +680,17 @@ def _strip_keybind(path: Path, *, force: bool) -> None:
     backup = _backup(destination)
     print(f"{_PREFIX} backed up {backup}")
     _atomic_write(destination, updated.encode("utf-8"))
+    if link is not None:
+        print(
+            f"{_PREFIX} removed the managed block from {destination} (symlink {link} left in place)"
+        )
+        return
     print(f"{_PREFIX} removed the managed block from {destination}")
 
 
 def _select_profile(profile: str) -> None:
     from praxis_prime.paths import data_dir
-    from praxis_prime.themes.cli import _audit_choice
+    from praxis_prime.themes.cli import audit_choice
     from praxis_prime.themes.errors import ThemeError
     from praxis_prime.themes.select import set_profile_theme
 
@@ -649,7 +699,7 @@ def _select_profile(profile: str) -> None:
         choice = set_profile_theme(data, profile, "omarchy", "system")
     except ThemeError as exc:
         raise OmarchyInstallError(str(exc)) from exc
-    _audit_choice(
+    audit_choice(
         data,
         choice.theme_id,
         choice.mode,
@@ -663,9 +713,9 @@ def _profile_action(profile: str) -> str:
     if not profile:
         return "skip"
     from praxis_prime.paths import data_dir
-    from praxis_prime.themes.select import _profile_choice
+    from praxis_prime.themes.select import profile_choice
 
-    choice_id, choice_mode = _profile_choice(data_dir(), profile)
+    choice_id, choice_mode = profile_choice(data_dir(), profile)
     if choice_id == "omarchy" and (choice_mode or "system") == "system":
         return "noop"
     return "set"
@@ -689,7 +739,7 @@ def _template_matches() -> bool:
         path = template_path()
     except OmarchyInstallError:
         return False
-    return _template_state(path) == "match"
+    return _plain_state(_template_state(path)) == "match"
 
 
 def _key_action(env: Mapping[str, str], layout: str, command: str) -> str:
@@ -721,7 +771,7 @@ def _layout_for_write(host: Host, *, force: bool) -> str:
 
 
 def _refuse_different_template(path: Path, *, force: bool) -> None:
-    state = _template_state(path)
+    state = _plain_state(_template_state(path))
     if state == "differ" and not force:
         raise OmarchyInstallError(
             f"{path} differs from the shipped template. "
@@ -873,10 +923,11 @@ def _reject_unsafe(token: str) -> None:
     if not token:
         raise OmarchyInstallError("the praxis-prime path is empty")
     for char in token:
-        if char in "\"'\\#," or ord(char) < 32 or ord(char) == 127:
+        if char in "\"'\\#$," or ord(char) < 32 or ord(char) == 127:
             raise OmarchyInstallError(
-                "the praxis-prime path cannot be quoted safely "
-                f"for the Hyprland config: {token!r}"
+                "the praxis-prime path cannot be placed safely in the Hyprland "
+                "config (a quote, backslash, #, $, comma, or a control character): "
+                f"{token!r}"
             )
 
 
@@ -886,15 +937,32 @@ def _shell_quote(token: str) -> str:
     return "'" + token + "'"
 
 
+def _plain_state(state: str) -> str:
+    if state.startswith("unreadable:"):
+        return "unreadable"
+    return state
+
+
+def _state_reason(state: str) -> str:
+    if state.startswith("unreadable:"):
+        return state.split(":", 1)[1].strip()
+    return state
+
+
 def _template_state(path: Path) -> str:
     kind = lstat_kind(path)
     if kind is StatKind.MISSING:
         return "absent"
     if kind is StatKind.SYMLINK:
         return "symlink"
+    if kind is StatKind.UNREADABLE:
+        return f"unreadable: {path} is not readable"
     if kind is not StatKind.FILE:
         return "other"
-    current = _read_regular(path)
+    try:
+        current = _read_regular(path)
+    except (OmarchyInstallError, OSError, UnicodeDecodeError) as exc:
+        return f"unreadable: {exc}"
     if current is None:
         return "absent"
     if current == shipped_template():
@@ -904,21 +972,29 @@ def _template_state(path: Path) -> str:
 
 def _template_phrase(path: Path) -> str:
     state = _template_state(path)
-    if state == "match":
+    kind = _plain_state(state)
+    if kind == "match":
         return f"Template: installed, matches the shipped copy ({path})"
-    if state == "differ":
+    if kind == "differ":
         return f"Template: installed, differs from the shipped copy ({path})"
-    if state == "symlink":
+    if kind == "symlink":
         return f"Template: symlink, left unread ({path})"
-    if state == "other":
+    if kind == "other":
         return f"Template: not a regular file ({path})"
+    if kind == "unreadable":
+        return f"Template: unreadable ({_state_reason(state)})"
     return f"Template: not installed ({path})"
 
 
 def _keybind_phrase(env: Mapping[str, str], host: Host) -> str:
-    paths = _status_key_paths(env, host)
+    try:
+        paths = _status_key_paths(env, host)
+    except (OmarchyInstallError, OSError, UnicodeDecodeError) as exc:
+        return f"Keybind: unreadable ({exc})"
     for path in paths:
         state = _key_state(path)
+        if _plain_state(state) == "unreadable":
+            return f"Keybind: unreadable ({_state_reason(state)})"
         if state:
             return f"Keybind: {state} ({path})"
     path = paths[0] if paths else bindings_path(env, "lua")
@@ -927,9 +1003,14 @@ def _keybind_phrase(env: Mapping[str, str], host: Host) -> str:
 
 def _key_state(path: Path) -> str:
     kind = lstat_kind(path)
+    if kind is StatKind.UNREADABLE:
+        return f"unreadable: {path} is not readable"
     if kind is not StatKind.FILE:
         return ""
-    text = _read_text(path)
+    try:
+        text = _read_text(path)
+    except (OmarchyInstallError, OSError, UnicodeDecodeError) as exc:
+        return f"unreadable: {exc}"
     if _MANAGED_MARK not in text:
         return ""
     layout = "conf" if path.name.endswith(".conf") else "lua"
@@ -945,10 +1026,16 @@ def _key_state(path: Path) -> str:
 
 
 def _doctor_key(env: Mapping[str, str], host: Host) -> tuple[str, bool]:
-    for path in _status_key_paths(env, host):
+    try:
+        paths = _status_key_paths(env, host)
+    except (OmarchyInstallError, OSError, UnicodeDecodeError) as exc:
+        return f"keybind is unreadable ({exc})", False
+    for path in paths:
         if lstat_kind(path) is StatKind.SYMLINK:
             return "keybind path is a symlink", False
         state = _key_state(path)
+        if _plain_state(state) == "unreadable":
+            return f"keybind is unreadable ({_state_reason(state)})", False
         if state == "installed":
             return "keybind is installed", True
         if state:
@@ -977,32 +1064,84 @@ def _uninstall_key_paths(env: Mapping[str, str], host: Host) -> list[Path]:
     return [bindings_path(env, "lua"), bindings_path(env, "conf")]
 
 
-def _plan_key_removal(env: Mapping[str, str], *, force: bool) -> tuple[list[Path], list[Path]]:
-    """Regular files to edit, and symlinks to unlink.
+def _plan_key_removal(env: Mapping[str, str], *, force: bool) -> list[KeyEdit]:
+    """Bindings files whose managed block should be stripped.
 
-    A leaf symlink is not followed into its target. ``--force`` removes the
-    link when the target contains the managed block. A symlinked parent is
-    refused unless ``--force``, and then the block is edited in place.
+    A leaf symlink is refused without ``--force``. With ``--force`` the
+    block is removed from the regular file the link names, after a backup
+    beside that file. The link stays. A symlinked parent is refused unless
+    ``--force``, and then the block is edited in place.
     """
-    edits: list[Path] = []
-    unlinks: list[Path] = []
+    edits: list[KeyEdit] = []
     for path in _uninstall_key_paths(env, detect_host(env)):
         if lstat_kind(path) is StatKind.SYMLINK:
-            if not _symlink_contains_mark(path):
-                continue
-            if not force:
-                raise OmarchyInstallError(
-                    f"{path} is a symlink ({_link_target(path)}). "
-                    "Refusing to remove it without --force. "
-                    "--force removes the symlink and leaves the file it points at."
-                )
-            unlinks.append(path)
+            edit = _plan_symlink_key(path, force=force)
+            if edit is not None:
+                edits.append(edit)
             continue
         if not _file_has_mark(path):
             continue
         _refuse_symlink(path, force=force)
-        edits.append(path)
-    return edits, unlinks
+        edits.append(KeyEdit(path=path))
+    return edits
+
+
+def _plan_symlink_key(path: Path, *, force: bool) -> KeyEdit | None:
+    if not force:
+        if _symlink_contains_mark(path):
+            raise OmarchyInstallError(
+                f"{path} is a symlink ({_link_target(path)}). "
+                "Refusing to edit it without --force. "
+                "--force removes the managed block from the file it names "
+                "and leaves the link in place."
+            )
+        return None
+    target = _resolve_bindings_target(path)
+    if not _file_has_mark(target):
+        return None
+    return KeyEdit(path=target, link=path)
+
+
+def _resolve_bindings_target(path: Path) -> Path:
+    """The regular file a bindings symlink names.
+
+    Uses ``Path.resolve(strict=True)`` and ``os.path.realpath``. Raises
+    ``OmarchyInstallError`` when the target is missing, not a regular file,
+    or cannot be read. Nothing is written.
+    """
+    try:
+        resolved = path.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise OmarchyInstallError(
+            f"cannot resolve symlink {path} ({_link_target(path)}): {exc}. "
+            "The symlink was left in place."
+        ) from exc
+    resolved = Path(os.path.realpath(resolved))
+    if lstat_kind(resolved) is not StatKind.FILE:
+        raise OmarchyInstallError(
+            f"{path} points at {resolved}, which is not a regular file. "
+            "The symlink was left in place."
+        )
+    try:
+        _read_text(resolved)
+    except OmarchyInstallError as exc:
+        raise OmarchyInstallError(
+            f"{path} points at {resolved}, which cannot be read: {exc}. "
+            "The symlink was left in place."
+        ) from exc
+    return resolved
+
+
+def _key_edit_phrase(edit: KeyEdit) -> str:
+    if edit.link is not None:
+        return f"would remove the managed block from {edit.path} (symlink {edit.link} stays)"
+    return f"would remove the managed block from {edit.path}"
+
+
+def _key_edit_prompt(edit: KeyEdit) -> str:
+    if edit.link is not None:
+        return f"Remove the managed keybind block from {edit.path}? The symlink {edit.link} stays."
+    return f"Remove the managed keybind block from {edit.path.name}?"
 
 
 def _symlink_contains_mark(path: Path) -> bool:
@@ -1038,15 +1177,15 @@ def _rendered_phrase() -> str:
 def _profile_phrase() -> str:
     from praxis_prime.paths import data_dir
     from praxis_prime.profiles.home import list_profiles
-    from praxis_prime.themes.select import _profile_choice
+    from praxis_prime.themes.select import profile_choice
 
     try:
         names = [
             name
             for name in list_profiles(data_dir())
-            if _profile_choice(data_dir(), name)[0] == "omarchy"
+            if profile_choice(data_dir(), name)[0] == "omarchy"
         ]
-    except OSError:
+    except (OSError, OmarchyInstallError, UnicodeDecodeError):
         return "Profiles: unreadable"
     if not names:
         return "Profiles: none chose omarchy"
@@ -1287,15 +1426,26 @@ def _backup(path: Path) -> Path:
     data = _read_regular(path)
     if data is None:
         raise OmarchyInstallError(f"cannot back up {path}")
-    _atomic_write(candidate, data)
+    mode = stat.S_IMODE(os.stat(path).st_mode)
+    _atomic_write(candidate, data, mode=mode)
     return candidate
 
 
-def _atomic_write(path: Path, data: bytes) -> None:
+def _file_mode(path: Path) -> int:
+    """Permission bits of an existing file, or 0644 when the path is new."""
+    try:
+        return stat.S_IMODE(os.stat(path).st_mode)
+    except OSError:
+        return 0o644
+
+
+def _atomic_write(path: Path, data: bytes, *, mode: int | None = None) -> None:
     _ensure_dir(path.parent)
+    if mode is None:
+        mode = _file_mode(path)
     descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
     try:
-        os.fchmod(descriptor, 0o644)
+        os.fchmod(descriptor, mode)
         with os.fdopen(descriptor, "wb") as handle:
             handle.write(data)
             handle.flush()
@@ -1307,7 +1457,7 @@ def _atomic_write(path: Path, data: bytes) -> None:
         except OSError:
             pass
         raise
-    os.chmod(path, 0o644)
+    os.chmod(path, mode)
 
 
 def _ensure_dir(path: Path) -> None:

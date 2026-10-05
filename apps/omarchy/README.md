@@ -1,6 +1,6 @@
 # Omarchy integration
 
-`praxis-prime omarchy install` writes the theme template and the Super+Alt+A keybind. `praxis-prime omarchy status` reports them. `praxis-prime omarchy uninstall` removes the bytes this command wrote. `pprime omarchy` is the same command. The steps, flags, and live-theme behaviour are in [docs/USAGE.md](../../docs/USAGE.md).
+`praxis-prime omarchy install` writes the theme template and the Super+Alt+A keybind. `praxis-prime omarchy status` reports them. `praxis-prime omarchy uninstall` removes the bytes this command wrote. On a symlinked bindings file, `uninstall --force` removes the managed block from the file the link names, after a `.bak-<UTC timestamp>` copy, and leaves the link in place. `pprime omarchy` is the same command. The steps, flags, and live-theme behaviour are in [docs/USAGE.md](../../docs/USAGE.md).
 
 The template in this directory, `praxis-prime.json.tpl`, matches the copy shipped in the wheel at `praxis_prime/omarchy/praxis-prime.json.tpl`. A test checks the bytes. Omarchy renders `~/.config/omarchy/themed/praxis-prime.json.tpl` into `~/.local/state/omarchy/current/theme/praxis-prime.json` when the theme changes, or when `omarchy-theme-refresh` runs. The adapter reads that rendered file.
 

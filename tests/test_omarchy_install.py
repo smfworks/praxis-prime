@@ -30,7 +30,7 @@ from praxis_prime.omarchy.install import (
 from praxis_prime.paths import data_dir
 from praxis_prime.profiles.home import create_profile
 from praxis_prime.themes.omarchy import _COLOR_KEYS, LIVE_ID, installed, theme_file
-from praxis_prime.themes.select import _profile_choice, lock_state, set_lock, set_profile_theme
+from praxis_prime.themes.select import lock_state, profile_choice, set_lock, set_profile_theme
 
 _REAL_COMMAND = omarchy_install.praxis_prime_command
 _REPO = Path(__file__).resolve().parents[1]
@@ -260,7 +260,7 @@ def test_profile_selects_omarchy_and_leaves_the_lock(
     create_profile(data_dir(), "desk")
     set_lock(data_dir(), "smf.praxis", "dark")
     assert _install(theme=True, yes=True, profile="desk") == 0
-    assert _profile_choice(data_dir(), "desk") == ("omarchy", "system")
+    assert profile_choice(data_dir(), "desk") == ("omarchy", "system")
     assert lock_state(data_dir()) == ("smf.praxis", "dark")
     assert "set desk theme smf.praxis mode dark" in capsys.readouterr().out
 
@@ -268,7 +268,7 @@ def test_profile_selects_omarchy_and_leaves_the_lock(
     assert "already uses omarchy" in capsys.readouterr().out
     _version("4.0.0")
     assert _install(keybind=True, yes=True, profile="desk") == 0
-    assert _profile_choice(data_dir(), "desk") == ("omarchy", "system")
+    assert profile_choice(data_dir(), "desk") == ("omarchy", "system")
     assert lock_state(data_dir()) == ("smf.praxis", "dark")
 
     assert _install(theme=True, yes=True) == 0
@@ -416,20 +416,53 @@ def test_unsafe_path_is_refused_and_a_space_is_quoted(
     assert '"' + "/home/me/My Programs/praxis-prime" + '"' not in text
 
 
-def test_command_resolution_uses_path_then_argv(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_command_resolution_prefers_interpreter_then_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     monkeypatch.setattr(omarchy_install, "praxis_prime_command", _REAL_COMMAND)
+    py_dir = tmp_path / "py"
+    py_dir.mkdir()
+    monkeypatch.setattr(sys, "executable", str(py_dir / "python3"))
+    sibling = py_dir / "praxis-prime"
+    sibling.write_text("#!/bin/sh\n", encoding="utf-8")
+    sibling.chmod(0o755)
+    other = tmp_path / "other" / "praxis-prime"
+    other.parent.mkdir()
+    other.write_text("#!/bin/sh\n", encoding="utf-8")
+    other.chmod(0o755)
     monkeypatch.setattr(
         omarchy_install.shutil,
         "which",
-        lambda name: "/usr/local/bin/praxis-prime" if name == "praxis-prime" else None,
+        lambda name: str(other) if name == "praxis-prime" else None,
     )
-    assert _REAL_COMMAND() == "/usr/local/bin/praxis-prime"
-    monkeypatch.setattr(omarchy_install.shutil, "which", lambda _name: None)
-    monkeypatch.setattr(sys, "argv", ["/tmp/from-argv/praxis-prime"])
-    assert _REAL_COMMAND() == "/tmp/from-argv/praxis-prime"
-    monkeypatch.setattr(sys, "argv", ["-"])
+    assert _REAL_COMMAND() == os.path.abspath(sibling)
+
+    sibling.chmod(0o644)
+    assert _REAL_COMMAND() == os.path.abspath(other)
+
+    other.chmod(0o644)
     with pytest.raises(omarchy_install.OmarchyInstallError):
         _REAL_COMMAND()
+
+    other.chmod(0o755)
+    other.unlink()
+    other.mkdir()
+    with pytest.raises(omarchy_install.OmarchyInstallError):
+        _REAL_COMMAND()
+
+    monkeypatch.setattr(omarchy_install.shutil, "which", lambda _name: None)
+    sibling.unlink()
+    monkeypatch.setattr(sys, "argv", ["/tmp/from-argv/praxis-prime"])
+    with pytest.raises(omarchy_install.OmarchyInstallError):
+        _REAL_COMMAND()
+
+    real = tmp_path / "real-prime"
+    real.write_text("#!/bin/sh\n", encoding="utf-8")
+    real.chmod(0o755)
+    sibling.symlink_to(real)
+    assert _REAL_COMMAND() == os.path.abspath(sibling)
+    assert os.path.realpath(sibling) == os.path.realpath(real)
 
 
 def test_non_omarchy_does_not_create_bindings_without_force() -> None:
@@ -489,7 +522,7 @@ def test_uninstall_removes_only_our_bytes(capsys: pytest.CaptureFixture[str]) ->
     _version("4.0.0")
     create_profile(data_dir(), "desk")
     assert _install(yes=True, profile="desk") == 0
-    assert _profile_choice(data_dir(), "desk") == ("omarchy", "system")
+    assert profile_choice(data_dir(), "desk") == ("omarchy", "system")
     user = 'o.bind("SUPER + SHIFT + R", "SSH", "alacritty")\n'
     path = _bindings()
     path.write_text(user + path.read_text(encoding="utf-8"), encoding="utf-8")
@@ -498,7 +531,7 @@ def test_uninstall_removes_only_our_bytes(capsys: pytest.CaptureFixture[str]) ->
     left = path.read_text(encoding="utf-8")
     assert "praxis-prime keybind" not in left
     assert "SSH" in left
-    assert _profile_choice(data_dir(), "desk") == ("omarchy", "system")
+    assert profile_choice(data_dir(), "desk") == ("omarchy", "system")
     assert THEME_CLEAR_HINT in capsys.readouterr().out
 
     _template().parent.mkdir(parents=True, exist_ok=True)
@@ -521,18 +554,192 @@ def test_uninstall_removes_only_our_bytes(capsys: pytest.CaptureFixture[str]) ->
     assert not link.exists()
     assert real.read_bytes() == shipped_template()
 
-    target = _home() / "kept-bindings.lua"
-    marker = omarchy_install.LUA_BEGIN + "\n" + omarchy_install.LUA_END + "\n"
-    target.write_text(marker, encoding="utf-8")
-    bindings = _bindings()
-    if bindings.exists() or bindings.is_symlink():
-        bindings.unlink()
-    bindings.symlink_to(target)
+
+def _foreign_binds(layout: str) -> tuple[str, str, str]:
+    """``(filename, non-Praxis bytes, managed block)`` for one layout."""
+    command = (
+        "omarchy-launch-or-focus-tui --app-id=org.omarchy.praxis-prime /usr/bin/praxis-prime tui"
+    )
+    block = omarchy_install._block(layout, command)
+    if layout == "conf":
+        user = (
+            "bindd = SUPER, Return, Terminal, exec, alacritty\n"
+            "bindd = SUPER SHIFT, Q, Close, exec, hyprctl dispatch killactive\n"
+        )
+        return "bindings.conf", user, block
+    user = (
+        'hl.bind("SUPER + RETURN", "Terminal", "alacritty")\n'
+        'hl.bind("SUPER + SHIFT + Q", "Close", "hyprctl dispatch killactive")\n'
+    )
+    return "bindings.lua", user, block
+
+
+@pytest.mark.parametrize("layout", ["lua", "conf"])
+def test_uninstall_force_strips_the_symlink_target(
+    layout: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _version("3.1.0" if layout == "conf" else "4.0.0")
+    name, user, block = _foreign_binds(layout)
+    target = _home() / f"real-{name}"
+    payload = (user + block).encode("utf-8")
+    target.write_bytes(payload)
+    link = _bindings(name)
+    link.parent.mkdir(parents=True, exist_ok=True)
+    if link.exists() or link.is_symlink():
+        link.unlink()
+    link.symlink_to(target)
+    link_text = os.readlink(link)
+    inode = link.lstat().st_ino
+
     assert _uninstall(keybind=True, yes=True) == 1
-    assert bindings.is_symlink()
+    assert link.is_symlink()
+    assert os.readlink(link) == link_text
+    assert target.read_bytes() == payload
+
+    assert _uninstall(keybind=True, yes=True, force=True, dry_run=True) == 0
+    preview = capsys.readouterr().out
+    assert str(target) in preview
+    assert str(link) in preview
+    assert "would remove the managed block" in preview
+    assert target.read_bytes() == payload
+    assert link.is_symlink()
+    assert os.readlink(link) == link_text
+
     assert _uninstall(keybind=True, yes=True, force=True) == 0
-    assert not bindings.exists()
-    assert target.read_text(encoding="utf-8") == marker
+    assert link.is_symlink()
+    assert link.lstat().st_ino == inode
+    assert os.readlink(link) == link_text
+    assert os.path.realpath(link) == os.path.realpath(target)
+    assert target.read_bytes() == user.encode("utf-8")
+    assert b"praxis-prime keybind" not in target.read_bytes()
+    backups = _baks(target)
+    assert len(backups) == 1
+    saved = backups[0].read_bytes()
+    assert user.encode("utf-8") in saved
+    assert block.encode("utf-8") in saved
+    assert not _baks(link)
+
+
+def test_uninstall_force_refuses_a_bindings_symlink_that_is_not_a_file() -> None:
+    _version("4.0.0")
+    folder = _home() / "bindings-dir"
+    folder.mkdir()
+    link = _bindings()
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(folder)
+    assert _uninstall(keybind=True, yes=True, force=True) == 1
+    assert link.is_symlink()
+    assert os.readlink(link) == str(folder)
+    assert folder.is_dir()
+    assert not _baks(folder)
+
+    missing = _home() / "missing-bindings.lua"
+    link.unlink()
+    link.symlink_to(missing)
+    assert _uninstall(keybind=True, yes=True) == 0
+    assert link.is_symlink()
+    assert _uninstall(keybind=True, yes=True, force=True) == 1
+    assert link.is_symlink()
+    assert os.readlink(link) == str(missing)
+    assert not missing.exists()
+
+
+def test_uninstall_force_refuses_an_unreadable_symlink_target() -> None:
+    if os.geteuid() == 0:
+        pytest.skip("root can read mode 000 files")
+    _version("4.0.0")
+    _name, user, block = _foreign_binds("lua")
+    target = _home() / "secret-bindings.lua"
+    original = (user + block).encode("utf-8")
+    target.write_bytes(original)
+    target.chmod(0)
+    link = _bindings()
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(target)
+    try:
+        assert _uninstall(keybind=True, yes=True, force=True) == 1
+        assert link.is_symlink()
+        assert os.readlink(link) == str(target)
+        assert not _baks(target)
+    finally:
+        target.chmod(0o644)
+    assert target.read_bytes() == original
+
+
+def test_install_keeps_an_existing_bindings_mode() -> None:
+    _version("4.0.0")
+    path = _bindings()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('hl.bind("SUPER + RETURN", "Terminal", "alacritty")\n', encoding="utf-8")
+    path.chmod(0o600)
+    assert _install(keybind=True, yes=True) == 0
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    backups = _baks(path)
+    assert len(backups) == 1
+    assert stat.S_IMODE(backups[0].stat().st_mode) == 0o600
+    assert b"SUPER + RETURN" in backups[0].read_bytes()
+
+
+def test_dollar_in_the_command_path_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(omarchy_install, "praxis_prime_command", lambda: "/opt/praxis$prime")
+    for version, name in (("4.0.0", "bindings.lua"), ("3.1.0", "bindings.conf")):
+        _version(version)
+        path = _bindings(name)
+        if path.exists() or path.is_symlink():
+            path.unlink()
+        assert _install(keybind=True, yes=True) == 1
+        assert not path.exists()
+
+
+def test_unreadable_bindings_do_not_crash_status(capsys: pytest.CaptureFixture[str]) -> None:
+    _version("4.0.0")
+    path = _bindings()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"\xff\xfe\x00bad")
+    text = format_status()
+    assert "Keybind: unreadable" in text
+    assert "UTF-8" in text
+    status, detail = omarchy_install.doctor_setup(os.environ)
+    assert status == "warn"
+    assert "unreadable" in detail
+    assert omarchy_install.status_command() == 0
+    assert "unreadable" in capsys.readouterr().out
+
+
+def test_unreadable_template_does_not_crash_status(capsys: pytest.CaptureFixture[str]) -> None:
+    if os.geteuid() == 0:
+        pytest.skip("root can read mode 000 files")
+    _version("4.0.0")
+    path = _template()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{}\n", encoding="utf-8")
+    path.chmod(0)
+    try:
+        text = format_status()
+        assert "Template: unreadable" in text
+        status, detail = omarchy_install.doctor_setup(dict(os.environ))
+        assert status == "warn"
+        assert "unreadable" in detail
+        assert omarchy_install.status_command() == 0
+        assert "Template: unreadable" in capsys.readouterr().out
+    finally:
+        path.chmod(0o644)
+
+
+def test_status_command_catches_omarchy_install_error(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def _boom(env: object = None) -> str:
+        del env
+        raise omarchy_install.OmarchyInstallError("status failed")
+
+    monkeypatch.setattr(omarchy_install, "format_status", _boom)
+    assert omarchy_install.status_command() == 0
+    out = capsys.readouterr().out
+    assert "status failed" in out
+    assert "unreadable" in out
 
 
 def test_status_on_omarchy_and_elsewhere(capsys: pytest.CaptureFixture[str]) -> None:
