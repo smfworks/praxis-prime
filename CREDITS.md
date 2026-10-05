@@ -41,15 +41,25 @@ How to add an entry (people and agents alike):
 | Nunito Project Authors (Vernon Adams), via google/fonts | https://github.com/google/fonts/tree/main/ofl/nunito | OFL-1.1 | Nunito display font, Latin subset WOFF2 | `packages/prime-core/praxis_prime/ui_themes/smf.dental/assets/fonts/Nunito.woff2`, OFL text in `packages/prime-core/praxis_prime/ui_themes/smf.dental/assets/fonts/OFL.txt` | Version 3.602; google/fonts 8b0a1d0f5983c89bc2b93f1b5fb55f9e252744b5 (retrieved 2026-10) |
 | Figtree Project Authors (Erik Kennedy), via google/fonts | https://github.com/google/fonts/tree/main/ofl/figtree | OFL-1.1 | Figtree body font, Latin subset WOFF2 | `packages/prime-core/praxis_prime/ui_themes/smf.dental/assets/fonts/Figtree.woff2`, OFL text in `packages/prime-core/praxis_prime/ui_themes/smf.dental/assets/fonts/OFL.txt` | Version 2.002; google/fonts a60a77e14f28abd4ef243a1b5dfc48df0cec5205 (retrieved 2026-10) |
 | JetBrains Mono Project Authors (JetBrains), via google/fonts | https://github.com/google/fonts/tree/main/ofl/jetbrainsmono | OFL-1.1 | JetBrains Mono, subset WOFF2 copied into this package | `packages/prime-core/praxis_prime/ui_themes/smf.dental/assets/fonts/JetBrainsMono.woff2`, OFL text in `packages/prime-core/praxis_prime/ui_themes/smf.dental/assets/fonts/OFL.txt` | Version 2.211 (retrieved 2026-10) |
-| Textualize (textual) | https://github.com/Textualize/textual | MIT | Textual application framework for `praxis-prime tui`. Optional `[tui]` extra. Not shipped in the `.deb` or AUR package. | `pyproject.toml` | 8.2.8 |
-| Textualize (rich) | https://github.com/Textualize/rich | MIT | Rich text rendering, pulled in by textual. Optional `[tui]` extra. Not shipped in the `.deb` or AUR package. | `pyproject.toml` | 15.0.0 |
-| Executable Book Project (markdown-it-py) | https://github.com/executablebooks/markdown-it-py | MIT | Markdown parser, pulled in by textual via rich. Optional `[tui]` extra. Not shipped in the `.deb` or AUR package. | `pyproject.toml` | 4.2.0 |
-| Executable Book Project (mdit-py-plugins) | https://github.com/executablebooks/mdit-py-plugins | MIT | Markdown-it plugins, pulled in by markdown-it-py. Optional `[tui]` extra. Not shipped in the `.deb` or AUR package. | `pyproject.toml` | 0.6.1 |
-| Executable Book Project (mdurl) | https://github.com/executablebooks/mdurl | MIT | URL parser, pulled in by markdown-it-py. Optional `[tui]` extra. Not shipped in the `.deb` or AUR package. | `pyproject.toml` | 0.1.2 |
-| tox-dev (platformdirs) | https://github.com/tox-dev/platformdirs | MIT | Platform directories, pulled in by textual. Optional `[tui]` extra. Not shipped in the `.deb` or AUR package. | `pyproject.toml` | 4.12.3 |
-| tsutsu3 (linkify-it-py) | https://github.com/tsutsu3/linkify-it-py | MIT | Link detection, pulled in by markdown-it-py. Optional `[tui]` extra. Not shipped in the `.deb` or AUR package. | `pyproject.toml` | 2.2.0 |
-| Georg Brandl and Pygments contributors (Pygments) | https://github.com/pygments/pygments | BSD-2-Clause | Syntax highlighting, pulled in by rich. Optional `[tui]` extra. Not shipped in the `.deb` or AUR package. | `pyproject.toml` | 2.21.0 |
+| Textualize (textual) | https://github.com/Textualize/textual | MIT | Textual application framework for `praxis-prime tui`. Installed, not vendored. | `pyproject.toml` | 8.2.8 |
+| Textualize (rich) | https://github.com/Textualize/rich | MIT | Rich text rendering, pulled in by textual. Installed, not vendored. | `pyproject.toml` | 15.0.0 |
+| Executable Book Project (markdown-it-py) | https://github.com/executablebooks/markdown-it-py | MIT | Markdown parser, pulled in by textual via rich. Installed, not vendored. | `pyproject.toml` | 4.2.0 |
+| Executable Book Project (mdit-py-plugins) | https://github.com/executablebooks/mdit-py-plugins | MIT | Markdown-it plugins, pulled in by markdown-it-py. Installed, not vendored. | `pyproject.toml` | 0.6.1 |
+| Executable Book Project (mdurl) | https://github.com/executablebooks/mdurl | MIT | URL parser, pulled in by markdown-it-py. Installed, not vendored. | `pyproject.toml` | 0.1.2 |
+| tox-dev (platformdirs) | https://github.com/tox-dev/platformdirs | MIT | Platform directories, pulled in by textual. Installed, not vendored. | `pyproject.toml` | 4.12.3 |
+| tsutsu3 (linkify-it-py) | https://github.com/tsutsu3/linkify-it-py | MIT | Link detection, pulled in by markdown-it-py. Installed, not vendored. | `pyproject.toml` | 2.2.0 |
+| Georg Brandl and Pygments contributors (Pygments) | https://github.com/pygments/pygments | BSD-2-Clause | Syntax highlighting, pulled in by rich. Installed, not vendored. | `pyproject.toml` | 2.21.0 |
 | SMF Praxis (praxis-agent / hybridagent, SMF Works) | https://github.com/smfworks/smf-praxis | MIT | SQLite schema and `~/.praxis` pack, skills, and config layout mapping used by `migrate --from-praxis`. The mapping is original. No Praxis source was copied. | `packages/prime-core/praxis_prime/migrate/` | 69121b2 |
+
+Python packages and runtime programs are installed or invoked, not copied into
+this tree. Their notices are in [THIRD_PARTY.md](THIRD_PARTY.md).
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) is the blueprint's name for
+that inventory. The web app's build dependencies are declared in
+`ui/package.json`; `ui/dist` is the build output, not vendored source.
+Projects whose design ideas Praxis Prime follows (Hermes Agent, OpenClaw, SMF Praxis, SMF Swarm 2.0) are described in NOTICE and THIRD_PARTY.md ('What this tree actually contains').
+No upstream source code is copied in. The only copied files are the bundled
+OFL-1.1 fonts listed above, logged in THIRD_PARTY.md's copied-file log with the
+OFL text kept beside them in each theme's `assets/fonts/OFL.txt`.
 
 ### Runtime wheels bundled by the `.deb` and AUR package
 
@@ -72,14 +82,5 @@ Notable transitive wheels in that same virtualenv (locked; not a second copy in 
 - typing-extensions 4.16.0 (PSF-2.0, https://github.com/python/typing_extensions), pulled in by pyOpenSSL when Python is older than 3.13
 - webencodings 0.6.1 (BSD, https://github.com/gsnedders/python-webencodings), pulled in by tinycss2
 
-The Textual rows above are an optional `[tui]` extra. They are not shipped in the `.deb` or AUR package.
+The Textual rows above are an optional `[tui]` extra. They are not shipped in the `.deb` or AUR package. The `.deb` and AUR packages still bundle the locked runtime wheels under each project's own license, as listed in this section and in `python-licenses.txt`.
 
-The source tree does not copy those Python projects in as source. The `.deb` and AUR packages bundle the locked runtime wheels under each project's own license. The build writes that inventory to `python-licenses.txt`. [THIRD_PARTY.md](THIRD_PARTY.md) is the in-repo list. [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) is the blueprint's name for that inventory.
-
-Runtime programs such as bubblewrap are invoked as external binaries. They are not absorbed into this tree.
-
-The web app's build dependencies are declared in `ui/package.json`; `ui/dist` is the build output, not vendored source.
-Projects whose design ideas Praxis Prime follows (Hermes Agent, OpenClaw, SMF Praxis, SMF Swarm 2.0) are described in NOTICE and THIRD_PARTY.md ('What this tree actually contains').
-No upstream source code is copied into git. The only copied files in git are the bundled
-OFL-1.1 fonts listed above, logged in THIRD_PARTY.md's copied-file log with the
-OFL text kept beside them in each theme's `assets/fonts/OFL.txt`.
