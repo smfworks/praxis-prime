@@ -69,4 +69,4 @@ A future `praxis-prime-bin` package would install a versioned release tarball (o
 
 ## Not in this package
 
-The Omarchy theme template, Hyprland keybind, Quickshell bar plugin, and `praxis-prime omarchy install` are follow-ups. See [apps/omarchy](../../apps/omarchy).
+After the package is installed, `praxis-prime omarchy install` writes the theme template and the Hyprland keybind. The Quickshell bar plugin is still a follow-up. See [apps/omarchy](../../apps/omarchy) and [docs/USAGE.md](../../docs/USAGE.md).

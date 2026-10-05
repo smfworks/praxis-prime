@@ -527,6 +527,43 @@ A legacy pack `theme` hint (`accent`, `panel` as `bgRaised`, `ok`, `warn`) is ch
 
 The package schema is `praxis.theme/v1`, published at `schemas/theme.v1.json`. Optional `theme.css` may set `--pp-*` custom properties on `:root` and `[data-mode]`, plus the decorative hooks `.pp-ornament-*`, `.pp-header-band`, `.pp-sidebar-texture`, and `.pp-divider`. The validator folds those custom properties into the token maps. The served stylesheet uses the compiled values for light, dark, system-light, and system-dark, and does not replay the author `:root` rules. The validator rejects `@import`, remote `url()`, scripts, rules aimed at approval, dial, or audit controls, and decorative lengths outside about 16px. Package paths are `assets/fonts/<name>.woff2` and `assets/ornaments/<name>.svg` (or png or webp), with a name of letters, digits, `.`, `_`, and `-`, plus exactly `assets/preview.png` or `assets/preview.webp`. Both modes are checked for contrast before install, and the served CSS resolves to those same colours.
 
+## Omarchy: theme and keybind
+
+On Omarchy, one command writes the theme template and the Super+Alt+A keybind. `pprime omarchy` is the same command.
+
+```bash
+praxis-prime omarchy status
+praxis-prime omarchy install --dry-run
+praxis-prime omarchy install
+praxis-prime omarchy install --yes --profile default
+praxis-prime omarchy uninstall --dry-run
+praxis-prime omarchy uninstall --yes
+```
+
+`status` prints whether Omarchy was detected, the version layout (4.x Lua or 3.x conf), whether the template matches the shipped copy, whether the rendered file compiles, whether the keybind block is present, and which profiles chose `omarchy`. It writes nothing.
+
+`install` prints each step and asks before it changes anything. `--yes` applies the steps. `--dry-run` prints the steps and diffs and writes nothing. A non-interactive run without `--yes` stops, so it does not wait on a prompt. `--theme` or `--keybind` limits the run to that step. With neither flag, it does both.
+
+The theme step writes `~/.config/omarchy/themed/praxis-prime.json.tpl`. A new file is mode 0644. Replacing an existing template or bindings file keeps its mode, and the `.bak-<UTC timestamp>` copy keeps that mode too. Omarchy reads user templates from `$HOME/.config/omarchy/themed` and loads `hypr.bindings` from `$HOME/.config`. The installer writes those paths. `$XDG_CONFIG_HOME` does not move them. A template that already differs from the shipped copy stays in place unless `--force`. `--force` saves `praxis-prime.json.tpl.bak-<UTC timestamp>` beside it, then replaces the file. When `omarchy-theme-refresh` is on `PATH`, the installer asks to run it so the current theme renders `~/.local/state/omarchy/current/theme/praxis-prime.json` now. Omarchy writes that rendered file under `$HOME/.local/state`. If the refresh command is absent, switch themes once (`omarchy theme set`). Praxis Prime reads the rendered file with `XDG_STATE_HOME` honoured. `PRAXIS_PRIME_OMARCHY_THEME` overrides the path.
+
+`--profile NAME` selects `omarchy` for that profile, the same write as `praxis-prime theme set omarchy --profile NAME`. Without `--profile`, the installer prints that command. An admin lock is left as it is.
+
+The keybind step appends one managed block. Omarchy 4 appends it to `~/.config/hypr/bindings.lua`:
+
+```lua
+-- >>> praxis-prime keybind (managed by `praxis-prime omarchy`) >>>
+o.bind("SUPER + ALT + A", "Praxis Prime", "omarchy-launch-or-focus-tui --app-id=org.omarchy.praxis-prime praxis-prime tui")
+-- <<< praxis-prime keybind <<<
+```
+
+Omarchy 3.x writes the same block with `#` comments and `bindd = SUPER ALT, A, Praxis Prime, exec, …` in `~/.config/hypr/bindings.conf`. That file is sourced from hyprland.conf. The first edit of an existing bindings file is backed up. Running install again changes nothing when the block already matches. A block whose command changed is replaced in place. Super+Alt+A bound outside the block is left alone, and the installer stops. A symlink at the template or the bindings file is refused unless `--force`. On install, `--force` writes through the link. The command does not create `bindings.lua` when Omarchy was not detected, unless `--force`.
+
+Super+Alt+A launches the TUI. The desktop app is M7. The TUI needs the optional `[tui]` extra. Without Textual, the installer warns and prints both install hints: `pip install 'praxis-prime[tui]'`, and for `/opt/praxis-prime` the `ensurepip` plus `pip install 'textual>=8.2,<9'` lines from the packaging docs. Hyprland reloads a Lua config on save in Omarchy 4. When `hyprctl` is on `PATH`, the installer asks before `hyprctl reload`. Otherwise the bind applies the next time Hyprland reloads.
+
+`uninstall` removes the managed block, from both `bindings.lua` and `bindings.conf` when both contain it. It removes the template only when the bytes match the shipped copy. `--force` also removes a template you edited, after a backup. On a symlinked template, `--force` removes the link and leaves the file it names. On a symlinked bindings file, `--force` removes the managed block from the file the link names, after a `.bak-<UTC timestamp>` copy, and leaves the link in place. Profile choices stay. To leave System (Omarchy), run `praxis-prime theme set smf.praxis --profile NAME`.
+
+The colours follow `omarchy theme set`. The daemon watches the rendered file. While System (Omarchy) is selected, the web UI polls `GET /v1/themes/active` every 2 seconds and swaps the stylesheet when the file changes. The TUI follows the daemon. It does not read the file. The rendered file is untrusted. A palette that cannot pass WCAG 2.2 AA is logged, and the UI paints `smf.praxis`.
+
 ## Browser
 
 Headless browsing is optional:

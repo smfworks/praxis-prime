@@ -200,7 +200,7 @@ makepkg -si
 
 `makepkg` runs on Arch, not on Ubuntu. Details: [packaging/aur/README.md](packaging/aur/README.md).
 
-The future Omarchy installer would add a Quickshell bar plugin, a theme template, a Hyprland keybind, and an optional default-agent registration, asking before each step. That installer is not part of this package. The theme template stub is [apps/omarchy/praxis-prime.json.tpl](apps/omarchy/praxis-prime.json.tpl).
+`praxis-prime omarchy install` writes the theme template and the Super+Alt+A keybind, and asks before each change. `praxis-prime omarchy status` and `praxis-prime omarchy uninstall` cover that scope. The key launches the TUI until the desktop app exists. The Quickshell bar plugin, default-agent registration, and skill symlink are still future. Details are in [docs/USAGE.md](docs/USAGE.md) and [apps/omarchy](apps/omarchy).
 
 ### Published install (not available)
 

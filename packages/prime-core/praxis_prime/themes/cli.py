@@ -282,6 +282,26 @@ def _audit_choice(
     _audit(data, "theme.activate", f"activated theme {theme_id}", payload)
 
 
+def audit_choice(
+    data: Path,
+    theme_id: str,
+    mode: str,
+    package_hash: str,
+    *,
+    profile: str = "",
+    locked: bool = False,
+) -> None:
+    """Record a theme choice. Same write as the theme command."""
+    _audit_choice(
+        data,
+        theme_id,
+        mode,
+        package_hash,
+        profile=profile,
+        locked=locked,
+    )
+
+
 def _audit(data: Path, kind: str, summary: str, payload: dict[str, object]) -> None:
     layout = resolve_runtime_layout(None, data_file=data / "prime.db", profile=None)
     if lstat_kind(layout.db_path) is not StatKind.FILE:

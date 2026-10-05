@@ -274,4 +274,4 @@ Lint that directory. Optional colours are derived. Both modes must come back cle
 
 ## What a theme cannot do
 
-No JavaScript, no HTML, no WASM, no remote URL, no `@import`, no new UI, no selector aimed at approval, dial, or audit controls. System (Omarchy) is not a package. It is the rendered file the adapter reads when a profile chooses it, and that palette still has to pass this validator.
+No JavaScript, no HTML, no WASM, no remote URL, no `@import`, no new UI, no selector aimed at approval, dial, or audit controls. System (Omarchy) is not a package. It is the rendered file the adapter reads when a profile chooses it, and that palette still has to pass this validator. On Omarchy, `praxis-prime omarchy install` writes the template Omarchy renders into that file.

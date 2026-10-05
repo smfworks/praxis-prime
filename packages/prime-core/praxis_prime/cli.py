@@ -24,6 +24,7 @@ from praxis_prime.config import describe_write, resolve_config_dir, write_defaul
 from praxis_prime.doctor import format_report, report_exit_code, run_system_doctor
 from praxis_prime.mcp.cli import add_mcp_parser, mcp_command
 from praxis_prime.migrate.cli import add_migrate_parser, migrate_command
+from praxis_prime.omarchy.cli import add_omarchy_parser, omarchy_command
 from praxis_prime.onboarding.cli import add_setup_parser, setup_command
 from praxis_prime.packs.cli import add_packs_parsers, dispatch_packs
 from praxis_prime.profiles.cli import add_profile_parser, profile_command
@@ -82,6 +83,8 @@ def _main(argv: list[str] | None = None) -> int:
         return profile_command(args)
     if args.command == "migrate":
         return migrate_command(args)
+    if args.command == "omarchy":
+        return omarchy_command(args)
     handled = dispatch_packs(args)
     if handled is not None:
         return handled
@@ -227,6 +230,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_mcp_parser(commands)
     add_packs_parsers(commands)
     add_theme_parser(commands)
+    add_omarchy_parser(commands)
     add_compliance_parsers(commands)
     add_user_commands(commands)
     return parser
