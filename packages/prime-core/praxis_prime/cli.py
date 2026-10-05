@@ -55,6 +55,8 @@ def _main(argv: list[str] | None = None) -> int:
         return _chat_command(args)
     if args.command == "ask":
         return _ask_command(args)
+    if args.command == "tui":
+        return _tui_command(args)
     if args.command == "daemon":
         return _daemon_command(args)
     if args.command == "service":
@@ -135,6 +137,22 @@ def build_parser() -> argparse.ArgumentParser:
     )
     ask.add_argument("prompt", nargs="+", help="The question to ask.")
     _add_runtime_args(ask)
+
+    tui = commands.add_parser(
+        "tui",
+        help="Full-screen terminal. Chat, timeline, approvals, and sessions via the local daemon.",
+    )
+    tui.add_argument(
+        "--plain",
+        action="store_true",
+        help="Linear text for a screen reader. No full-screen layout and no box drawing.",
+    )
+    tui.add_argument("--profile", default="", help="Profile id.")
+    tui.add_argument(
+        "--session",
+        default="",
+        help="Resume a session id for this visit. The daemon is not asked for a session list.",
+    )
 
     daemon = commands.add_parser("daemon", help="Start, stop, or inspect praxis-primed.")
     daemon_commands = daemon.add_subparsers(dest="daemon_command")
@@ -278,6 +296,16 @@ def _chat_command(args: argparse.Namespace) -> int:
         )
     finally:
         runtime.close()
+
+
+def _tui_command(args: argparse.Namespace) -> int:
+    from praxis_prime.tui import run_tui
+
+    return run_tui(
+        plain=bool(args.plain),
+        profile=getattr(args, "profile", "") or "",
+        session=getattr(args, "session", "") or "",
+    )
 
 
 def _ask_command(args: argparse.Namespace) -> int:

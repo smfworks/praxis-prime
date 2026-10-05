@@ -58,7 +58,10 @@ class GatewayClient:
         *,
         timeout: float = 5,
         role: str = "operator",
+        client: str = "cli",
     ) -> GatewayClient:
+        # The socket instance below reuses the name client.
+        client_name = client
         sock = _connect_socket(endpoint, timeout=timeout)
         try:
             buffer = client_handshake(
@@ -76,7 +79,7 @@ class GatewayClient:
                 "connect",
                 {
                     "role": role,
-                    "client": "cli",
+                    "client": client_name,
                     "version": __version__,
                     "token": endpoint.token,
                     "capabilities": ["chat", "approvals"],
@@ -199,7 +202,7 @@ class GatewayClient:
                     decision = decider(pending)
                     if decision:
                         try:
-                            self.decide(str(pending.get("id", "")), decision)
+                            self.decide(str(pending.get("id", "")), decision, profile or "")
                         except GatewayError:
                             pass
                         pending = None
