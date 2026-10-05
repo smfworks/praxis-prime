@@ -17,25 +17,36 @@ umask 022
 
 usage() {
   cat <<'EOF'
-Usage: packaging/deb/build-deb.sh [--dry-run] [--output-dir DIR] [--python PATH]
+Usage: packaging/deb/build-deb.sh [--dry-run] [--allow-dirty] [--output-dir DIR] [--python PATH]
 
 Build a Debian binary package for Praxis Prime. The build does not need
 root or debhelper. It stages a virtual environment under /opt/praxis-prime
 using the system Python (3.12+), links praxis-prime, pprime, and
-praxis-primed into /usr/bin, and copies systemd user units to
-/usr/lib/systemd/user. Units are not enabled. Linger is not enabled.
+praxis-primed into /usr/bin, and copies praxis-prime.service and
+praxis-prime-workers.slice to /usr/lib/systemd/user. Units are not enabled.
+Linger is not enabled. Stub units under packaging/systemd stay in the repo.
 
 The package architecture is the build host (amd64 on Ubuntu 24.04 x86_64).
 cryptography and argon2-cffi ship compiled extensions, so the package is
-not Architecture: all.
+not Architecture: all. The binary Depends on that interpreter and on
+bubblewrap. pip is not shipped. Optional Textual, after install:
 
-Requires: dpkg-deb, and either uv (preferred; installs locked hashes) or
-python3-venv plus python3-pip. This script does not install those itself.
+  /opt/praxis-prime/bin/python -m ensurepip --upgrade
+  /opt/praxis-prime/bin/python -m pip install 'textual>=8.2,<9'
+
+Requires: dpkg-deb, and either uv (preferred; installs locked hashes from
+uv.lock) or python3-venv plus python3-pip. The pip fallback installs
+packaging/requirements-runtime.txt with --require-hashes and does not
+resolve unpinned dependencies. This script does not install those tools.
+
+A real build refuses a dirty git tree (git status --porcelain). --dry-run
+does not check. Pass --allow-dirty to build from a dirty tree anyway.
 
 Options:
   -h, --help           Show this help and exit.
   -n, --dry-run        Print version, architecture, and output path. Do not
                        download, stage, or write a .deb.
+  --allow-dirty        Build even when git status --porcelain is not empty.
   --output-dir DIR     Directory for the .deb (default: <repo>/dist).
   --python PATH        System interpreter to link (default: /usr/bin/python3).
                        Must resolve to /usr/bin/python3.X.
@@ -52,6 +63,44 @@ EOF
 die() {
   echo "build-deb.sh: $*" >&2
   exit 1
+}
+
+refuse_dirty_tree() {
+  if [[ "$allow_dirty" -eq 1 ]]; then
+    echo "build-deb.sh: --allow-dirty set; not checking git status" >&2
+    return 0
+  fi
+  if ! command -v git >/dev/null 2>&1; then
+    die "git is required to confirm a clean tree. Pass --allow-dirty to skip that check."
+  fi
+  if ! git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    die "not a git checkout. Pass --allow-dirty to build anyway."
+  fi
+  local dirty
+  dirty=$(git -C "$ROOT" status --porcelain)
+  if [[ -n "$dirty" ]]; then
+    die "working tree is dirty. Commit or stash the changes, or pass --allow-dirty."
+  fi
+}
+
+drop_bootstrap_installer() {
+  local py=$1
+  local name
+  local -a drop=()
+  if ! "$py" -m pip --version >/dev/null 2>&1; then
+    return 0
+  fi
+  for name in pip setuptools wheel; do
+    if "$py" -m pip show "$name" >/dev/null 2>&1; then
+      drop+=("$name")
+    fi
+  done
+  if [[ ${#drop[@]} -gt 0 ]]; then
+    "$py" -m pip uninstall -y "${drop[@]}"
+  fi
+  if "$py" -m pip --version >/dev/null 2>&1; then
+    die "failed to remove pip from the package virtualenv"
+  fi
 }
 
 read_version() {
@@ -82,6 +131,7 @@ resolve_python() {
 }
 
 dry_run=0
+allow_dirty=0
 output_dir=""
 python_arg=""
 while [[ $# -gt 0 ]]; do
@@ -92,6 +142,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     -n|--dry-run)
       dry_run=1
+      shift
+      ;;
+    --allow-dirty)
+      allow_dirty=1
       shift
       ;;
     --output-dir)
@@ -128,7 +182,7 @@ dry-run: not writing a .deb
 version: $version
 architecture: $arch
 python: $python
-depends: $py_pkg
+depends: $py_pkg, bubblewrap
 prefix: /opt/praxis-prime
 commands: /usr/bin/praxis-prime /usr/bin/pprime /usr/bin/praxis-primed
 units: /usr/lib/systemd/user
@@ -137,6 +191,8 @@ dpkg-deb: skipped
 EOF
   exit 0
 fi
+
+refuse_dirty_tree
 
 if command -v uv >/dev/null 2>&1; then
   builder=uv
@@ -183,12 +239,22 @@ if [[ "$builder" == uv ]]; then
     --default-index https://pypi.org/simple -r "$req"
   uv --no-config pip install --python "$venv/bin/python" --no-cache --no-deps \
     --offline "$wheel"
-  uv --no-config pip install --python "$venv/bin/python" --no-cache \
-    --default-index https://pypi.org/simple pip
 else
+  hashed="$ROOT/packaging/requirements-runtime.txt"
+  [[ -f "$hashed" ]] || die "missing $hashed; regenerate it with uv export (see packaging/README.md)"
+  grep -q -- '--hash=' "$hashed" || die "$hashed has no hashes; refusing an unpinned install"
   "$python" -m venv "$venv"
   "$venv/bin/pip" install --disable-pip-version-check --no-cache-dir --no-compile \
-    --index-url https://pypi.org/simple "$wheel"
+    --require-hashes --only-binary=:all: \
+    --index-url https://pypi.org/simple \
+    -r "$hashed"
+  "$venv/bin/pip" install --disable-pip-version-check --no-cache-dir --no-compile \
+    --no-deps "$wheel"
+fi
+
+drop_bootstrap_installer "$venv/bin/python"
+if find "$venv" \( -type d -name pip -o -type d -name 'pip-*.dist-info' \) -print -quit | grep -q .; then
+  die "package virtualenv still contains pip"
 fi
 
 find "$venv" -type d -name '__pycache__' -print0 | xargs -0 -r rm -rf
@@ -221,17 +287,16 @@ done
 
 unit_dest="$stage/usr/lib/systemd/user"
 mkdir -p "$unit_dest"
-found_unit=0
-while IFS= read -r -d '' unit; do
-  cp -a "$unit" "$unit_dest/"
-  found_unit=1
-done < <(find "$ROOT/packaging/systemd" -maxdepth 1 -type f \
-  \( -name '*.service' -o -name '*.timer' -o -name '*.slice' \) -print0)
-[[ "$found_unit" -eq 1 ]] || die "no systemd units under packaging/systemd"
+for unit in praxis-prime.service praxis-prime-workers.slice; do
+  src="$ROOT/packaging/systemd/$unit"
+  [[ -f "$src" ]] || die "missing unit $src"
+  cp -a "$src" "$unit_dest/"
+done
 
 doc="$stage/usr/share/doc/praxis-prime"
 mkdir -p "$doc"
-cp -a "$ROOT/LICENSE" "$ROOT/NOTICE" "$ROOT/THIRD_PARTY.md" "$ROOT/THIRD_PARTY_NOTICES.md" "$doc/"
+cp -a "$ROOT/LICENSE" "$ROOT/NOTICE" "$ROOT/CREDITS.md" \
+  "$ROOT/THIRD_PARTY.md" "$ROOT/THIRD_PARTY_NOTICES.md" "$doc/"
 cp -a "$SCRIPT_DIR/debian/copyright" "$doc/copyright"
 gzip -n -c "$SCRIPT_DIR/debian/changelog" > "$doc/changelog.Debian.gz"
 {
@@ -283,21 +348,27 @@ Section: python
 Priority: optional
 Homepage: https://github.com/smfworks/praxis-prime
 Installed-Size: $installed_kb
-Depends: $py_pkg
+Depends: $py_pkg, bubblewrap
 Description: local-first autonomous AI agent
  Praxis Prime is a local-first autonomous AI agent for Linux (pre-alpha).
  This package installs a virtual environment at /opt/praxis-prime and puts
- praxis-prime, pprime, and praxis-primed on PATH.
+ praxis-prime, pprime, and praxis-primed on PATH. Locked runtime wheels
+ are bundled there under each project's own license.
  .
- The optional Textual TUI (extra [tui]) is not included. Add it with the
- virtualenv pip if you want it:
+ The optional Textual TUI (extra [tui]) is not included, and pip is not
+ shipped. Add the extra with ensurepip, then pip:
+ /opt/praxis-prime/bin/python -m ensurepip --upgrade
  /opt/praxis-prime/bin/python -m pip install 'textual>=8.2,<9'
  .
- systemd user units are installed under /usr/lib/systemd/user and are not
- enabled. The package does not enable linger and has no maintainer scripts.
+ On Debian and Ubuntu, ensurepip is in the matching python3.X-venv package.
+ .
+ praxis-prime.service and praxis-prime-workers.slice are installed under
+ /usr/lib/systemd/user and are not enabled. Stub units are not installed.
+ The package does not enable linger and has no maintainer scripts.
  Built for $arch against $python because cryptography and argon2-cffi ship
- compiled extensions. Not published to an APT repository. The maintainer
- address uses the reserved .invalid domain and does not receive mail.
+ compiled extensions. Depends on that interpreter and on bubblewrap.
+ Not published to an APT repository. The maintainer address uses the
+ reserved .invalid domain and does not receive mail.
 EOF
 
 (
@@ -323,8 +394,26 @@ require_fixed './usr/bin/praxis-prime ->'
 require_fixed './usr/bin/pprime ->'
 require_fixed './usr/bin/praxis-primed ->'
 require_fixed './usr/lib/systemd/user/praxis-prime.service'
+require_fixed './usr/lib/systemd/user/praxis-prime-workers.slice'
 require_fixed './usr/share/doc/praxis-prime/copyright'
 require_fixed './usr/share/doc/praxis-prime/LICENSE'
+require_fixed './usr/share/doc/praxis-prime/CREDITS.md'
+require_fixed './usr/share/doc/praxis-prime/python-licenses.txt'
+for stub in \
+  praxis-prime-voice.service \
+  'praxis-prime-gateway@.service' \
+  praxis-prime-decide.service \
+  praxis-prime-decide.timer \
+  praxis-prime-sweeper.service \
+  praxis-prime-sweeper.timer
+do
+  if grep -F -q "$stub" <<<"$contents"; then
+    die "package must not ship stub unit $stub"
+  fi
+done
+if ! grep -E -q '^ Depends: .*\bbubblewrap\b' <<<"$info"; then
+  die "control Depends is missing bubblewrap"
+fi
 if grep -E -q 'postinst|preinst|prerm|postrm' <<<"$control_files"; then
   die "package must not ship maintainer scripts"
 fi

@@ -46,9 +46,10 @@ def test_debian_control_describes_the_package() -> None:
     assert "debhelper-compat" not in control
     assert "0.0.1" not in control
     depends = [line for line in control.splitlines() if line.startswith("Depends:")]
-    assert depends == ["Depends: python3 (>= 3.12)"]
+    assert depends == ["Depends: python3 (>= 3.12), bubblewrap"]
     assert all("textual" not in line.lower() for line in depends)
     assert "textual" in control.lower()
+    assert "ensurepip" in control
 
 
 def test_debian_changelog_and_rules() -> None:
@@ -77,6 +78,7 @@ def test_build_deb_script_syntax_help_and_dry_run() -> None:
     )
     assert "dpkg-deb" in help_run.stdout
     assert "--dry-run" in help_run.stdout
+    assert "--allow-dirty" in help_run.stdout
     assert "praxis-prime" in help_run.stdout
     assert "/opt/praxis-prime" in help_run.stdout
     unknown = subprocess.run(
@@ -102,6 +104,7 @@ def test_build_deb_script_syntax_help_and_dry_run() -> None:
     assert f"version: {_version()}" in text
     assert "architecture:" in text
     assert "prefix: /opt/praxis-prime" in text
+    assert "bubblewrap" in text
     assert "/usr/bin/praxis-prime" in text
     assert "/usr/bin/pprime" in text
     assert "/usr/bin/praxis-primed" in text
@@ -137,5 +140,62 @@ def test_pkgbuild_is_a_real_git_package() -> None:
     assert "systemctl" not in text
     assert "praxis-prime-bin" in text
     assert "not submitted" in text.lower()
+    assert "arch=('x86_64' 'aarch64')" in text
+    assert "arch=('any')" not in text
+    assert "depends=('python>=3.12' 'bubblewrap')" in text
+    assert "requirements-runtime.txt" in text
+    assert "--require-hashes" in text
+    assert "--no-deps" in text
+    assert "CREDITS.md" in text
+    assert "python-licenses.txt" in text
+    assert "praxis-prime.service" in text
+    assert "praxis-prime-workers.slice" in text
+    assert "praxis-prime-voice.service" not in text
+    assert "*.service" not in text
+    assert "return 1" not in text
     for command in _project_scripts():
         assert command in text
+
+
+def test_packages_depend_on_bubblewrap() -> None:
+    control = (_REPO / "packaging" / "deb" / "debian" / "control").read_text(encoding="utf-8")
+    depends = [line for line in control.splitlines() if line.startswith("Depends:")]
+    assert depends == ["Depends: python3 (>= 3.12), bubblewrap"]
+    script = _SCRIPT.read_text(encoding="utf-8")
+    assert "Depends: $py_pkg, bubblewrap" in script
+    pkgbuild = _PKGBUILD.read_text(encoding="utf-8")
+    assert "bubblewrap" in pkgbuild
+    assert "depends=('python>=3.12' 'bubblewrap')" in pkgbuild
+
+
+def test_hashed_runtime_requirements_and_no_unpinned_pip() -> None:
+    script = _SCRIPT.read_text(encoding="utf-8")
+    pkgbuild = _PKGBUILD.read_text(encoding="utf-8")
+    req_path = _REPO / "packaging" / "requirements-runtime.txt"
+    req = req_path.read_text(encoding="utf-8")
+    assert "requirements-runtime.txt" in script
+    assert "--require-hashes" in script
+    assert "--no-deps" in script
+    assert "simple pip" not in script
+    assert "install pip" not in script
+    assert "status --porcelain" in script
+    assert "--allow-dirty" in script
+    assert "CREDITS.md" in script
+    assert "for unit in praxis-prime.service praxis-prime-workers.slice" in script
+    assert "package must not ship stub unit" in script
+    assert "find \"$ROOT/packaging/systemd\"" not in script
+    assert "--require-hashes" in pkgbuild
+    assert "--hash=sha256:" in req
+    for pin in (
+        "argon2-cffi==",
+        "argon2-cffi-bindings==",
+        "cffi==",
+        "cryptography==",
+        "joserfc==",
+        "pyotp==",
+        "tinycss2==",
+        "webauthn==",
+    ):
+        assert pin in req
+    assert "textual" not in req.lower()
+    assert "pip==" not in req

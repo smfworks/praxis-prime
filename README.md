@@ -182,7 +182,7 @@ packaging/deb/build-deb.sh
 sudo apt install ./dist/praxis-prime_0.1.0_amd64.deb
 ```
 
-On x86_64 the file is `amd64` because the virtualenv under `/opt/praxis-prime` contains compiled wheels (`cryptography`, `argon2-cffi`). It depends on the system interpreter used at build time (`python3.12` on Ubuntu 24.04). `praxis-prime`, `pprime`, and `praxis-primed` land on `PATH`. systemd user units are installed under `/usr/lib/systemd/user/` and are not enabled. The package does not enable linger.
+On x86_64 the file is `amd64` because the virtualenv under `/opt/praxis-prime` bundles compiled wheels (`cryptography`, `argon2-cffi`). It depends on the system interpreter used at build time (`python3.12` on Ubuntu 24.04) and on `bubblewrap`. `praxis-prime`, `pprime`, and `praxis-primed` land on `PATH`. The package installs `praxis-prime.service` and `praxis-prime-workers.slice` under `/usr/lib/systemd/user/` and does not enable them or linger. It does not ship pip. The optional Textual TUI is added afterwards with `ensurepip` (see [packaging/deb/README.md](packaging/deb/README.md)).
 
 Details: [packaging/deb/README.md](packaging/deb/README.md).
 
@@ -271,6 +271,7 @@ The kernel subpackages (`loop`, `gateway`, `decide`, `swarm`, and the rest) matc
 ## Credits
 
 Work reused or adapted from other people is listed in [CREDITS.md](CREDITS.md).
+The local `.deb` and AUR packages bundle the locked PyPI runtime dependencies under each project's own license. Optional Textual is not included in those packages.
 
 ## License
 

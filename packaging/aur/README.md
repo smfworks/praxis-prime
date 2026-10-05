@@ -6,16 +6,16 @@ The maintainer address `maintainers@praxis-prime.invalid` does not receive mail.
 
 ## What it installs
 
-`makepkg` builds a wheel and installs it, with PyPI runtime dependencies, into a virtualenv at `/opt/praxis-prime`. `joserfc` and `webauthn` are not assumed to exist as pacman packages, so the PKGBUILD does not use `python -m installer --destdir` for the runtime tree. `python-installer` stays in `makedepends` for the standard wheel toolchain.
+`makepkg` builds a wheel and installs it into a virtualenv at `/opt/praxis-prime`. Runtime dependencies come from `packaging/requirements-runtime.txt` with `pip install --require-hashes`, then the project wheel with `--no-deps`. `joserfc` and `webauthn` are not assumed to exist as pacman packages, so the PKGBUILD does not use `python -m installer --destdir` for the runtime tree. `python-installer` stays in `makedepends` for the standard wheel toolchain. pip is removed from the virtualenv before the package is finished.
 
 | Path | Role |
 |---|---|
-| `/opt/praxis-prime` | Virtualenv. `textual` is not installed. |
+| `/opt/praxis-prime` | Virtualenv. Locked runtime wheels are bundled here. `textual` is not installed. pip is not installed. |
 | `/usr/bin/praxis-prime`, `/usr/bin/pprime`, `/usr/bin/praxis-primed` | Symlinks into that virtualenv. |
-| `/usr/lib/systemd/user/` | Units from [`../systemd`](../systemd). Not enabled. Linger is not enabled. There is no `.install` script. |
-| `/usr/share/licenses/praxis-prime-git/` | `LICENSE`, `NOTICE`, `THIRD_PARTY.md`, `THIRD_PARTY_NOTICES.md`. |
+| `/usr/lib/systemd/user/` | `praxis-prime.service` and `praxis-prime-workers.slice` only. Stub units stay in [`../systemd`](../systemd). Not enabled. Linger is not enabled. There is no `.install` script. |
+| `/usr/share/licenses/praxis-prime-git/` | `LICENSE`, `NOTICE`, `CREDITS.md`, `THIRD_PARTY.md`, `THIRD_PARTY_NOTICES.md`, `copyright`, and `python-licenses.txt` (generated at package build time from each wheel's `METADATA`). |
 
-`arch=('any')` means each person builds on their own machine, so the native wheels match that machine. This is not a prebuilt binary.
+`arch=('x86_64' 'aarch64')`. `makepkg` builds on that machine, so the native wheels match it. This is not a prebuilt binary. The virtualenv embeds the ABI of the `python` used at build time. After an Arch Python minor bump (3.12 to 3.13, and so on), rebuild and reinstall the package. `depends` stays `python>=3.12` plus `bubblewrap`; the rebuild is what tracks the new ABI. Runtime wheels come from [`../requirements-runtime.txt`](../requirements-runtime.txt) installed with `--require-hashes`, then the project wheel with `--no-deps`.
 
 `provides=('praxis-prime')` and `conflicts=('praxis-prime-bin')`.
 
@@ -27,9 +27,10 @@ praxis-prime service install
 
 That command does not enable linger.
 
-Optional Textual TUI, after install:
+Optional Textual TUI, after install. The package does not ship pip. Bootstrap it, then install the extra:
 
 ```bash
+/opt/praxis-prime/bin/python -m ensurepip --upgrade
 /opt/praxis-prime/bin/python -m pip install 'textual>=8.2,<9'
 ```
 

@@ -8,16 +8,19 @@ pkgname=praxis-prime-git
 pkgver=0.1.0
 pkgrel=1
 pkgdesc="Local-first autonomous AI agent for Linux (pre-alpha, not in the AUR)"
-# makepkg builds the virtualenv on the target machine, so native wheels match
-# that machine. This is not a prebuilt binary. praxis-prime-bin would name
-# an architecture when a release tarball exists.
-arch=('any')
+# Native wheels (cryptography, cffi, argon2-cffi-bindings, cbor2) are built
+# for the machine that runs makepkg. This is not a prebuilt binary and not
+# an architecture-independent package. The virtualenv embeds that Python's ABI, so after an Arch
+# python minor bump the package must be rebuilt. depends stays python>=3.12;
+# the rebuild is the bound, not a tighter pacman version.
+arch=('x86_64' 'aarch64')
 url="https://github.com/smfworks/praxis-prime"
 license=('MIT')
-depends=('python>=3.12')
-# python-installer is the usual Arch wheel installer. package() uses pip
-# into a virtualenv instead: installer --destdir does not fetch PyPI
-# dependencies, and joserfc and webauthn are not assumed to be pacman packages.
+depends=('python>=3.12' 'bubblewrap')
+# python-installer is the usual Arch wheel installer. package() uses the
+# venv's ensurepip, then hashed requirements, instead: installer --destdir
+# does not fetch PyPI dependencies, and joserfc and webauthn are not assumed
+# to be pacman packages. The shipped venv does not keep pip.
 makedepends=(
   'git'
   'python-build'
@@ -43,19 +46,49 @@ pkgver() {
 
 build() {
   cd praxis-prime
+  unset XAI_API_KEY
+  unset PIP_INDEX_URL PIP_EXTRA_INDEX_URL
   python -m build --wheel --no-isolation --outdir dist
 }
 
 package() {
   cd praxis-prime
+  unset XAI_API_KEY
+  unset PIP_INDEX_URL PIP_EXTRA_INDEX_URL
   local venv="${pkgdir}/opt/praxis-prime"
+  local hashed="packaging/requirements-runtime.txt"
+  [[ -f "${hashed}" ]]
+  grep -q -- '--hash=' "${hashed}"
   python -m venv "${venv}"
   "${venv}/bin/pip" install \
     --disable-pip-version-check \
     --no-cache-dir \
     --no-compile \
+    --require-hashes \
+    --only-binary=:all: \
     --index-url https://pypi.org/simple \
+    -r "${hashed}"
+  "${venv}/bin/pip" install \
+    --disable-pip-version-check \
+    --no-cache-dir \
+    --no-compile \
+    --no-deps \
     dist/*.whl
+
+  local seed
+  local -a drop=()
+  for seed in pip setuptools wheel; do
+    if "${venv}/bin/python" -m pip show "${seed}" >/dev/null 2>&1; then
+      drop+=("${seed}")
+    fi
+  done
+  if ((${#drop[@]})); then
+    "${venv}/bin/python" -m pip uninstall -y "${drop[@]}"
+  fi
+  if "${venv}/bin/python" -m pip --version >/dev/null 2>&1; then
+    echo "praxis-prime-git: failed to remove pip from the virtualenv" >&2
+    exit 1
+  fi
 
   find "${venv}" -type d -name '__pycache__' -print0 | xargs -0 -r rm -rf
   find "${venv}" -type f -name '*.pyc' -delete
@@ -79,16 +112,30 @@ package() {
     ln -s "/opt/praxis-prime/bin/${cmd}" "${pkgdir}/usr/bin/${cmd}"
   done
 
-  install -d "${pkgdir}/usr/lib/systemd/user"
-  local unit
-  for unit in packaging/systemd/*.service packaging/systemd/*.timer packaging/systemd/*.slice; do
-    install -Dm644 "${unit}" "${pkgdir}/usr/lib/systemd/user/$(basename "${unit}")"
-  done
+  install -Dm644 packaging/systemd/praxis-prime.service \
+    "${pkgdir}/usr/lib/systemd/user/praxis-prime.service"
+  install -Dm644 packaging/systemd/praxis-prime-workers.slice \
+    "${pkgdir}/usr/lib/systemd/user/praxis-prime-workers.slice"
 
-  install -Dm644 LICENSE "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
-  install -Dm644 NOTICE "${pkgdir}/usr/share/licenses/${pkgname}/NOTICE"
-  install -Dm644 THIRD_PARTY.md "${pkgdir}/usr/share/licenses/${pkgname}/THIRD_PARTY.md"
-  install -Dm644 THIRD_PARTY_NOTICES.md "${pkgdir}/usr/share/licenses/${pkgname}/THIRD_PARTY_NOTICES.md"
-  install -Dm644 packaging/deb/debian/copyright \
-    "${pkgdir}/usr/share/licenses/${pkgname}/copyright"
+  local licdir="${pkgdir}/usr/share/licenses/${pkgname}"
+  install -Dm644 LICENSE "${licdir}/LICENSE"
+  install -Dm644 NOTICE "${licdir}/NOTICE"
+  install -Dm644 CREDITS.md "${licdir}/CREDITS.md"
+  install -Dm644 THIRD_PARTY.md "${licdir}/THIRD_PARTY.md"
+  install -Dm644 THIRD_PARTY_NOTICES.md "${licdir}/THIRD_PARTY_NOTICES.md"
+  install -Dm644 packaging/deb/debian/copyright "${licdir}/copyright"
+  {
+    echo "Third-party Python distributions installed under /opt/praxis-prime."
+    echo "Each project keeps its own license in its dist-info directory."
+    echo "Generated at package build time from METADATA."
+    echo
+    local meta name ver lex lic
+    while IFS= read -r -d '' meta; do
+      name=$(sed -n 's/^Name: //p' "${meta}" | head -n 1)
+      ver=$(sed -n 's/^Version: //p' "${meta}" | head -n 1)
+      lex=$(sed -n 's/^License-Expression: //p' "${meta}" | head -n 1)
+      lic=$(sed -n 's/^License: //p' "${meta}" | head -n 1)
+      printf '%s %s %s\n' "${name}" "${ver}" "${lex:-${lic}}"
+    done < <(find "${venv}/lib" -path '*.dist-info/METADATA' -print0 | sort -z)
+  } > "${licdir}/python-licenses.txt"
 }
