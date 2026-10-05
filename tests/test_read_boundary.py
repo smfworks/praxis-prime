@@ -358,9 +358,7 @@ def test_snap_firefox_decoys_do_not_hide_logins(tmp_path: Path, monkeypatch):
     [False, True],
     ids=["workspace-inside-home", "workspace-outside-home"],
 )
-def test_ssh_symlink_to_home_decoys_do_not_hide_a_key(
-    tmp_path: Path, monkeypatch, outside: bool
-):
+def test_ssh_symlink_to_home_decoys_do_not_hide_a_key(tmp_path: Path, monkeypatch, outside: bool):
     home = tmp_path / "home"
     home.mkdir()
     decoys = [home / f"decoy{index}.pem" for index in range(600)]
@@ -376,15 +374,11 @@ def test_ssh_symlink_to_home_decoys_do_not_hide_a_key(
     os.link(secret, root / "notes.txt")
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
-    monkeypatch.setattr(
-        "praxis_prime.policy.boundary._inode_candidates", lambda: [home / ".ssh"]
-    )
+    monkeypatch.setattr("praxis_prime.policy.boundary._inode_candidates", lambda: [home / ".ssh"])
     _assert_outside_hardlink_denied(_ctx(root), [*decoys, secret])
 
 
-def test_real_ssh_directory_past_five_hundred_still_denies_the_key(
-    tmp_path: Path, monkeypatch
-):
+def test_real_ssh_directory_past_five_hundred_still_denies_the_key(tmp_path: Path, monkeypatch):
     home = tmp_path / "home"
     ssh = home / ".ssh"
     ssh.mkdir(parents=True)
@@ -427,9 +421,7 @@ def test_real_ssh_directory_over_the_credential_cap_fails_closed(
     assert "hello" not in str(denial)
 
 
-def test_browser_cache_directories_do_not_consume_the_entry_budget(
-    tmp_path: Path, monkeypatch
-):
+def test_browser_cache_directories_do_not_consume_the_entry_budget(tmp_path: Path, monkeypatch):
     home = tmp_path / "home"
     firefox = home / "snap" / "firefox" / "common"
     chrome = home / ".config" / "google-chrome" / "Default"
@@ -544,9 +536,7 @@ def test_ssh_symlink_to_browser_profile_does_not_skip_caches(tmp_path: Path, mon
     os.link(login, root / "login.txt")
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
-    monkeypatch.setattr(
-        "praxis_prime.policy.boundary._inode_candidates", lambda: [home / ".ssh"]
-    )
+    monkeypatch.setattr("praxis_prime.policy.boundary._inode_candidates", lambda: [home / ".ssh"])
     ctx = _ctx(root)
     assert execute_read_file({"path": "hello.txt"}, ctx) == "hello\n"
     for name in ("notes.txt", "login.txt"):
@@ -626,8 +616,7 @@ def test_symlinked_chrome_profile_with_a_large_cache_stays_readable(
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
     assert boundary_mod._is_lexical_browser_root(link, include_gcloud=False)
     assert (
-        boundary_mod._directory_entry_budget(link, True)
-        == boundary_mod._MAX_BROWSER_SCAN_ENTRIES
+        boundary_mod._directory_entry_budget(link, True) == boundary_mod._MAX_BROWSER_SCAN_ENTRIES
     )
     # The old 20k cap is what made this profile fail closed. The cache skip
     # has to keep those entries off the budget.
@@ -644,9 +633,7 @@ def test_symlinked_chrome_profile_with_a_large_cache_stays_readable(
 
 def test_flatpak_config_outside_the_profile_dir_is_scanned(tmp_path: Path, monkeypatch):
     home = tmp_path / "home"
-    secret = (
-        home / ".var" / "app" / "com.google.Chrome" / "config" / "outside-profile" / "Cookies"
-    )
+    secret = home / ".var" / "app" / "com.google.Chrome" / "config" / "outside-profile" / "Cookies"
     secret.parent.mkdir(parents=True)
     secret.write_text(SECRET, encoding="utf-8")
     root = tmp_path / "ws"
@@ -779,9 +766,7 @@ def _listing_error(code: int, path: object) -> OSError:
 
 
 @pytest.mark.parametrize("code", [errno.ENOENT, errno.ENOTDIR])
-def test_vanished_directory_during_scan_stays_readable(
-    tmp_path: Path, monkeypatch, code: int
-):
+def test_vanished_directory_during_scan_stays_readable(tmp_path: Path, monkeypatch, code: int):
     """A directory that disappears mid-walk is not a closed scan.
 
     Chrome replaces IndexedDB and cache entries while a profile is open.
@@ -906,9 +891,7 @@ def test_unreadable_directory_names_the_path(tmp_path: Path, monkeypatch, caplog
         os.chmod(private, 0o700)
 
 
-def test_unlistable_message_escapes_names_and_limits_the_hint(
-    tmp_path: Path, monkeypatch, caplog
-):
+def test_unlistable_message_escapes_names_and_limits_the_hint(tmp_path: Path, monkeypatch, caplog):
     home = tmp_path / "home"
     gcloud = home / ".config" / "gcloud" / "legacy_credentials" / "user@example.com"
     gcloud.mkdir(parents=True)
@@ -1066,9 +1049,7 @@ def test_renamed_ssh_directory_is_seen_on_one_rescan(tmp_path: Path, monkeypatch
     assert denial.code == "secret_path"
 
 
-def test_pathlib_oserror_false_still_fails_closed_on_a_hidden_root(
-    tmp_path: Path, monkeypatch
-):
+def test_pathlib_oserror_false_still_fails_closed_on_a_hidden_root(tmp_path: Path, monkeypatch):
     """Python 3.14 Path.is_* returns False on EACCES. The scan must still stop."""
     home = tmp_path / "home"
     key = home / ".config" / "google-chrome" / "Default" / "Login Data"
@@ -1604,9 +1585,7 @@ def test_browser_table_direct_read_is_denied(tmp_path: Path, monkeypatch, profil
     secret.write_text(SECRET, encoding="utf-8")
     root = tmp_path / "ws"
     root.mkdir()
-    access = ReadAccess(
-        allow_paths=(str(home / ".config"), str(home / "snap"), str(home / ".var"))
-    )
+    access = ReadAccess(allow_paths=(str(home / ".config"), str(home / "snap"), str(home / ".var")))
     ctx = _ctx(root, access)
     assert is_secret_path(secret)
     denial = _denied(execute_read_file, {"path": str(secret)}, ctx)
@@ -1890,15 +1869,11 @@ def test_readonly_calls_reuse_one_inode_scan_until_a_write(tmp_path: Path, monke
         [
             AssistantFinal(
                 content="",
-                tool_calls=(
-                    ToolCall(id="c1", name="read_file", arguments={"path": "hello.txt"}),
-                ),
+                tool_calls=(ToolCall(id="c1", name="read_file", arguments={"path": "hello.txt"}),),
             ),
             AssistantFinal(
                 content="",
-                tool_calls=(
-                    ToolCall(id="c2", name="read_file", arguments={"path": "other.txt"}),
-                ),
+                tool_calls=(ToolCall(id="c2", name="read_file", arguments={"path": "other.txt"}),),
             ),
             AssistantFinal(
                 content="",
@@ -1906,9 +1881,7 @@ def test_readonly_calls_reuse_one_inode_scan_until_a_write(tmp_path: Path, monke
             ),
             AssistantFinal(
                 content="",
-                tool_calls=(
-                    ToolCall(id="c4", name="read_file", arguments={"path": "alias.txt"}),
-                ),
+                tool_calls=(ToolCall(id="c4", name="read_file", arguments={"path": "alias.txt"}),),
             ),
             AssistantFinal(content="done"),
         ]
@@ -1926,9 +1899,7 @@ def test_readonly_calls_reuse_one_inode_scan_until_a_write(tmp_path: Path, monke
     assert isinstance(loop.inode_cache, InodeScanCache)
     assert not hasattr(loop.policy, "inode_cache")
     tool_text = [
-        message.content
-        for message in provider.requests[-1].messages
-        if message.role == "tool"
+        message.content for message in provider.requests[-1].messages if message.role == "tool"
     ]
     assert any("hello" in text for text in tool_text)
     assert any("other" in text for text in tool_text)
@@ -1993,9 +1964,7 @@ def test_dirty_inode_cache_is_cleared_before_prepare(tmp_path: Path, monkeypatch
         [
             AssistantFinal(
                 content="",
-                tool_calls=(
-                    ToolCall(id="c1", name="read_file", arguments={"path": "hello.txt"}),
-                ),
+                tool_calls=(ToolCall(id="c1", name="read_file", arguments={"path": "hello.txt"}),),
             ),
             AssistantFinal(
                 content="",
@@ -2143,9 +2112,7 @@ def test_etc_and_dev_symlinks_use_the_entry_budget(
 
 
 @pytest.mark.parametrize("target", ["/", "/proc", "/sys", "/etc/.."])
-def test_root_proc_and_sys_symlinks_are_not_walked(
-    tmp_path: Path, monkeypatch, target: str
-):
+def test_root_proc_and_sys_symlinks_are_not_walked(tmp_path: Path, monkeypatch, target: str):
     home = tmp_path / "home"
     link = home / "chromium"
     link.parent.mkdir()
@@ -2198,9 +2165,7 @@ def test_proc_subdirectory_is_entry_budgeted(tmp_path: Path, monkeypatch, caplog
     assert "hello" not in str(denial)
 
 
-def test_ssh_symlink_to_home_over_budget_denies_top_level_key(
-    tmp_path: Path, monkeypatch, caplog
-):
+def test_ssh_symlink_to_home_over_budget_denies_top_level_key(tmp_path: Path, monkeypatch, caplog):
     home = tmp_path / "home"
     home.mkdir()
     key = home / "id_ed25519"
@@ -2215,9 +2180,7 @@ def test_ssh_symlink_to_home_over_budget_denies_top_level_key(
     (root / "hello.txt").write_text("hello\n", encoding="utf-8")
     os.link(key, root / "alias.txt")
     monkeypatch.setenv("HOME", str(home))
-    monkeypatch.setattr(
-        "praxis_prime.policy.boundary._inode_candidates", lambda: [home / ".ssh"]
-    )
+    monkeypatch.setattr("praxis_prime.policy.boundary._inode_candidates", lambda: [home / ".ssh"])
     ctx = _ctx(root)
     with caplog.at_level(logging.WARNING, logger="praxis_prime.policy.boundary"):
         denial = _denied(execute_read_file, {"path": "alias.txt"}, ctx)
@@ -2300,9 +2263,7 @@ def test_ssh_symlink_to_home_still_allows_a_normal_read(tmp_path: Path, monkeypa
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
     monkeypatch.setattr("praxis_prime.policy.boundary._MAX_CREDENTIAL_FILES", 10)
-    monkeypatch.setattr(
-        "praxis_prime.policy.boundary._inode_candidates", lambda: [home / ".ssh"]
-    )
+    monkeypatch.setattr("praxis_prime.policy.boundary._inode_candidates", lambda: [home / ".ssh"])
     ctx = _ctx(root)
     assert execute_read_file({"path": "hello.txt"}, ctx) == "hello\n"
     denial = _denied(execute_read_file, {"path": "alias.txt"}, ctx)
@@ -2475,9 +2436,7 @@ def test_two_loops_keep_separate_inode_caches(tmp_path: Path, monkeypatch):
         [
             AssistantFinal(
                 content="",
-                tool_calls=(
-                    ToolCall(id="a1", name="read_file", arguments={"path": "hello.txt"}),
-                ),
+                tool_calls=(ToolCall(id="a1", name="read_file", arguments={"path": "hello.txt"}),),
             ),
             AssistantFinal(content="done-a"),
         ]
@@ -2493,9 +2452,7 @@ def test_two_loops_keep_separate_inode_caches(tmp_path: Path, monkeypatch):
         [
             AssistantFinal(
                 content="",
-                tool_calls=(
-                    ToolCall(id="b1", name="read_file", arguments={"path": "notes.txt"}),
-                ),
+                tool_calls=(ToolCall(id="b1", name="read_file", arguments={"path": "notes.txt"}),),
             ),
             AssistantFinal(content="done-b"),
         ]
@@ -2507,14 +2464,10 @@ def test_two_loops_keep_separate_inode_caches(tmp_path: Path, monkeypatch):
     assert not hasattr(engine, "inode_cache")
 
     text_a = [
-        message.content
-        for message in provider_a.requests[-1].messages
-        if message.role == "tool"
+        message.content for message in provider_a.requests[-1].messages if message.role == "tool"
     ]
     text_b = [
-        message.content
-        for message in provider_b.requests[-1].messages
-        if message.role == "tool"
+        message.content for message in provider_b.requests[-1].messages if message.role == "tool"
     ]
     assert any("hello-a" in text for text in text_a)
     assert any("secret" in text.lower() for text in text_b)
@@ -2580,9 +2533,7 @@ def test_secret_created_mid_turn_then_hardlinked_is_denied(tmp_path: Path, monke
         [
             AssistantFinal(
                 content="",
-                tool_calls=(
-                    ToolCall(id="c1", name="read_file", arguments={"path": "hello.txt"}),
-                ),
+                tool_calls=(ToolCall(id="c1", name="read_file", arguments={"path": "hello.txt"}),),
             ),
             AssistantFinal(
                 content="",
@@ -2590,9 +2541,7 @@ def test_secret_created_mid_turn_then_hardlinked_is_denied(tmp_path: Path, monke
             ),
             AssistantFinal(
                 content="",
-                tool_calls=(
-                    ToolCall(id="c3", name="read_file", arguments={"path": "notes.txt"}),
-                ),
+                tool_calls=(ToolCall(id="c3", name="read_file", arguments={"path": "notes.txt"}),),
             ),
             AssistantFinal(content="done"),
         ]
@@ -2609,9 +2558,7 @@ def test_secret_created_mid_turn_then_hardlinked_is_denied(tmp_path: Path, monke
     assert isinstance(loop.inode_cache, InodeScanCache)
     assert not hasattr(loop.policy, "inode_cache")
     tool_text = [
-        message.content
-        for message in provider.requests[-1].messages
-        if message.role == "tool"
+        message.content for message in provider.requests[-1].messages if message.role == "tool"
     ]
     assert any("hello" in text for text in tool_text)
     assert any("planted" in text for text in tool_text)
@@ -2631,9 +2578,7 @@ def test_allowlist_is_explicit_and_does_not_unlock_secrets(tmp_path: Path):
     secret = tmp_path / ".env"
     secret.write_text(f"TOKEN={SECRET}\n", encoding="utf-8")
     allowed_secret = ReadAccess(allow_paths=(str(secret),))
-    secret_denial = _denied(
-        execute_read_file, {"path": str(secret)}, _ctx(root, allowed_secret)
-    )
+    secret_denial = _denied(execute_read_file, {"path": str(secret)}, _ctx(root, allowed_secret))
     assert secret_denial.code == "secret_path"
 
 
@@ -2819,9 +2764,7 @@ def test_enforce_mode_fails_closed_and_audits_denied_reads(tmp_path: Path, monke
     )
     assert verdict.decision == "deny"
     assert SECRET not in verdict.reason
-    rows = db.conn.execute(
-        "SELECT kind, summary, payload_json FROM audit_events"
-    ).fetchall()
+    rows = db.conn.execute("SELECT kind, summary, payload_json FROM audit_events").fetchall()
     assert any(row["kind"] == "read_denied" for row in rows)
     blob = " ".join(row["payload_json"] + row["summary"] for row in rows)
     assert SECRET not in blob
@@ -2918,17 +2861,12 @@ def test_loop_enforce_does_not_return_an_outside_read(tmp_path: Path):
         max_iterations=4,
     )
     events = list(loop.run_turn("read the outside file"))
-    rendered = " ".join(
-        event.detail for event in events if isinstance(event, StatusEvent)
-    )
+    rendered = " ".join(event.detail for event in events if isinstance(event, StatusEvent))
     tool_message = provider.requests[1].messages[-1].content
     assert SECRET not in rendered
     assert SECRET not in tool_message
     assert "denied" in tool_message.lower() or "not run" in tool_message.lower()
-    kinds = [
-        row["kind"]
-        for row in db.conn.execute("SELECT kind FROM audit_events").fetchall()
-    ]
+    kinds = [row["kind"] for row in db.conn.execute("SELECT kind FROM audit_events").fetchall()]
     assert "read_denied" in kinds
 
 
@@ -2975,9 +2913,7 @@ def test_denied_secret_read_does_not_leak_through_web_fetch(tmp_path: Path):
                 ),
                 AssistantFinal(
                     content="",
-                    tool_calls=(
-                        ToolCall(id="c2", name="web_fetch", arguments={"url": leak_url}),
-                    ),
+                    tool_calls=(ToolCall(id="c2", name="web_fetch", arguments={"url": leak_url}),),
                 ),
                 AssistantFinal(content="done"),
             ]
@@ -2999,9 +2935,7 @@ def test_denied_secret_read_does_not_leak_through_web_fetch(tmp_path: Path):
             for message in request.messages
             if message.role == "tool"
         )
-        rows = db.conn.execute(
-            "SELECT kind, summary, payload_json FROM audit_events"
-        ).fetchall()
+        rows = db.conn.execute("SELECT kind, summary, payload_json FROM audit_events").fetchall()
         blob = " ".join(row["summary"] + row["payload_json"] for row in rows)
         assert SECRET not in rendered
         assert SECRET not in tool_text
@@ -3013,3 +2947,51 @@ def test_denied_secret_read_does_not_leak_through_web_fetch(tmp_path: Path):
         assert "fetch_loopback" in blob
     finally:
         server.shutdown()
+
+
+def test_inode_cover_includes_runtime_token_and_config_secrets(tmp_path: Path, monkeypatch):
+    runtime = tmp_path / "run"
+    config = tmp_path / "config"
+    monkeypatch.setattr("praxis_prime.policy.boundary.runtime_dir", lambda: runtime)
+    monkeypatch.setattr("praxis_prime.policy.boundary.config_dir", lambda: config)
+    found = _inode_candidates()
+    assert runtime / "gateway.token" in found
+    assert config / "secrets.env" in found
+    assert config / "secrets.env.age" in found
+
+
+def test_inode_cover_keeps_config_secrets_when_runtime_dir_is_refused(tmp_path: Path, monkeypatch):
+    from praxis_prime.paths import RuntimeDirError
+
+    config = tmp_path / "config"
+
+    def refuse() -> Path:
+        raise RuntimeDirError("refusing runtime directory")
+
+    monkeypatch.setattr("praxis_prime.policy.boundary.runtime_dir", refuse)
+    monkeypatch.setattr("praxis_prime.policy.boundary.config_dir", lambda: config)
+    found = _inode_candidates()
+    assert config / "secrets.env" in found
+    assert config / "secrets.env.age" in found
+    assert all(path.name != "gateway.token" for path in found)
+
+
+def test_owned_runtime_files_skip_a_refused_runtime_dir(monkeypatch):
+    from praxis_prime.paths import RuntimeDirError
+    from praxis_prime.policy.boundary import _owned_runtime_files
+
+    def refuse() -> Path:
+        raise RuntimeDirError("refusing runtime directory")
+
+    monkeypatch.setattr("praxis_prime.policy.boundary.runtime_dir", refuse)
+    assert _owned_runtime_files() == []
+
+
+def test_owned_runtime_files_names_a_missing_directory(tmp_path: Path, monkeypatch):
+    from praxis_prime.policy.boundary import _owned_runtime_files
+
+    runtime = tmp_path / "missing-run"
+    monkeypatch.setattr("praxis_prime.policy.boundary.runtime_dir", lambda: runtime)
+    found = _owned_runtime_files()
+    assert runtime / "gateway.token" in found
+    assert runtime / "worker-master.key" in found

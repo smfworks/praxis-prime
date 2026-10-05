@@ -292,6 +292,7 @@ def test_cli_approvals_deny_a_pending_action(tmp_path, monkeypatch, capsys):
     token_path = Path(os.environ["XDG_RUNTIME_DIR"]) / "praxis-prime" / "gateway.token"
     token_path.parent.mkdir(parents=True, exist_ok=True)
     token_path.write_text("test-token\n", encoding="utf-8")
+    os.chmod(token_path, 0o600)
     write_discovery(
         env=os.environ,
         pid=os.getpid(),

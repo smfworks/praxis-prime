@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 _NAME = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+_NAME_MAX = 64
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,7 +37,7 @@ def parse_skill(text: str, path: Path, source: str) -> Skill:
     meta = _fields(raw)
     name = meta.get("name", "").strip()
     description = " ".join(meta.get("description", "").split())
-    if not _NAME.fullmatch(name):
+    if len(name) > _NAME_MAX or not _NAME.fullmatch(name):
         raise ValueError(f"{path} name must be lowercase words separated by hyphens")
     if not description:
         raise ValueError(f"{path} needs a description")
