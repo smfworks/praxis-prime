@@ -1,6 +1,6 @@
 # Using Praxis Prime
 
-This milestone runs the agent loop in a loopback daemon and in the terminal, plus a local Decision Engine, saved routines, memory tiers, and skills. Compliance dials still default to off. The approval pre-screener is off until you set `decide.prescreen`. The TUI and web UI are not in this build.
+This milestone runs the agent loop in a loopback daemon and in the terminal, plus a local Decision Engine, saved routines, memory tiers, skills, the local web app, and `praxis-prime tui`. Compliance dials still default to off. The approval pre-screener is off until you set `decide.prescreen`.
 
 ## Install
 
@@ -36,6 +36,60 @@ Inside `chat`:
 | Ctrl-D | Leave |
 
 `--session <id>` resumes a stored transcript. `--model` overrides the config for that process.
+
+## Terminal (`praxis-prime tui`)
+
+```bash
+praxis-prime tui
+pprime tui
+praxis-prime tui --plain
+praxis-prime tui --profile default --session <id>
+```
+
+`praxis-prime tui` needs a running daemon. It is a gateway client: the same loopback WebSocket and the same bearer token as the CLI (`gateway.token`). There is no `--local` mode. If `praxis-primed` is not running, the command prints how to start it and, when no provider is chosen yet, points at `praxis-prime setup` or the web wizard at `http://127.0.0.1:18790/`. A connect or auth failure prints that error. It does not claim the provider is missing.
+
+The screen is three columns: sessions, chat with a composer, and the timeline stacked with the approval card and the pending list. A status line and a key footer sit at the edges. A banner appears when the daemon reports that inference is not ready. Chat sends are refused until a provider is configured and verified. Approvals still work. `praxis-prime setup` remains the interactive CLI wizard.
+
+| Key | Effect |
+|---|---|
+| F1 | Focus the chat composer |
+| F2 | Focus the timeline |
+| F3 | Focus approvals |
+| F4 | Focus sessions |
+| Enter | In the composer, send. On a session, switch. On an approval, show the card. Enter never approves. |
+| a | Approve once (`allow_once`), when the approval list is focused |
+| s | Approve for this session (`allow_session`) |
+| d | Deny |
+| n | New session, when the session list is focused |
+| Ctrl+N | New session from anywhere |
+| ? | Key help. Ignored while the composer is focused. |
+| Ctrl+Q | Quit |
+
+Nothing is approved unless you press `a`, `s`, or `d`, or you send the matching `--plain` command. Those three strings are the only decisions the TUI sends. They use the same gateway `approvals.decide` path as the web app and Telegram, and the daemon writes the same audit row.
+
+Sessions on this screen are the ones opened in this visit. `--session <id>` starts on that id. A new session keeps the earlier rows. Switching shows this visit's transcript for that id. The daemon has no session-list frame, so a later run does not reload old transcripts. Quitting does not cancel a turn the daemon is already running.
+
+The colours come from `GET /v1/themes/active` and the stylesheet that response names, including System (Omarchy). The TUI does not read the Omarchy theme file. The palette is the theme engine's checked colours. A palette that fails WCAG 2.2 AA falls back to `smf.praxis`. `NO_COLOR` uses the terminal's ANSI theme and does not register RGB colours. When the active theme mode is system, `COLORFGBG` picks light (background 7 or 15) or dark.
+
+### Plain mode
+
+`praxis-prime tui --plain` is a linear transcript for screen readers. It does not take over the screen, draw boxes, or emit colour. New messages and approval cards are printed as lines. The prompt is `> `. An empty line decides nothing.
+
+| Input | Effect |
+|---|---|
+| `/help` | List commands |
+| `/quit` or `/exit` | Leave |
+| `/sessions` | List sessions opened in this visit |
+| `/session <id>` | Switch. An unknown id is added as "resumed". |
+| `/new` | Start an empty transcript and keep the earlier rows |
+| `/approvals` | List pending cards |
+| `/timeline` | Print the activity lines for this visit |
+| `/approve <id>` | Approve once |
+| `/session-approve <id>` | Approve for this session |
+| `/deny <id>` | Deny |
+| any other non-empty line | Send as chat |
+
+A decision during a turn is queued and sent once on the gateway, the same way the full-screen keys are. Other typed lines wait until that turn finishes.
 
 ## Approvals
 
@@ -441,4 +495,4 @@ The `browser` tool can navigate, snapshot, click, type, screenshot, extract text
 
 ## Not in this milestone
 
-A coding-mode embedding index of the repo, regulatory dial enforcement beyond redaction and retention windows, and the TUI are still stubs. The loopback page in `ui/dist` covers password, TOTP, configured OIDC providers, chat, and Settings → Appearance. The chat client in `ui/src` streams a turn over the gateway WebSocket. ONNX classifiers, parallel jury calls, nightly recalibration, and the decision eval suites are not in this build. Per-hunk diff review, the `auto` coding classifier, background cloud coding, Ed25519 device pairing, an approval Edit button, and channels other than Telegram are not either. Natural-language cron, FTS5, sqlite-vec, skill security grading, and a skill hub lockfile are later work. Full MCP OAuth 2.1, an MCP security grade, a remote egress proxy, a browser vision loop, and driving the user's signed-in browser are later work too. See [ARCHITECTURE.md](ARCHITECTURE.md) §29 for the rest of the roadmap.
+A coding-mode embedding index of the repo and regulatory dial enforcement beyond redaction and retention windows are still stubs. The loopback page in `ui/dist` covers password, TOTP, configured OIDC providers, chat, and Settings → Appearance. The chat client in `ui/src` streams a turn over the gateway WebSocket. ONNX classifiers, parallel jury calls, nightly recalibration, and the decision eval suites are not in this build. Per-hunk diff review, the `auto` coding classifier, background cloud coding, Ed25519 device pairing, an approval Edit button, and channels other than Telegram are not either. Natural-language cron, FTS5, sqlite-vec, skill security grading, and a skill hub lockfile are later work. Full MCP OAuth 2.1, an MCP security grade, a remote egress proxy, a browser vision loop, and driving the user's signed-in browser are later work too. See [ARCHITECTURE.md](ARCHITECTURE.md) §29 for the rest of the roadmap.

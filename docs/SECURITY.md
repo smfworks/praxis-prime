@@ -92,6 +92,10 @@ The session cookie is `HttpOnly`, `Secure`, and `SameSite=Strict`. Browsers send
 
 `gateway.bearer` defaults to `true`. After an account exists, set `bearer = false` in `config.toml` and restart to refuse the token. Cookie sessions and WebSocket tickets still work. Before any account exists the flag does not apply, so the gateway is not left open and the loopback bearer still works. The first-run setup token is a different file. See below.
 
+## Terminal UI
+
+`praxis-prime tui` and `pprime tui` are another loopback bearer client. The connect frame sets `client` to `tui`. The process reads the same `gateway.token` the CLI already uses. It adds no credential, no cookie, and no TOTP bypass. HTTP GETs (`/v1/themes/active`, the named stylesheet, `/v1/onboarding/status`, `/v1/profiles`, `/v1/approvals`) stay on `127.0.0.1`, send `Authorization: Bearer`, and do not follow redirects. Decisions are only `allow_once`, `allow_session`, and `deny`. Nothing is approved unless you send one of those. The process does not open `prime.db` or the Omarchy theme file. `--plain` changes presentation only.
+
 ## First-run setup window
 
 HTTP owner creation is allowed only while `accounts.db` has no accounts, only from a loopback socket peer (`127.0.0.1` or `::1`, not a header), only with a loopback `Host`, and only with the first-run token. The daemon binds `127.0.0.1`. If that bind is not loopback, the HTTP path refuses and the message points at `praxis-prime setup`.
