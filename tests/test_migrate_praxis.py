@@ -807,3 +807,18 @@ def test_cli_dry_run_and_refusal(
     )
     assert code == 1
     assert not data.exists()
+
+
+def test_parse_skill_rejects_a_name_past_64_characters(tmp_path: Path) -> None:
+    from praxis_prime.skills.format import parse_skill
+
+    path = tmp_path / "SKILL.md"
+    accepted = "a" * 64
+    loaded = parse_skill(
+        f"---\nname: {accepted}\ndescription: ok\n---\nbody\n",
+        path,
+        "user",
+    )
+    assert loaded.name == accepted
+    with pytest.raises(ValueError, match="name"):
+        parse_skill(f"---\nname: {'a' * 65}\ndescription: ok\n---\nbody\n", path, "user")
