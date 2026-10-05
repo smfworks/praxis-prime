@@ -340,7 +340,13 @@ class StateDB:
     than that move leave it false.
     """
 
-    def __init__(self, path: Path, *, allow_during_migration: bool = False) -> None:
+    def __init__(
+        self,
+        path: Path,
+        *,
+        allow_during_migration: bool = False,
+        exclusive: bool = False,
+    ) -> None:
         self.path = Path(path)
         self._lock_fds: list[int] = []
         from praxis_prime.supervisor.confine import refuse_worker_path
@@ -350,7 +356,9 @@ class StateDB:
         if not allow_during_migration:
             refuse_if_migrating(self.path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._lock_fds = _acquire_db_lock(self.path, exclusive=False)
+        # ``exclusive`` is the migration opener. A shared holder makes
+        # ``_acquire_db_lock`` raise ``DatabaseBusy`` instead of waiting.
+        self._lock_fds = _acquire_db_lock(self.path, exclusive=exclusive)
         conn: sqlite3.Connection | None = None
         try:
             if not allow_during_migration:
