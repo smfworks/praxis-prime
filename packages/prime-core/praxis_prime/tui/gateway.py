@@ -106,6 +106,10 @@ class GatewayFrames:
     def __init__(self, client: GatewayClient) -> None:
         self._client = client
 
+    @property
+    def client(self) -> GatewayClient:
+        return self._client
+
     def list_approvals(self, profile: str = "", timeout: float = 30) -> list[dict[str, object]]:
         return self._client.list_approvals(profile, timeout=timeout)
 
@@ -309,7 +313,13 @@ class TuiGateway:
         with self._lock:
             if self._chatting.is_set():
                 raise GatewayError("chat in progress")
-            return self.frames.list_approvals(self.profile, timeout=LIST_TIMEOUT)
+            try:
+                return self.frames.list_approvals(self.profile, timeout=LIST_TIMEOUT)
+            except (OSError, GatewayError) as exc:
+                self._note_if_down(exc)
+                if isinstance(exc, OSError):
+                    raise GatewayError(f"disconnected: {exc}") from exc
+                raise
 
     def decide(self, approval_id: str, decision: str) -> str:
         """Queue or send one decision. Returns ``queued`` or ``sent``.
@@ -327,7 +337,13 @@ class TuiGateway:
             if self._chatting.is_set():
                 self._queued[approval_id] = decision
                 return "queued"
-            self.frames.decide(approval_id, decision, self.profile)
+            try:
+                self.frames.decide(approval_id, decision, self.profile)
+            except (OSError, GatewayError) as exc:
+                self._note_if_down(exc)
+                if isinstance(exc, OSError):
+                    raise GatewayError(f"disconnected: {exc}") from exc
+                raise
             return "sent"
 
     def chat(
@@ -357,6 +373,9 @@ class TuiGateway:
             except OSError as exc:
                 self.note_down()
                 raise GatewayError(f"disconnected: {exc}") from exc
+            except GatewayError as exc:
+                self._note_if_down(exc)
+                raise
         finally:
             self._finish_chat()
 
@@ -395,14 +414,8 @@ class TuiGateway:
             try:
                 self.frames.decide(approval_id, decision, self.profile)
             except GatewayError as exc:
-                if handler is not None:
-                    handler(
-                        {
-                            "kind": "status",
-                            "phase": "error",
-                            "detail": f"decision {approval_id}: {exc}",
-                        }
-                    )
+                self._note_if_down(exc)
+                _emit_decision_failed(handler, approval_id, exc)
 
     def _finish_chat(self) -> None:
         with self._lock:
@@ -415,16 +428,45 @@ class TuiGateway:
                 try:
                     self.frames.decide(approval_id, decision, self.profile)
                 except GatewayError as exc:
-                    if handler is not None:
-                        handler(
-                            {
-                                "kind": "status",
-                                "phase": "error",
-                                "detail": f"decision {approval_id}: {exc}",
-                            }
-                        )
+                    self._note_if_down(exc)
+                    _emit_decision_failed(handler, approval_id, exc)
         finally:
             self._chatting.clear()
+
+    def _note_if_down(self, exc: BaseException) -> None:
+        """Mark the socket down when this client has closed or the error says so."""
+        client = getattr(self.frames, "client", None)
+        if client is not None and getattr(client, "closed", False):
+            self.note_down()
+            return
+        if isinstance(exc, OSError) or _connection_failure(exc):
+            self.note_down()
+
+
+def _emit_decision_failed(
+    handler: EventHandler | None,
+    approval_id: str,
+    exc: BaseException,
+) -> None:
+    if handler is None:
+        return
+    handler(
+        {
+            "kind": "decision_failed",
+            "approval_id": approval_id,
+            "phase": "error",
+            "detail": f"decision {approval_id}: {exc}",
+        }
+    )
+
+
+def _connection_failure(exc: BaseException) -> bool:
+    text = str(exc).lower()
+    if text.startswith("disconnected"):
+        return True
+    return (
+        "connection closed" in text or "broken pipe" in text or "gateway connection closed" in text
+    )
 
 
 def _open_pair(endpoint: Endpoint) -> tuple[GatewayFrames, LoopbackHttp]:

@@ -487,6 +487,48 @@ def test_decision_error_is_reported_during_the_turn() -> None:
     assert gateway.decide("ap-now", "allow_once") == "queued"
     thread.join(3)
     assert not thread.is_alive()
-    assert any(item.get("phase") == "error" and "bad" in str(item.get("detail")) for item in seen)
+    assert any(
+        item.get("kind") == "decision_failed"
+        and item.get("approval_id") == "bad"
+        and "no such approval" in str(item.get("detail"))
+        for item in seen
+    )
+    assert gateway.connected is True
     assert ("ap-now", "allow_once", "default") in frames.decisions
     assert not any(item[0] == "bad" for item in frames.decisions)
+
+
+def test_leftover_decision_failure_releases_and_marks_the_socket_down() -> None:
+    gateway, frames, _http = _gateway()
+    started = threading.Event()
+    hold = threading.Event()
+    seen: list[dict[str, object]] = []
+
+    def decide(approval_id: str, decision: str, profile: str = "") -> dict[str, object]:
+        del approval_id, decision, profile
+        raise GatewayError("connection closed")
+
+    frames.decide = decide  # type: ignore[method-assign]
+
+    def script(text, session_id, on_event, decider, timeout, profile):
+        del text, session_id, on_event, decider, timeout, profile
+        started.set()
+        assert hold.wait(3)
+        return {"type": "result", "ok": True, "payload": {"sessionId": "s", "text": "done"}}
+
+    frames.chat_impl = script
+
+    def run() -> None:
+        gateway.chat("hi", session_id="s", on_event=seen.append, profile="default")
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    assert started.wait(2)
+    assert gateway.decide("ap1", "deny") == "queued"
+    hold.set()
+    thread.join(3)
+    assert not thread.is_alive()
+    assert gateway.connected is False
+    assert any(
+        item.get("kind") == "decision_failed" and item.get("approval_id") == "ap1" for item in seen
+    )

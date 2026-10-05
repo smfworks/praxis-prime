@@ -103,6 +103,11 @@ class GatewayClient:
         except OSError:
             return
 
+    @property
+    def closed(self) -> bool:
+        """True once the reader has exited or a write has failed."""
+        return self._closed.is_set()
+
     def status(self) -> dict[str, object]:
         frame = self.request("status", {})
         self._raise_if_error(frame)
@@ -184,6 +189,7 @@ class GatewayClient:
         try:
             self.ws.send_text(json.dumps(body))
         except OSError as exc:
+            self._closed.set()
             self._waiters.pop(frame_id, None)
             raise GatewayError(f"disconnected: {exc}") from exc
         deadline = None if timeout is None else time.monotonic() + timeout
@@ -253,6 +259,7 @@ class GatewayClient:
         except queue.Empty as exc:
             raise GatewayError(f"timed out waiting for {kind}") from exc
         except OSError as exc:
+            self._closed.set()
             raise GatewayError(f"disconnected: {exc}") from exc
         finally:
             self._waiters.pop(frame_id, None)
@@ -263,27 +270,30 @@ class GatewayClient:
             raise GatewayError(_message(frame) or "gateway request failed")
 
     def _read_loop(self) -> None:
-        while not self._closed.is_set():
-            try:
-                text = self.ws.recv_text()
-            except (OSError, WebSocketError, ConnectionError, UnicodeError):
-                text = None
-            if text is None:
-                self._fail_waiters("connection closed")
-                return
-            try:
-                loaded = json.loads(text)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(loaded, dict):
-                continue
-            if loaded.get("type") == "event":
-                self._events.put(loaded)
-                continue
-            frame_id = str(loaded.get("id", ""))
-            box = self._waiters.get(frame_id)
-            if box is not None:
-                box.put(loaded)
+        try:
+            while not self._closed.is_set():
+                try:
+                    text = self.ws.recv_text()
+                except (OSError, WebSocketError, ConnectionError, UnicodeError):
+                    return
+                if text is None:
+                    return
+                try:
+                    loaded = json.loads(text)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(loaded, dict):
+                    continue
+                if loaded.get("type") == "event":
+                    self._events.put(loaded)
+                    continue
+                frame_id = str(loaded.get("id", ""))
+                box = self._waiters.get(frame_id)
+                if box is not None:
+                    box.put(loaded)
+        finally:
+            self._closed.set()
+            self._fail_waiters("connection closed")
 
     def _fail_waiters(self, message: str) -> None:
         failure = {"type": "error", "ok": False, "payload": {"code": "closed", "message": message}}
