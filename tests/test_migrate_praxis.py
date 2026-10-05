@@ -400,6 +400,18 @@ def test_import_is_idempotent_and_leaves_the_source_unchanged(tmp_path: Path) ->
         assert dials["hipaa"] == "enforce"
         assert dials["ferpa"] == "monitor"
         assert dials["coppa"] == "monitor"
+        changes = db.conn.execute(
+            "SELECT payload_json FROM audit_events WHERE kind = 'dial_change'"
+        ).fetchall()
+        moved_dials: dict[str, object] = {}
+        for event in changes:
+            payload = json.loads(event["payload_json"])
+            changed = payload.get("changed")
+            if isinstance(changed, dict):
+                moved_dials.update(changed)
+        assert moved_dials["ferpa"] == {"from": "off", "to": "monitor"}
+        assert moved_dials["coppa"] == {"from": "off", "to": "monitor"}
+        assert "hipaa" not in moved_dials
     finally:
         db.close()
 
@@ -418,6 +430,9 @@ def test_import_is_idempotent_and_leaves_the_source_unchanged(tmp_path: Path) ->
     assert 'hipaa = "enforce"' in saved
     assert 'ferpa = "monitor"' in saved
     assert 'coppa = "monitor"' in saved
+    backups = list(config.glob("config.toml.bak-*"))
+    assert backups
+    assert any('ferpa = "off"' in item.read_text(encoding="utf-8") for item in backups)
     archive = Path(report.history_archive)
     assert stat.S_IMODE(archive.stat().st_mode) == 0o400
     assert stat.S_IMODE(archive.parent.stat().st_mode) == 0o700
@@ -440,9 +455,13 @@ def test_import_is_idempotent_and_leaves_the_source_unchanged(tmp_path: Path) ->
     db = StateDB(home.db_path)
     try:
         count = db.conn.execute("SELECT COUNT(*) FROM memory_entries").fetchone()[0]
+        dial_events = db.conn.execute(
+            "SELECT COUNT(*) FROM audit_events WHERE kind = 'dial_change'"
+        ).fetchone()[0]
     finally:
         db.close()
     assert count == memory_count
+    assert dial_events == 1
 
     database = sqlite3.connect(source / "praxis.db")
     database.execute("UPDATE memory_items SET text = 'changed after import' WHERE id = 1")

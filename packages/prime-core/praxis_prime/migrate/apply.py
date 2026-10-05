@@ -315,7 +315,7 @@ def _run(
                 + ". Existing enforce positions are left alone."
             )
         if dials and not dry_run and config_dir is not None:
-            _apply_monitor(config_dir, db, dials)
+            _apply_monitor(config_dir, db, audit, dials)
         elif dials and not dry_run:
             notes.append("Dials were not written because no config directory was given.")
     if "settings" in selected:
@@ -1012,10 +1012,22 @@ def _quarantined(source_db: PraxisDB) -> frozenset[str]:
     return frozenset(names)
 
 
-def _apply_monitor(config: Path, db: StateDB | None, dials: list[str]) -> None:
-    """Move listed dials from off to monitor. Enforce and monitor stay put."""
+def _apply_monitor(
+    config: Path,
+    db: StateDB | None,
+    audit: AuditLog | None,
+    dials: list[str],
+) -> None:
+    """Move listed dials from off to monitor and audit that move.
+
+    Enforce stays put. A missing ``dial_positions`` row is seeded with the
+    positions from before this move, so ``sync_dial_positions`` records
+    ``dial_change`` for the off-to-monitor step. ``config.toml`` is backed
+    up before it is rewritten.
+    """
+    from praxis_prime.compliance.positions import sync_dial_positions
     from praxis_prime.config import write_default_config
-    from praxis_prime.onboarding.configio import load_document, write_document
+    from praxis_prime.onboarding.configio import backup_config, load_document, write_document
 
     root = Path(config)
     write_default_config(root, force=False)
@@ -1025,35 +1037,39 @@ def _apply_monitor(config: Path, db: StateDB | None, dials: list[str]) -> None:
     table = document.get("dials")
     if not isinstance(table, dict):
         table = {}
-    changed = False
+    moved: list[str] = []
     for dial in dials:
         current = table.get(dial, "off")
         if current == "off":
             table[dial] = "monitor"
-            changed = True
-    if changed:
+            moved.append(dial)
+    if moved:
         document["dials"] = table
+        backup_config(path)
         write_document(path, document, previous=previous)
-    if db is None:
+    if db is None or audit is None:
         return
-    positions = default_positions()
-    for dial, position in table.items():
-        if dial in positions and position in {"off", "monitor", "enforce"}:
-            positions[str(dial)] = str(position)
-    encoded = json.dumps(positions, sort_keys=True)
-    stamp = dump_time(utcnow())
+    desired = default_positions()
     row = db.conn.execute("SELECT positions_json FROM dial_positions WHERE id = 1").fetchone()
-    if row is None:
-        db.conn.execute(
-            "INSERT INTO dial_positions (id, positions_json, updated_at) VALUES (1, ?, ?)",
-            (encoded, stamp),
-        )
-    else:
-        db.conn.execute(
-            "UPDATE dial_positions SET positions_json = ?, updated_at = ? WHERE id = 1",
-            (encoded, stamp),
-        )
-    db.conn.commit()
+    if row is not None:
+        stored = json.loads(row["positions_json"])
+        if isinstance(stored, dict):
+            for dial, position in stored.items():
+                if dial in desired and position in {"off", "monitor", "enforce"}:
+                    desired[str(dial)] = str(position)
+    for dial, position in table.items():
+        if dial not in desired or position not in {"off", "monitor", "enforce"}:
+            continue
+        if desired[dial] == "enforce":
+            continue
+        desired[str(dial)] = str(position)
+    if row is None and moved:
+        baseline = dict(desired)
+        for dial in moved:
+            if desired.get(dial) == "monitor":
+                baseline[dial] = "off"
+        sync_dial_positions(db, audit, baseline)
+    sync_dial_positions(db, audit, desired)
 
 
 def _write_report(data: Path, report: MigrationReport) -> tuple[Path, Path]:
