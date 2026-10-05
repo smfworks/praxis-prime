@@ -142,7 +142,7 @@
 | Capability | Hermes | OpenClaw | Grok Bot | Cursor | Claude Code | Codex | Praxis | Swarm 2.0 | Jev | Jarvis | **Praxis Prime plan** |
 |---|---|---|---|---|---|---|---|---|---|---|---|
 | Desktop app on Linux | ✅ Electron | ✅ Tauri v2 (.deb/AppImage) | ✅ desktop app | ✅ Electron IDE | ◐ terminal (+ desktop app, platform support not checked) | ◐ CLI/IDE | ◐ web dashboard :8643 | ◐ web UI :8787 | — | ★ HUD | **A** Tauri 2 |
-| TUI | ✅ Ink | ✅ | ✗ | ✗ | ✅ | ✅ | ◐ CLI | ◐ CLI | — | — | **N** Textual |
+| TUI | ✅ Ink | ✅ | ✗ | ✗ | ✅ | ✅ | ◐ CLI | ◐ CLI | — | — | **N** Textual extra (landed) |
 | Web UI / dashboard | ✅ FastAPI dashboard | ✅ Control UI | ✅ | ✅ web agents | ✅ web | ✅ web | ✅ Command Deck | ✅ | — | — | **A** React SPA |
 | Canvas / artifacts | ◐ | ✅ Canvas/A2UI | ✅ files/attachments | ✅ artifacts | ◐ | ◐ | ✗ | ◐ reports | — | — | **A** |
 | Omarchy integration | ✅ installer, theme template, seeded prompt mode | ✅ installer + Quickshell bar plugin | ✗ | ✗ | ◐ `claude.json.tpl` theme | ? | ✗ | ✗ | — | ★ keybind, bar mic indicator | **A** all of it |

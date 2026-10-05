@@ -15,13 +15,14 @@ import threading
 import time
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from praxis_prime import __version__
 from praxis_prime.gateway.ws import WebSocketConnection, WebSocketError, client_handshake
 
 EventHandler = Callable[[dict[str, object]], None]
 Decider = Callable[[dict[str, object]], str | None]
+Pulse = Callable[[], None]
 
 
 class GatewayError(RuntimeError):
@@ -32,7 +33,7 @@ class GatewayError(RuntimeError):
 class Endpoint:
     host: str
     port: int
-    token: str
+    token: str = field(repr=False)
     socket_path: str | None = None
 
 
@@ -58,7 +59,10 @@ class GatewayClient:
         *,
         timeout: float = 5,
         role: str = "operator",
+        client: str = "cli",
     ) -> GatewayClient:
+        # The socket instance below reuses the name client.
+        client_name = client
         sock = _connect_socket(endpoint, timeout=timeout)
         try:
             buffer = client_handshake(
@@ -76,7 +80,7 @@ class GatewayClient:
                 "connect",
                 {
                     "role": role,
-                    "client": "cli",
+                    "client": client_name,
                     "version": __version__,
                     "token": endpoint.token,
                     "capabilities": ["chat", "approvals"],
@@ -99,17 +103,22 @@ class GatewayClient:
         except OSError:
             return
 
+    @property
+    def closed(self) -> bool:
+        """True once the reader has exited or a write has failed."""
+        return self._closed.is_set()
+
     def status(self) -> dict[str, object]:
         frame = self.request("status", {})
         self._raise_if_error(frame)
         payload = frame.get("payload")
         return payload if isinstance(payload, dict) else {}
 
-    def list_approvals(self, profile: str = "") -> list[dict[str, object]]:
+    def list_approvals(self, profile: str = "", timeout: float = 30) -> list[dict[str, object]]:
         payload: dict[str, object] = {}
         if profile:
             payload["profile"] = profile
-        frame = self.request("approvals.list", payload)
+        frame = self.request("approvals.list", payload, timeout=timeout)
         self._raise_if_error(frame)
         payload = frame.get("payload")
         if not isinstance(payload, dict):
@@ -152,12 +161,16 @@ class GatewayClient:
         decider: Decider | None = None,
         timeout: float | None = None,
         profile: str | None = None,
+        pulse: Pulse | None = None,
     ) -> dict[str, object]:
         """Send one turn and return the result frame.
 
         ``decider`` is polled while an approval is pending. Return a decision
         string to answer it, or None to keep waiting. Telegram or another
         operator can decide first; this method returns when the turn ends.
+        ``pulse`` runs on this thread each wait so another decision can be
+        sent without waiting for the turn to finish. A rejected decision is
+        reported through ``on_event`` and does not drop the turn.
         """
         frame_id = uuid.uuid4().hex
         box: queue.Queue[dict[str, object]] = queue.Queue(maxsize=1)
@@ -173,11 +186,18 @@ class GatewayClient:
         }
         if session_id:
             body["sessionId"] = session_id
-        self.ws.send_text(json.dumps(body))
+        try:
+            self.ws.send_text(json.dumps(body))
+        except OSError as exc:
+            self._closed.set()
+            self._waiters.pop(frame_id, None)
+            raise GatewayError(f"disconnected: {exc}") from exc
         deadline = None if timeout is None else time.monotonic() + timeout
         pending: dict[str, object] | None = None
         try:
             while not self._closed.is_set():
+                if pulse is not None:
+                    pulse()
                 if deadline is not None and time.monotonic() > deadline:
                     raise GatewayError("timed out waiting for the daemon")
                 event = _get(self._events, 0.2)
@@ -199,9 +219,16 @@ class GatewayClient:
                     decision = decider(pending)
                     if decision:
                         try:
-                            self.decide(str(pending.get("id", "")), decision)
-                        except GatewayError:
-                            pass
+                            self.decide(str(pending.get("id", "")), decision, profile or "")
+                        except GatewayError as exc:
+                            if on_event is not None:
+                                on_event(
+                                    {
+                                        "kind": "status",
+                                        "phase": "error",
+                                        "detail": str(exc),
+                                    }
+                                )
                         pending = None
             raise GatewayError("gateway connection closed")
         finally:
@@ -231,6 +258,9 @@ class GatewayClient:
             result = box.get(timeout=timeout)
         except queue.Empty as exc:
             raise GatewayError(f"timed out waiting for {kind}") from exc
+        except OSError as exc:
+            self._closed.set()
+            raise GatewayError(f"disconnected: {exc}") from exc
         finally:
             self._waiters.pop(frame_id, None)
         return result
@@ -240,27 +270,30 @@ class GatewayClient:
             raise GatewayError(_message(frame) or "gateway request failed")
 
     def _read_loop(self) -> None:
-        while not self._closed.is_set():
-            try:
-                text = self.ws.recv_text()
-            except (OSError, WebSocketError, ConnectionError, UnicodeError):
-                text = None
-            if text is None:
-                self._fail_waiters("connection closed")
-                return
-            try:
-                loaded = json.loads(text)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(loaded, dict):
-                continue
-            if loaded.get("type") == "event":
-                self._events.put(loaded)
-                continue
-            frame_id = str(loaded.get("id", ""))
-            box = self._waiters.get(frame_id)
-            if box is not None:
-                box.put(loaded)
+        try:
+            while not self._closed.is_set():
+                try:
+                    text = self.ws.recv_text()
+                except (OSError, WebSocketError, ConnectionError, UnicodeError):
+                    return
+                if text is None:
+                    return
+                try:
+                    loaded = json.loads(text)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(loaded, dict):
+                    continue
+                if loaded.get("type") == "event":
+                    self._events.put(loaded)
+                    continue
+                frame_id = str(loaded.get("id", ""))
+                box = self._waiters.get(frame_id)
+                if box is not None:
+                    box.put(loaded)
+        finally:
+            self._closed.set()
+            self._fail_waiters("connection closed")
 
     def _fail_waiters(self, message: str) -> None:
         failure = {"type": "error", "ok": False, "payload": {"code": "closed", "message": message}}

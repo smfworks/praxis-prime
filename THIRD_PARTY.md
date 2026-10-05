@@ -134,6 +134,14 @@ No TypeSafe source is vendored in `praxis_prime.decide`.
 | pyasn1-modules | BSD | Transitive dependency of `webauthn` for ASN.1 modules. No source is copied into this repository. |
 | tinycss2 | BSD-3-Clause | CSS parser for the theme `theme.css` allowlist. No source is copied into this repository. |
 | webencodings | BSD | Transitive dependency of tinycss2. No source is copied into this repository. |
+| textual | MIT | Full-screen terminal UI for `praxis-prime tui`. No source is copied into this repository. |
+| rich | MIT | Transitive dependency of textual. No source is copied into this repository. |
+| markdown-it-py | MIT | Transitive dependency of textual (via rich). No source is copied into this repository. |
+| mdit-py-plugins | MIT | Transitive dependency of markdown-it-py. No source is copied into this repository. |
+| mdurl | MIT | Transitive dependency of markdown-it-py. No source is copied into this repository. |
+| platformdirs | MIT | Transitive dependency of textual. No source is copied into this repository. |
+| linkify-it-py | MIT | Transitive dependency of markdown-it-py. No source is copied into this repository. |
+| pygments | BSD-2-Clause | Transitive dependency of rich. No source is copied into this repository. |
 
 ## Bundled fonts
 
