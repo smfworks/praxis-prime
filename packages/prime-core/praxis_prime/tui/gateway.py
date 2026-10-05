@@ -4,10 +4,10 @@ Frames go through :class:`GatewayClient`. Theme and setup reads are HTTP
 ``GET`` on ``127.0.0.1`` with the same bearer token. Nothing here opens
 ``prime.db`` or the Omarchy theme file.
 
-One chat holds the socket. A decision for the approval that chat is waiting
-on is handed to the chat decider, which sends ``approvals.decide`` once.
-A decision for a different id waits until the turn returns. An empty answer
-is not a decision.
+One chat owns the socket. ``in_chat`` does not take that lock. A decision
+for the approval the turn is waiting on is returned to the chat decider,
+which sends ``approvals.decide`` once. Any other id is sent on the chat
+thread as soon as it is queued. An empty answer is not a decision.
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import re
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from http.client import HTTPConnection
@@ -27,17 +28,18 @@ from praxis_prime.gateway.client import (
     EventHandler,
     GatewayClient,
     GatewayError,
+    Pulse,
 )
 
 DECISIONS = frozenset({"allow_once", "allow_session", "deny"})
 MAX_BODY = 1_000_000
+LIST_TIMEOUT = 3.0
 _REDIRECTS = frozenset({301, 302, 303, 307, 308})
 _ALLOWED = frozenset(
     {
         "/v1/themes/active",
         "/v1/onboarding/status",
         "/v1/profiles",
-        "/v1/approvals",
     }
 )
 _CSS_PATH = re.compile(r"^/themes/([a-z0-9][a-z0-9.-]{0,63})/([0-9a-f]{64})\.css$")
@@ -54,7 +56,11 @@ NOT_RUNNING = (
 class FramePort(Protocol):
     """The slice of the operator socket the TUI uses."""
 
-    def list_approvals(self, profile: str = "") -> list[dict[str, object]]: ...
+    def list_approvals(
+        self,
+        profile: str = "",
+        timeout: float = 30,
+    ) -> list[dict[str, object]]: ...
 
     def decide(
         self,
@@ -72,6 +78,7 @@ class FramePort(Protocol):
         decider: Decider | None = None,
         timeout: float | None = None,
         profile: str | None = None,
+        pulse: Pulse | None = None,
     ) -> dict[str, object]: ...
 
     def close(self) -> None: ...
@@ -99,8 +106,8 @@ class GatewayFrames:
     def __init__(self, client: GatewayClient) -> None:
         self._client = client
 
-    def list_approvals(self, profile: str = "") -> list[dict[str, object]]:
-        return self._client.list_approvals(profile)
+    def list_approvals(self, profile: str = "", timeout: float = 30) -> list[dict[str, object]]:
+        return self._client.list_approvals(profile, timeout=timeout)
 
     def decide(
         self,
@@ -119,6 +126,7 @@ class GatewayFrames:
         decider: Decider | None = None,
         timeout: float | None = None,
         profile: str | None = None,
+        pulse: Pulse | None = None,
     ) -> dict[str, object]:
         return self._client.chat(
             text,
@@ -127,6 +135,7 @@ class GatewayFrames:
             decider=decider,
             timeout=timeout,
             profile=profile,
+            pulse=pulse,
         )
 
     def close(self) -> None:
@@ -203,7 +212,7 @@ class LoopbackHttp:
 
 
 class TuiGateway:
-    """One operator connection. Chat and decisions share one lock."""
+    """One operator connection. The UI can ask ``in_chat`` without the socket lock."""
 
     def __init__(
         self,
@@ -212,21 +221,32 @@ class TuiGateway:
         *,
         profile: str = "",
         port: int = 18790,
+        connector: Callable[[], tuple[FramePort, HttpPort]] | None = None,
     ) -> None:
         self.frames = frames
         self.http = http
         self.profile = profile
         self.port = port
         self._lock = threading.Lock()
-        self._in_chat = False
+        self._chatting = threading.Event()
         self._queued: dict[str, str] = {}
         self._wait_hook: Callable[[], None] | None = None
+        self._event_handler: EventHandler | None = None
+        self._connector = connector
+        self._connected = True
+        self._backoff = 0.5
+        self._next_try = 0.0
 
     @classmethod
     def connect(cls, endpoint: Endpoint, *, profile: str = "") -> TuiGateway:
-        client = GatewayClient.connect(endpoint, client="tui")
-        http = LoopbackHttp(endpoint.host, endpoint.port, endpoint.token)
-        return cls(GatewayFrames(client), http, profile=profile, port=endpoint.port)
+        frames, http = _open_pair(endpoint)
+        return cls(
+            frames,
+            http,
+            profile=profile,
+            port=endpoint.port,
+            connector=lambda: _open_pair(endpoint),
+        )
 
     def close(self) -> None:
         self.frames.close()
@@ -241,22 +261,62 @@ class TuiGateway:
 
     @property
     def in_chat(self) -> bool:
+        return self._chatting.is_set()
+
+    @property
+    def connected(self) -> bool:
+        return self._connected
+
+    def note_down(self) -> None:
+        """The socket failed. The next poll may reconnect."""
+        self._connected = False
+
+    def try_reconnect(self) -> bool:
+        """Open a new loopback client. Skipped until the backoff elapses."""
+        if self._connected:
+            return True
+        if self._connector is None or self._chatting.is_set():
+            return False
+        now = time.monotonic()
+        if now < self._next_try:
+            return False
+        try:
+            frames, http = self._connector()
+        except (OSError, GatewayError, TimeoutError):
+            self._backoff = min(self._backoff * 2, 5.0)
+            self._next_try = time.monotonic() + self._backoff
+            return False
         with self._lock:
-            return self._in_chat
+            if self._chatting.is_set():
+                frames.close()
+                return False
+            old = self.frames
+            self.frames = frames
+            self.http = http
+            self._connected = True
+            self._backoff = 0.5
+            self._next_try = 0.0
+        try:
+            old.close()
+        except OSError:
+            pass
+        return True
 
     def list_approvals(self) -> list[dict[str, object]]:
-        """Pending cards. Raises while a turn holds the socket."""
+        """Pending cards. Raises at once while a turn holds the socket."""
+        if self._chatting.is_set():
+            raise GatewayError("chat in progress")
         with self._lock:
-            if self._in_chat:
+            if self._chatting.is_set():
                 raise GatewayError("chat in progress")
-            return self.frames.list_approvals(self.profile)
+            return self.frames.list_approvals(self.profile, timeout=LIST_TIMEOUT)
 
     def decide(self, approval_id: str, decision: str) -> str:
         """Queue or send one decision. Returns ``queued`` or ``sent``.
 
         ``decision`` must be ``allow_once``, ``allow_session``, or ``deny``.
-        The socket call is serialized with ``list_approvals``. A decision
-        during a turn is queued for that turn's decider instead.
+        Idle calls take the socket lock. A decision during a turn is queued
+        and the chat thread sends it, so this method does not wait on the turn.
         """
         if decision not in DECISIONS:
             raise ValueError(f"unknown decision {decision!r}")
@@ -264,7 +324,7 @@ class TuiGateway:
             raise ValueError("approval id is empty")
         approval_id = str(approval_id).strip()
         with self._lock:
-            if self._in_chat:
+            if self._chatting.is_set():
                 self._queued[approval_id] = decision
                 return "queued"
             self.frames.decide(approval_id, decision, self.profile)
@@ -280,26 +340,25 @@ class TuiGateway:
     ) -> dict[str, object]:
         """One turn. The decider never invents an approval answer."""
         with self._lock:
-            if self._in_chat:
+            if self._chatting.is_set():
                 raise GatewayError("chat in progress")
-            self._in_chat = True
+            self._chatting.set()
+            self._event_handler = on_event
         try:
-            return self.frames.chat(
-                text,
-                session_id=session_id or None,
-                on_event=on_event,
-                decider=self._decider,
-                profile=profile if profile is not None else (self.profile or None),
-            )
+            try:
+                return self.frames.chat(
+                    text,
+                    session_id=session_id or None,
+                    on_event=on_event,
+                    decider=self._decider,
+                    pulse=self._pulse,
+                    profile=profile if profile is not None else (self.profile or None),
+                )
+            except OSError as exc:
+                self.note_down()
+                raise GatewayError(f"disconnected: {exc}") from exc
         finally:
-            with self._lock:
-                leftover = list(self._queued.items())
-                self._queued.clear()
-                try:
-                    for approval_id, decision in leftover:
-                        self.frames.decide(approval_id, decision, self.profile)
-                finally:
-                    self._in_chat = False
+            self._finish_chat()
 
     def readiness(self) -> Readiness:
         """Chat gate from ``GET /v1/onboarding/status``.
@@ -312,13 +371,71 @@ class TuiGateway:
             return Readiness(True, "")
         return readiness_from(status, self.port)
 
+    def _pulse(self) -> None:
+        """Send decisions already queued. The pending id is included once."""
+        self._flush(skip="")
+
     def _decider(self, pending: dict[str, object]) -> str | None:
         hook = self._wait_hook
         if hook is not None:
             hook()
         approval_id = str(pending.get("id", ""))
+        self._flush(skip=approval_id)
         with self._lock:
             return self._queued.pop(approval_id, None)
+
+    def _flush(self, *, skip: str) -> None:
+        """Send queued decisions except ``skip`` on this thread."""
+        with self._lock:
+            items = [(key, value) for key, value in self._queued.items() if key != skip]
+            for key, _value in items:
+                self._queued.pop(key, None)
+            handler = self._event_handler
+        for approval_id, decision in items:
+            try:
+                self.frames.decide(approval_id, decision, self.profile)
+            except GatewayError as exc:
+                if handler is not None:
+                    handler(
+                        {
+                            "kind": "status",
+                            "phase": "error",
+                            "detail": f"decision {approval_id}: {exc}",
+                        }
+                    )
+
+    def _finish_chat(self) -> None:
+        with self._lock:
+            leftover = list(self._queued.items())
+            self._queued.clear()
+            handler = self._event_handler
+            self._event_handler = None
+        try:
+            for approval_id, decision in leftover:
+                try:
+                    self.frames.decide(approval_id, decision, self.profile)
+                except GatewayError as exc:
+                    if handler is not None:
+                        handler(
+                            {
+                                "kind": "status",
+                                "phase": "error",
+                                "detail": f"decision {approval_id}: {exc}",
+                            }
+                        )
+        finally:
+            self._chatting.clear()
+
+
+def _open_pair(endpoint: Endpoint) -> tuple[GatewayFrames, LoopbackHttp]:
+    """Connect the socket, then the HTTP client. Close the socket if HTTP refuses."""
+    client = GatewayClient.connect(endpoint, client="tui")
+    try:
+        http = LoopbackHttp(endpoint.host, endpoint.port, endpoint.token)
+    except Exception:
+        client.close()
+        raise
+    return GatewayFrames(client), http
 
 
 def readiness_from(status: dict[str, object], port: int) -> Readiness:

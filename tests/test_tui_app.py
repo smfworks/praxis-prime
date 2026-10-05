@@ -7,10 +7,12 @@ import time
 
 import pytest
 from tests.test_tui_gateway import FakeFrames, FakeHttp
+from textual.color import Color
 from textual.widgets import Input, Static
 
 from praxis_prime.cli import main
 from praxis_prime.gateway.client import Endpoint, GatewayClient, GatewayError
+from praxis_prime.tui import run_tui
 from praxis_prime.tui.app import PraxisApp
 from praxis_prime.tui.gateway import TuiGateway
 from praxis_prime.tui.plain import run_plain
@@ -76,10 +78,17 @@ def test_chat_send_renders_the_stream() -> None:
             await _until(pilot, lambda: app.booted)
             await _submit(pilot, app, "hi")
             await _until(pilot, lambda: "Hello there" in app.transcript_text())
-            body = str(app.query_one("#transcript-body", Static).content)
-            timeline = str(app.query_one("#timeline-body", Static).content)
-            assert "Hello there" in body
-            assert "files" in timeline
+            assert "Hello there" in app.transcript_text()
+            assert "files" in app.timeline_text()
+
+            def painted() -> bool:
+                body = app.query_one("#transcript-body")
+                kinds = [set(child.classes) for child in body.children]
+                has_you = any("you" in item for item in kinds)
+                has_prime = any("prime" in item for item in kinds)
+                return has_you and has_prime
+
+            await _until(pilot, painted)
 
     asyncio.run(run())
     assert "you: hi" in app.transcript_text()
@@ -133,6 +142,9 @@ def _decision_pilot(key: str, decision: str) -> None:
             await pilot.press("f3")
             await pilot.pause()
             await pilot.press(key)
+            await pilot.pause()
+            confirm = {"a": "ctrl+y", "s": "ctrl+u", "d": "ctrl+x"}[key]
+            await pilot.press(confirm)
             await _until(pilot, lambda: "working done" in app.transcript_text())
 
     asyncio.run(run())
@@ -226,7 +238,38 @@ def test_unconfigured_daemon_blocks_chat_and_names_setup() -> None:
     assert frames.chats == []
 
 
-def test_no_color_uses_the_ansi_theme(monkeypatch: pytest.MonkeyPatch) -> None:
+def _rgb(color: object) -> tuple[int, int, int] | None:
+    if color is None or getattr(color, "is_default", False):
+        return None
+    trip = getattr(color, "triplet", None)
+    if trip is None:
+        return None
+    return (trip.red, trip.green, trip.blue)
+
+
+def _filtered_pairs(
+    app: PraxisApp,
+) -> list[tuple[tuple[int, int, int] | None, tuple[int, int, int] | None]]:
+    # The screen compositor stays blank in headless tests. The status line is
+    # what the driver would filter on the way to the terminal.
+    strip = app.query_one("#status").render_line(0)
+    segments = [(text, style, control) for text, style, control in strip]
+    background = app.screen.styles.background
+    if not isinstance(background, Color):
+        background = Color.parse("#000000")
+    for filt in app.get_line_filters():
+        segments = filt.apply(list(segments), background)
+    pairs = []
+    for text, style, _control in segments:
+        if not text or not str(text).strip():
+            continue
+        fg = None if style is None else style.color
+        bg = None if style is None else style.bgcolor
+        pairs.append((_rgb(fg), _rgb(bg)))
+    return pairs
+
+
+def test_no_color_does_not_paint_black_on_black(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("NO_COLOR", "1")
     monkeypatch.delenv("COLORFGBG", raising=False)
     app, _gateway = _app(FakeFrames())
@@ -234,9 +277,13 @@ def test_no_color_uses_the_ansi_theme(monkeypatch: pytest.MonkeyPatch) -> None:
     async def run() -> None:
         async with app.run_test(size=(80, 24)) as pilot:
             await _until(pilot, lambda: app.booted)
+            pairs = _filtered_pairs(app)
+            explicit = [(fg, bg) for fg, bg in pairs if fg is not None and bg is not None]
+            assert explicit
+            for fg, bg in explicit:
+                assert fg != bg
 
     asyncio.run(run())
-    assert app.theme == "ansi-dark"
 
 
 def test_plain_transcript_approves_and_denies() -> None:
@@ -287,8 +334,8 @@ def test_plain_transcript_approves_and_denies() -> None:
     text = "".join(out)
     assert code == 0
     assert "you: hello" in text
-    assert "prime: streamed" in text
-    assert "prime:  tail" in text or "prime: tail" in text
+    assert "prime: streamed tail" in text
+    assert text.count("prime:") == 1
     assert "Approval needed" in text
     assert "rm tmp" in text
     assert "decision allow_once ap1" in text
@@ -342,3 +389,53 @@ def test_tui_connect_failure_is_not_a_setup_message(
     err = capsys.readouterr().err
     assert "stopped" in err
     assert "not running" not in err
+
+
+def test_fullscreen_without_textual_prints_the_install_hint(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from praxis_prime.tui import _INSTALL_HINT
+
+    _frames, http = FakeFrames(), FakeHttp()
+    gateway = TuiGateway(_frames, http, profile="default", port=18790)
+
+    def connect(endpoint: Endpoint, **kwargs: object) -> TuiGateway:
+        del endpoint, kwargs
+        return gateway
+
+    def missing() -> type[PraxisApp]:
+        raise ImportError("textual")
+
+    monkeypatch.setattr(TuiGateway, "connect", staticmethod(connect))
+    monkeypatch.setattr("praxis_prime.tui._load_app", missing)
+    code = run_tui(discover=lambda: Endpoint("127.0.0.1", 18790, "token-value"))
+    assert code == 1
+    assert capsys.readouterr().err == _INSTALL_HINT
+
+
+def test_plain_does_not_load_the_fullscreen_app(monkeypatch: pytest.MonkeyPatch) -> None:
+    frames, http = FakeFrames(), FakeHttp()
+    gateway = TuiGateway(frames, http, profile="default", port=18790)
+    loaded = False
+
+    def connect(endpoint: Endpoint, **kwargs: object) -> TuiGateway:
+        del endpoint, kwargs
+        return gateway
+
+    def missing() -> type[PraxisApp]:
+        nonlocal loaded
+        loaded = True
+        raise ImportError("textual")
+
+    monkeypatch.setattr(TuiGateway, "connect", staticmethod(connect))
+    monkeypatch.setattr("praxis_prime.tui._load_app", missing)
+    lines = iter(["/quit"])
+    code = run_tui(
+        plain=True,
+        discover=lambda: Endpoint("127.0.0.1", 18790, "token-value"),
+        read_line=lambda: next(lines),
+        write=lambda _text: None,
+    )
+    assert code == 0
+    assert loaded is False

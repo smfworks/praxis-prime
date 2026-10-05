@@ -30,8 +30,10 @@ class FakeFrames:
         self.approvals: list[dict[str, object]] = []
         self.closed = False
         self.chat_impl = None
+        self.list_timeouts: list[float] = []
 
-    def list_approvals(self, profile: str = "") -> list[dict[str, object]]:
+    def list_approvals(self, profile: str = "", timeout: float = 30) -> list[dict[str, object]]:
+        self.list_timeouts.append(timeout)
         return [dict(item) for item in self.approvals]
 
     def decide(self, approval_id: str, decision: str, profile: str = "") -> dict[str, object]:
@@ -47,7 +49,9 @@ class FakeFrames:
         decider=None,
         timeout: float | None = None,
         profile: str | None = None,
+        pulse=None,
     ) -> dict[str, object]:
+        del pulse
         self.chats.append({"text": text, "session_id": session_id, "profile": profile})
         if self.chat_impl is not None:
             return self.chat_impl(text, session_id, on_event, decider, timeout, profile)
@@ -193,9 +197,11 @@ def test_decision_during_chat_is_sent_once() -> None:
     assert frames.decisions == [("ap9", "deny", "default")]
 
 
-def test_other_approval_waits_until_the_turn_ends() -> None:
+def test_other_approval_is_sent_during_the_turn() -> None:
     gateway, frames, _http = _gateway()
     started = threading.Event()
+
+    during: list[list[tuple[str, str, str]]] = []
 
     def script(text, session_id, on_event, decider, timeout, profile):
         del text, session_id, timeout, profile
@@ -205,6 +211,7 @@ def test_other_approval_waits_until_the_turn_ends() -> None:
         while time.monotonic() < deadline:
             decision = decider(card)
             if decision:
+                during.append(list(frames.decisions))
                 frames.decide("ap-now", decision, "default")
                 break
             time.sleep(0.01)
@@ -223,9 +230,10 @@ def test_other_approval_waits_until_the_turn_ends() -> None:
     gateway.decide("ap-later", "allow_once")
     gateway.decide("ap-now", "deny")
     thread.join(3)
-    assert ("ap-now", "deny", "default") in frames.decisions
-    assert ("ap-later", "allow_once", "default") in frames.decisions
-    assert frames.decisions[-1] == ("ap-later", "allow_once", "default")
+    assert during and ("ap-later", "allow_once", "default") in during[0]
+    assert frames.decisions[-1] == ("ap-now", "deny", "default")
+    assert frames.decisions.count(("ap-later", "allow_once", "default")) == 1
+    assert frames.decisions.count(("ap-now", "deny", "default")) == 1
 
 
 def test_provider_missing_message() -> None:
@@ -363,3 +371,122 @@ def test_connect_client_name_is_forwarded(monkeypatch: pytest.MonkeyPatch) -> No
         TuiGateway.connect(endpoint)
     assert seen["client"] == "tui"
     assert seen["endpoint"] == endpoint
+
+
+def test_endpoint_token_is_hidden_from_repr() -> None:
+    endpoint = Endpoint("127.0.0.1", 18790, "secret-token")
+    assert "secret-token" not in repr(endpoint)
+
+
+def test_connect_closes_the_client_if_http_refuses(monkeypatch: pytest.MonkeyPatch) -> None:
+    closed: list[str] = []
+
+    class _Client:
+        def close(self) -> None:
+            closed.append("closed")
+
+    monkeypatch.setattr(GatewayClient, "connect", staticmethod(lambda *_a, **_k: _Client()))
+    with pytest.raises(GatewayError, match="127.0.0.1"):
+        TuiGateway.connect(Endpoint("10.0.0.8", 9, "secret-token"))
+    assert closed == ["closed"]
+
+
+def test_tui_http_refuses_the_approvals_route() -> None:
+    http = LoopbackHttp("127.0.0.1", 9, "secret-token")
+    with pytest.raises(GatewayError, match="path"):
+        http.get_json("/v1/approvals")
+
+
+def test_list_approvals_uses_a_short_timeout() -> None:
+    gateway, frames, _http = _gateway()
+    assert gateway.list_approvals() == []
+    assert frames.list_timeouts == [3.0]
+
+
+def test_in_chat_does_not_wait_on_a_stalled_list() -> None:
+    gateway, frames, _http = _gateway()
+    started = threading.Event()
+    release = threading.Event()
+
+    def slow(profile: str = "", timeout: float = 30) -> list[dict[str, object]]:
+        del profile, timeout
+        started.set()
+        assert release.wait(5)
+        return []
+
+    frames.list_approvals = slow  # type: ignore[method-assign]
+    thread = threading.Thread(target=gateway.list_approvals)
+    thread.start()
+    assert started.wait(2)
+    began = time.monotonic()
+    assert gateway.in_chat is False
+    assert time.monotonic() - began < 0.2
+    release.set()
+    thread.join(2)
+    assert not thread.is_alive()
+
+
+def test_reconnect_backs_off_and_then_replaces_the_socket() -> None:
+    gateway, frames, _http = _gateway()
+    calls = {"n": 0}
+
+    def connector():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError("down")
+        return FakeFrames(), FakeHttp()
+
+    gateway._connector = connector
+    gateway.note_down()
+    assert gateway.try_reconnect() is False
+    assert calls["n"] == 1
+    assert gateway.try_reconnect() is False
+    gateway._next_try = 0
+    assert gateway.try_reconnect() is True
+    assert gateway.connected is True
+    assert frames.closed is True
+
+
+def test_decision_error_is_reported_during_the_turn() -> None:
+    gateway, frames, _http = _gateway()
+    started = threading.Event()
+    seen: list[dict[str, object]] = []
+
+    def decide(approval_id: str, decision: str, profile: str = "") -> dict[str, object]:
+        if approval_id == "bad":
+            raise GatewayError("no such approval")
+        frames.decisions.append((approval_id, decision, profile))
+        return {"ok": True}
+
+    frames.decide = decide  # type: ignore[method-assign]
+
+    def script(text, session_id, on_event, decider, timeout, profile):
+        del text, session_id, on_event, timeout, profile
+        started.set()
+        card = {"id": "ap-now"}
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            decision = decider(card)
+            if decision:
+                frames.decide("ap-now", decision, "default")
+                break
+            time.sleep(0.01)
+        else:
+            raise AssertionError("missing decision")
+        return {"type": "result", "ok": True, "payload": {"sessionId": "s", "text": "done"}}
+
+    frames.chat_impl = script
+
+    def run() -> None:
+        gateway.chat("hi", session_id="s", on_event=seen.append, profile="default")
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    assert started.wait(2)
+    assert gateway.decide("bad", "deny") == "queued"
+    assert gateway.decide("ap-now", "allow_once") == "queued"
+    thread.join(3)
+    assert not thread.is_alive()
+    assert any(item.get("phase") == "error" and "bad" in str(item.get("detail")) for item in seen)
+    assert ("ap-now", "allow_once", "default") in frames.decisions
+    assert not any(item[0] == "bad" for item in frames.decisions)

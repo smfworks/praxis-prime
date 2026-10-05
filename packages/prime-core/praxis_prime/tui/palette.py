@@ -16,9 +16,7 @@ from praxis_prime.themes.store import builtin_theme
 from praxis_prime.themes.tokens import CONTRAST_PAIRS, REQUIRED_COLORS, thresholds
 from praxis_prime.tui.gateway import HttpPort, active_theme_path
 
-_DECL = re.compile(
-    r"--pp-([A-Za-z][A-Za-z0-9]*)\s*:\s*(#[0-9A-Fa-f]{6}(?:[0-9A-Fa-f]{2})?)\b"
-)
+_DECL = re.compile(r"--pp-([A-Za-z][A-Za-z0-9]*)\s*:\s*(#[0-9A-Fa-f]{6}(?:[0-9A-Fa-f]{2})?)\b")
 _LIGHT_SELECTORS = frozenset(
     {
         ":root",

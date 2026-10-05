@@ -77,11 +77,16 @@ def test_bad_contrast_falls_back_to_smf_praxis() -> None:
     assert palette.colors == fallback_palette("light").colors
 
 
-def test_no_color_selects_an_ansi_theme_without_hex() -> None:
-    dark = theme_for(fallback_palette("dark"), no_color=True)
-    light = theme_for(fallback_palette("light"), no_color=True)
-    assert dark == "ansi-dark"
-    assert light == "ansi-light"
+def test_no_color_keeps_a_distinct_rgb_theme() -> None:
+    dark_palette = fallback_palette("dark")
+    light_palette = fallback_palette("light")
+    dark = theme_for(dark_palette, no_color=True)
+    light = theme_for(light_palette, no_color=True)
+    assert dark.background.lower() == dark_palette.colors["bg"].lower()
+    assert light.background.lower() == light_palette.colors["bg"].lower()
+    assert dark.name != light.name
+    assert dark.foreground.lower() != dark.background.lower()
+    assert light.foreground.lower() != light.background.lower()
 
 
 def test_system_mode_uses_colorfgbg() -> None:

@@ -1,8 +1,9 @@
 """Linear transcript for screen readers.
 
-No full-screen layout, no box drawing, and no colour. New assistant text
-and approval cards are plain lines. ``/approve``, ``/session-approve``, and
-``/deny`` are the only decision commands. An empty line decides nothing.
+No full-screen layout, no box drawing, and no colour. Assistant text is
+buffered to a newline or the end of the turn, and the ``prime:`` prefix is
+printed once per line. ``/approve``, ``/session-approve``, and ``/deny`` are
+the only decision commands. An empty line decides nothing.
 """
 
 from __future__ import annotations
@@ -11,9 +12,10 @@ import queue
 import threading
 from collections.abc import Callable
 
-from praxis_prime.approvals.card import format_approval_card
 from praxis_prime.gateway.client import GatewayError
+from praxis_prime.tui.cards import render_card
 from praxis_prime.tui.gateway import TuiGateway
+from praxis_prime.tui.sanitize import sanitize
 from praxis_prime.tui.sessions import SessionBook
 
 ReadLine = Callable[[], str]
@@ -30,7 +32,8 @@ HELP = "\n".join(
         "  /approvals",
         "  /timeline",
         "  /approve <id>             allow once",
-        "  /session-approve <id>     allow for this session",
+        "  /session-approve <id>     allow for that approval's session",
+        "                            (this daemon process, when the session is empty)",
         "  /deny <id>",
         "Any other line is a chat message.",
         "Nothing is approved unless you send one of those commands.",
@@ -53,7 +56,7 @@ def run_plain(
     readiness = gateway.readiness()
     write("Praxis Prime. Type /help for commands.\n")
     if not readiness.ready and readiness.message:
-        write(readiness.message + "\n")
+        write(sanitize(readiness.message) + "\n")
     _announce(gateway, write)
 
     def drain() -> None:
@@ -129,7 +132,7 @@ def _handle(
         if not timeline:
             write("timeline empty\n")
             return False
-        for item in timeline:
+        for item in timeline[-500:]:
             write(item + "\n")
         return False
     if text.startswith("/session "):
@@ -138,7 +141,7 @@ def _handle(
             write("usage: /session <id>\n")
             return False
         sessions.switch(session_id)
-        write(f"session {session_id}\n")
+        write(f"session {sanitize(session_id, newlines=False)}\n")
         shown = sessions.text()
         if shown:
             write(shown + "\n")
@@ -151,7 +154,7 @@ def _handle(
         write("Unknown command. Type /help.\n")
         return False
     if not ready:
-        write((blocked or "Chat is not available.") + "\n")
+        write(sanitize(blocked or "Chat is not available.") + "\n")
         return False
     _send(gateway, sessions, timeline, text, write)
     return False
@@ -164,73 +167,70 @@ def _send(
     text: str,
     write: Write,
 ) -> None:
-    sessions.note_user(text)
-    target = sessions.current
-    sessions.append(target, f"you: {text}")
-    write(f"you: {text}\n")
-    assistant = ""
+    shown = sanitize(text)
+    sessions.note_user(shown)
+    if sessions.current == "":
+        target = sessions.pin_draft()
+    else:
+        target = sessions.current
+    sessions.append(target, f"you: {shown}")
+    write(f"you: {shown}\n")
+    buffer = _PrimeBuffer(write)
 
     def on_event(payload: dict[str, object]) -> None:
-        nonlocal assistant
         kind = str(payload.get("kind") or "")
         if kind == "text":
-            chunk = str(payload.get("text") or "")
-            if not chunk:
-                return
-            assistant += chunk
-            write(f"prime: {chunk}\n")
+            buffer.add(str(payload.get("text") or ""))
             return
         if kind == "approval":
             approval = payload.get("approval")
             if isinstance(approval, dict):
                 _write_card(approval, write)
-                timeline.append(f"timeline: approval {approval.get('id', '')}")
+                approval_id = sanitize(approval.get("id", ""), newlines=False)
+                timeline.append(f"timeline: approval {approval_id}")
             return
-        if kind == "tool":
-            line = _span("tool", payload)
-            timeline.append(line)
-            write(line + "\n")
-            return
-        if kind == "status":
-            line = _span("status", payload)
+        if kind in {"tool", "status"}:
+            line = _span(kind, payload)
             timeline.append(line)
             write(line + "\n")
             return
         if kind == "turn":
-            line = f"timeline: turn {payload.get('phase', '')}".strip()
+            line = f"timeline: turn {sanitize(payload.get('phase', ''), newlines=False)}".strip()
             timeline.append(line)
+        if len(timeline) > 500:
+            del timeline[:-500]
 
     try:
-        result = gateway.chat(text, session_id=target or None, on_event=on_event)
+        result = gateway.chat(
+            shown,
+            session_id=sessions.wire_id(target),
+            on_event=on_event,
+        )
     except GatewayError as exc:
-        write(f"error: {exc}\n")
+        write(f"error: {sanitize(exc)}\n")
         return
     payload = result.get("payload")
     body = payload if isinstance(payload, dict) else {}
     session_id = str(body.get("sessionId") or "")
-    final = str(body.get("text") or "")
-    if assistant:
-        sessions.append(target, f"prime: {assistant}")
-    elif final:
-        sessions.append(target, f"prime: {final}")
-        write(f"prime: {final}\n")
+    final = sanitize(body.get("text") or "", newlines=False)
+    buffer.finish(final)
+    for line in buffer.lines:
+        sessions.append(target, f"prime: {line}")
     error = body.get("error")
     if error:
-        write(f"error: {error}\n")
-        sessions.append(target, f"error: {error}")
+        visible = sanitize(error)
+        write(f"error: {visible}\n")
+        sessions.append(target, f"error: {visible}")
     if session_id:
-        if target == "":
-            sessions.adopt(session_id)
-        elif session_id != target:
-            sessions.switch(session_id)
-        write(f"session {session_id}\n")
+        sessions.rename(target, session_id)
+        write(f"session {sanitize(session_id, newlines=False)}\n")
 
 
 def _announce(gateway: TuiGateway, write: Write) -> None:
     try:
         items = gateway.list_approvals()
     except GatewayError as exc:
-        write(f"error: {exc}\n")
+        write(f"error: {sanitize(exc)}\n")
         return
     if not items:
         write("no pending approvals\n")
@@ -240,22 +240,16 @@ def _announce(gateway: TuiGateway, write: Write) -> None:
 
 
 def _write_card(item: dict[str, object], write: Write) -> None:
-    write(format_approval_card(item) + "\n")
-    approval_id = str(item.get("id") or "")
-    if approval_id:
-        write(
-            f"Commands: /approve {approval_id}  "
-            f"/session-approve {approval_id}  /deny {approval_id}\n"
-        )
+    write(render_card(item) + "\n")
 
 
 def _apply_decision(gateway: TuiGateway, approval_id: str, decision: str, write: Write) -> None:
     try:
         state = gateway.decide(approval_id, decision)
     except (GatewayError, ValueError) as exc:
-        write(f"error: {exc}\n")
+        write(f"error: {sanitize(exc)}\n")
         return
-    write(f"decision {decision} {approval_id} ({state})\n")
+    write(f"decision {decision} {sanitize(approval_id, newlines=False)} ({state})\n")
 
 
 def _write_sessions(sessions: SessionBook, write: Write) -> None:
@@ -266,18 +260,55 @@ def _write_sessions(sessions: SessionBook, write: Write) -> None:
     for session_id, title in rows:
         mark = "*" if session_id == sessions.current else " "
         label = session_id or "new"
-        write(f"{mark} {label}  {title}\n")
+        write(f"{mark} {sanitize(label, newlines=False)}  {sanitize(title, newlines=False)}\n")
 
 
 def _span(kind: str, payload: dict[str, object]) -> str:
-    name = str(payload.get("name") or "")
-    phase = str(payload.get("phase") or "")
-    detail = str(payload.get("detail") or "")
+    name = sanitize(payload.get("name") or "", newlines=False)
+    phase = sanitize(payload.get("phase") or "", newlines=False)
+    detail = sanitize(payload.get("detail") or "", newlines=False)
     return f"timeline: {kind} {name} {phase} {detail}".strip()
 
 
+class _PrimeBuffer:
+    """One ``prime:`` line per newline, and one more at the end of the turn."""
+
+    def __init__(self, write: Write) -> None:
+        self._write = write
+        self._buf = ""
+        self.lines: list[str] = []
+
+    def add(self, chunk: str) -> None:
+        self._buf += sanitize(chunk)
+        while "\n" in self._buf:
+            line, self._buf = self._buf.split("\n", 1)
+            self._emit(line)
+
+    def finish(self, final: str) -> None:
+        if self._buf:
+            self._emit(self._buf)
+            self._buf = ""
+        if not final:
+            return
+        if self.lines and final == "".join(self.lines):
+            return
+        if self.lines and final == self.lines[-1]:
+            return
+        if not self.lines:
+            self._emit(final)
+
+    def _emit(self, line: str) -> None:
+        visible = sanitize(line, newlines=False)
+        self.lines.append(visible)
+        self._write(f"prime: {visible}\n")
+
+
 class _Incoming:
-    """Background reader. Decision lines can arrive while a turn blocks."""
+    """Background reader. Decision lines can arrive while a turn blocks.
+
+    ``/quit`` is queued and the thread returns, so a real tty does not sit
+    in a second ``input()`` after the command.
+    """
 
     def __init__(self, read_line: ReadLine) -> None:
         self._read_line = read_line
@@ -318,3 +349,5 @@ class _Incoming:
                 self._queue.put(None)
                 return
             self._queue.put(line)
+            if isinstance(line, str) and line.strip() in {"/quit", "/exit"}:
+                return

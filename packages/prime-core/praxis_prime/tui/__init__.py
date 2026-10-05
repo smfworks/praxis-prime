@@ -2,7 +2,8 @@
 
 ``praxis-prime tui`` and ``pprime tui`` both enter here. The process is a
 gateway client: loopback WebSocket frames plus HTTP GET with the daemon's
-bearer token. It does not open ``prime.db``.
+bearer token. It does not open ``prime.db``. ``--plain`` does not import
+Textual. The full-screen UI is the ``tui`` extra.
 """
 
 from __future__ import annotations
@@ -16,6 +17,11 @@ from praxis_prime.tui.sessions import SessionBook
 
 Reader = Callable[[], str]
 Writer = Callable[[str], None]
+
+_INSTALL_HINT = (
+    "praxis-prime tui: Textual is not installed.\n"
+    "Install the full-screen UI with: pip install 'praxis-prime[tui]'\n"
+)
 
 
 def run_tui(
@@ -54,12 +60,22 @@ def run_tui(
                 write=write or _write_stdout,
                 port=endpoint.port,
             )
-        from praxis_prime.tui.app import PraxisApp
-
-        PraxisApp(gateway, profile=gateway.profile, session=session).run()
+        try:
+            app_cls = _load_app()
+        except ImportError:
+            print(_INSTALL_HINT, file=sys.stderr, end="")
+            return 1
+        app_cls(gateway, profile=gateway.profile, session=session).run()
         return 0
     finally:
         gateway.close()
+
+
+def _load_app():
+    """Import the full-screen app. Missing Textual raises ImportError."""
+    from praxis_prime.tui.app import PraxisApp
+
+    return PraxisApp
 
 
 def _write_stdout(text: str) -> None:

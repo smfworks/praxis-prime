@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import os
+import time
 
 from textual import on
 from textual.app import App, ComposeResult
@@ -10,15 +10,25 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
 from textual.screen import ModalScreen
-from textual.widgets import Footer, Input, OptionList, Static
+from textual.widgets import Button, Footer, Input, OptionList, Static
 from textual.widgets._option_list import Option
 
-from praxis_prime.approvals.card import format_approval_card
 from praxis_prime.gateway.client import GatewayError
+from praxis_prime.tui.cards import (
+    CONFIRM_DENY,
+    CONFIRM_ONCE,
+    CONFIRM_SESSION,
+    render_card,
+    scope_label,
+)
 from praxis_prime.tui.gateway import Readiness, TuiGateway
-from praxis_prime.tui.palette import fallback_palette, palette_from_http, resolve_mode
+from praxis_prime.tui.palette import Palette, fallback_palette, palette_from_http, resolve_mode
+from praxis_prime.tui.sanitize import sanitize
 from praxis_prime.tui.sessions import SessionBook
 from praxis_prime.tui.theme_map import theme_for
+
+_TIMELINE_CAP = 500
+_DECIDE_GAP = 0.12
 
 HELP = "\n".join(
     (
@@ -27,12 +37,16 @@ HELP = "\n".join(
         "F1 chat    F2 timeline    F3 approvals    F4 sessions",
         "Enter in the composer sends. Nothing is approved for you.",
         "Approvals, when that pane is focused:",
-        "  a  approve once",
-        "  s  approve for this session",
-        "  d  deny",
-        "  Enter shows the card and does not decide.",
+        "  a  then ctrl+y   approve once",
+        "  s  then ctrl+u   always allow in the approval's session",
+        "                   (this daemon process, when that session is empty)",
+        "  d  then ctrl+x   deny",
+        "  The confirm dialog opens with Cancel focused.",
+        "  Enter cancels. Scroll the card to the end before deciding.",
+        "  Enter on a row shows the card and does not decide.",
         "Sessions: Enter switches, n starts a new one, ctrl+n from anywhere.",
-        "? help    ctrl+q quit",
+        "? or ctrl+? help    ctrl+q quit",
+        "Plain commands: /approve <id>  /session-approve <id>  /deny <id>",
         "",
         "This visit's sessions stay on this screen. The daemon has no session list.",
     )
@@ -40,7 +54,7 @@ HELP = "\n".join(
 
 
 class HelpScreen(ModalScreen[None]):
-    """Key chart. Escape or ? closes it."""
+    """Key chart. Escape closes it."""
 
     BINDINGS = [
         Binding("escape", "dismiss", "Close"),
@@ -51,7 +65,7 @@ class HelpScreen(ModalScreen[None]):
         align: center middle;
     }
     HelpScreen > Static {
-        width: 68;
+        width: 72;
         height: auto;
         padding: 1 2;
         background: $surface;
@@ -62,6 +76,105 @@ class HelpScreen(ModalScreen[None]):
 
     def compose(self) -> ComposeResult:
         yield Static(HELP, markup=False)
+
+
+class ConfirmDecision(ModalScreen[bool]):
+    """Name the approval. Cancel is focused. A second key confirms."""
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel"),
+        Binding("enter", "cancel", show=False),
+        Binding(CONFIRM_ONCE, "confirm_once", "Confirm once", priority=True),
+        Binding(CONFIRM_SESSION, "confirm_session", "Confirm session", priority=True),
+        Binding(CONFIRM_DENY, "confirm_deny", "Confirm deny", priority=True),
+        Binding("a", "noop", show=False),
+        Binding("s", "noop", show=False),
+        Binding("d", "noop", show=False),
+    ]
+    DEFAULT_CSS = """
+    ConfirmDecision {
+        align: center middle;
+    }
+    #confirm-box {
+        width: 68;
+        height: auto;
+        padding: 1 2;
+        background: $surface;
+        color: $text;
+        border: solid $accent;
+    }
+    #confirm-actions {
+        height: auto;
+        align: right middle;
+    }
+    """
+
+    def __init__(
+        self,
+        approval_id: str,
+        tool: str,
+        action: str,
+        decision: str,
+        scope: str,
+    ) -> None:
+        super().__init__()
+        self.approval_id = approval_id
+        self.tool = tool
+        self.action = action
+        self.decision = decision
+        self.scope = scope
+
+    def compose(self) -> ComposeResult:
+        verb = {
+            "allow_once": "Approve once",
+            "allow_session": "Always allow",
+            "deny": "Deny",
+        }.get(self.decision, "Decide")
+        hint = {
+            "allow_once": "Press ctrl+y to approve once.",
+            "allow_session": "Press ctrl+u to allow this scope.",
+            "deny": "Press ctrl+x to deny.",
+        }.get(self.decision, "")
+        lines = [
+            verb,
+            f"Id: {self.approval_id}",
+            f"Tool: {self.tool}",
+            f"Action: {self.action}",
+        ]
+        if self.decision == "allow_session":
+            lines.append(self.scope)
+        lines.append("Cancel is selected. Enter does not confirm.")
+        lines.append(hint)
+        with Vertical(id="confirm-box"):
+            yield Static("\n".join(lines), markup=False)
+            with Horizontal(id="confirm-actions"):
+                yield Button("Cancel", id="cancel", variant="primary")
+
+    def on_mount(self) -> None:
+        self.query_one("#cancel", Button).focus()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        del event
+        self.dismiss(False)
+
+    def action_cancel(self) -> None:
+        self.dismiss(False)
+
+    def action_noop(self) -> None:
+        return
+
+    def action_confirm_once(self) -> None:
+        self._confirm("allow_once")
+
+    def action_confirm_session(self) -> None:
+        self._confirm("allow_session")
+
+    def action_confirm_deny(self) -> None:
+        self._confirm("deny")
+
+    def _confirm(self, decision: str) -> None:
+        if decision == self.decision:
+            self.dismiss(True)
 
 
 class SessionSwitch(Message):
@@ -85,7 +198,7 @@ class ApprovalShown(Message):
 
 
 class ApprovalDecide(Message):
-    """a, s, or d on the focused approval."""
+    """a, s, or d on the focused approval. Opens a confirm dialog."""
 
     def __init__(self, approval_id: str, decision: str) -> None:
         super().__init__()
@@ -105,19 +218,22 @@ class SessionList(OptionList):
         option = self.highlighted_option
         if option is None:
             return
-        self.post_message(SessionSwitch(option.id or ""))
+        self.post_message(SessionSwitch(str(option.id or "")))
 
     def action_new_session(self) -> None:
         self.post_message(SessionNew())
 
 
 class ApprovalList(OptionList):
-    """Pending cards. a / s / d decide. Enter only reveals the card."""
+    """Pending cards. a / s / d ask for confirmation. Enter only reveals the card."""
 
     BINDINGS = [
         Binding("a", "allow_once", "Approve"),
         Binding("s", "allow_session", "Session"),
         Binding("d", "deny", "Deny"),
+        Binding("pagedown", "scroll_card", show=False),
+        Binding("pageup", "scroll_card_up", show=False),
+        Binding("end", "scroll_card_end", show=False),
     ]
 
     def __init__(self, id: str | None = None) -> None:
@@ -127,7 +243,7 @@ class ApprovalList(OptionList):
         option = self.highlighted_option
         if option is None or not option.id:
             return
-        self.post_message(ApprovalShown(option.id))
+        self.post_message(ApprovalShown(str(option.id)))
 
     def action_allow_once(self) -> None:
         self._emit("allow_once")
@@ -138,11 +254,20 @@ class ApprovalList(OptionList):
     def action_deny(self) -> None:
         self._emit("deny")
 
+    def action_scroll_card(self) -> None:
+        self.app.query_one("#card-scroll", VerticalScroll).scroll_page_down(animate=False)
+
+    def action_scroll_card_up(self) -> None:
+        self.app.query_one("#card-scroll", VerticalScroll).scroll_page_up(animate=False)
+
+    def action_scroll_card_end(self) -> None:
+        self.app.query_one("#card-scroll", VerticalScroll).scroll_end(animate=False)
+
     def _emit(self, decision: str) -> None:
         option = self.highlighted_option
         if option is None or not option.id:
             return
-        self.post_message(ApprovalDecide(option.id, decision))
+        self.post_message(ApprovalDecide(str(option.id), decision))
 
 
 class PraxisApp(App[None]):
@@ -190,6 +315,26 @@ class PraxisApp(App[None]):
     #transcript {
         height: 1fr;
         padding: 0 1;
+        background: $background;
+    }
+    #transcript-body {
+        height: auto;
+        width: 100%;
+    }
+    #transcript-body Static {
+        height: auto;
+        width: 100%;
+    }
+    .you {
+        color: $accent;
+        text-style: bold;
+    }
+    .prime {
+        color: $text;
+    }
+    .gap {
+        height: 1;
+        color: $text-muted;
     }
     #composer {
         height: 3;
@@ -197,7 +342,7 @@ class PraxisApp(App[None]):
     }
     #side {
         layout: vertical;
-        width: 42;
+        width: 46;
         height: 1fr;
         border-left: solid $border;
     }
@@ -212,13 +357,36 @@ class PraxisApp(App[None]):
     }
     #card-scroll {
         height: auto;
-        max-height: 12;
+        max-height: 20;
+        min-height: 6;
         padding: 0 1;
         background: $surface;
+    }
+    #card {
+        height: auto;
+        width: 100%;
     }
     #approvals {
         height: 8;
         padding: 0 1;
+    }
+    SessionList.-textual-compact:focus,
+    ApprovalList.-textual-compact:focus {
+        border: solid $accent !important;
+    }
+    #timeline:focus, #transcript:focus, #composer:focus {
+        border: solid $accent;
+    }
+    SessionList > .option-list--option-highlighted,
+    ApprovalList > .option-list--option-highlighted {
+        background: $block-cursor-blurred-background !important;
+        color: $block-cursor-blurred-foreground !important;
+    }
+    SessionList:focus > .option-list--option-highlighted,
+    ApprovalList:focus > .option-list--option-highlighted {
+        background: $block-cursor-background !important;
+        color: $block-cursor-foreground !important;
+        text-style: bold;
     }
     Footer {
         background: $footer-background;
@@ -231,8 +399,12 @@ class PraxisApp(App[None]):
         Binding("f3", "focus_approvals", "Approvals"),
         Binding("f4", "focus_sessions", "Sessions"),
         Binding("question_mark", "help", "Help"),
+        Binding("ctrl+question_mark", "help", "Help", priority=True, show=False),
         Binding("ctrl+n", "new_session", "New"),
         Binding("ctrl+q", "quit", "Quit"),
+        Binding(CONFIRM_ONCE, "ignore_key", "Confirm"),
+        Binding(CONFIRM_SESSION, "ignore_key", "Confirm session"),
+        Binding(CONFIRM_DENY, "ignore_key", "Confirm deny"),
     ]
 
     def __init__(
@@ -249,12 +421,14 @@ class PraxisApp(App[None]):
         self._timeline: list[str] = []
         self._approvals: list[dict[str, object]] = []
         self._approval_ids: list[str] = []
-        self._palette = None
+        self._selected_id: str | None = None
+        self._latched: set[str] = set()
+        self._last_decide_at = 0.0
+        self._palette: Palette | None = None
         self._can_chat = False
         self._blocked = ""
         self._booted = False
         self._busy = False
-        self._no_color = os.environ.get("NO_COLOR") is not None
 
     def compose(self) -> ComposeResult:
         yield Static("", id="status", markup=False)
@@ -263,7 +437,7 @@ class PraxisApp(App[None]):
             yield SessionList(id="sessions")
             with Vertical(id="center"):
                 with VerticalScroll(id="transcript"):
-                    yield Static("", id="transcript-body", markup=False)
+                    yield Vertical(id="transcript-body")
                 yield Input(placeholder="Message", id="composer")
             with Vertical(id="side"):
                 yield Static("Timeline", id="timeline-label", markup=False)
@@ -277,7 +451,7 @@ class PraxisApp(App[None]):
     def on_mount(self) -> None:
         self._apply_palette(fallback_palette(resolve_mode("system")))
         self._render_sessions()
-        self._render_transcript()
+        self._sync_transcript(force=True)
         self.query_one("#composer", Input).focus()
         self.run_worker(self._bootstrap, thread=True, group="boot", exit_on_error=False)
         self.set_interval(1.0, self._poll_approvals)
@@ -304,6 +478,10 @@ class PraxisApp(App[None]):
     def action_quit(self) -> None:
         self.gateway.close()
         self.exit()
+
+    def action_ignore_key(self) -> None:
+        """Footer labels for the confirm keys. The dialog handles them."""
+        return
 
     def transcript_text(self) -> str:
         return self.sessions.text()
@@ -333,12 +511,19 @@ class PraxisApp(App[None]):
         event.input.clear()
         self._send(text)
 
+    def on_option_list_option_highlighted(self, event: OptionList.OptionHighlighted) -> None:
+        if event.option_list.id != "approvals":
+            return
+        option_id = str(event.option_id or "")
+        self._selected_id = option_id or None
+        self._show_card(self._find_approval(option_id) if option_id else None)
+
     @on(SessionSwitch)
     def _on_session_switch(self, event: SessionSwitch) -> None:
         session_id = "" if event.option_id in {"", "draft"} else event.option_id
         self.sessions.switch(session_id)
         self._render_sessions()
-        self._render_transcript()
+        self._sync_transcript(force=True)
         self._render_status()
 
     @on(SessionNew)
@@ -348,38 +533,61 @@ class PraxisApp(App[None]):
 
     @on(ApprovalShown)
     def _on_approval_shown(self, event: ApprovalShown) -> None:
+        self._selected_id = event.approval_id
         self._show_card(self._find_approval(event.approval_id))
 
     @on(ApprovalDecide)
     def _on_approval_decide(self, event: ApprovalDecide) -> None:
+        now = time.monotonic()
+        if now - self._last_decide_at < _DECIDE_GAP:
+            return
+        if len(self.screen_stack) > 1:
+            return
         approval_id = event.approval_id
-        decision = event.decision
+        if not approval_id or approval_id in self._latched:
+            return
+        if self._selected_id != approval_id:
+            return
+        if not self._card_at_end():
+            self._timeline_add("Scroll the approval card to the end before deciding.")
+            return
+        self._last_decide_at = now
+        item = self._find_approval(approval_id) or {}
+        dialog = ConfirmDecision(
+            approval_id=sanitize(approval_id, newlines=False),
+            tool=sanitize(item.get("tool") or "", newlines=False),
+            action=sanitize(item.get("summary") or "", newlines=False),
+            decision=event.decision,
+            scope=scope_label(item),
+        )
 
-        def work() -> None:
-            try:
-                state = self.gateway.decide(approval_id, decision)
-            except (GatewayError, ValueError) as exc:
-                self.call_from_thread(self._timeline_add, f"error: {exc}")
+        def done(confirmed: bool | None) -> None:
+            if not confirmed or approval_id in self._latched:
                 return
-            self.call_from_thread(
-                self._timeline_add,
-                f"decision {decision} {approval_id} ({state})",
-            )
+            if self._find_approval(approval_id) is None:
+                return
+            self._latched.add(approval_id)
+            self._send_decision(approval_id, event.decision)
 
-        self.run_worker(work, thread=True, group="decide", exit_on_error=False)
+        self.push_screen(dialog, done)
 
     def _new_session(self) -> None:
         self.sessions.new()
         self._render_sessions()
-        self._render_transcript()
+        self._sync_transcript(force=True)
         self._render_status()
         self.query_one("#composer", Input).focus()
 
     def _send(self, text: str) -> None:
-        self.sessions.note_user(text)
-        target = self.sessions.current
-        self.sessions.append(target, f"you: {text}")
-        self._render_transcript()
+        shown = sanitize(text)
+        self.sessions.note_user(shown)
+        if self.sessions.current == "":
+            target = self.sessions.pin_draft()
+        else:
+            target = self.sessions.current
+        self.sessions.append(target, f"you: {shown}")
+        self._sync_transcript(force=True)
+        self._render_sessions()
         self._busy = True
         self._render_status()
 
@@ -389,13 +597,17 @@ class PraxisApp(App[None]):
 
             try:
                 result = self.gateway.chat(
-                    text,
-                    session_id=target or None,
+                    shown,
+                    session_id=self.sessions.wire_id(target),
                     on_event=on_event,
                     profile=self.profile,
                 )
             except GatewayError as exc:
                 self.call_from_thread(self._chat_failed, target, str(exc))
+                return
+            except OSError as exc:
+                self.gateway.note_down()
+                self.call_from_thread(self._chat_failed, target, f"disconnected: {exc}")
                 return
             self.call_from_thread(self._chat_finished, target, result)
 
@@ -404,57 +616,72 @@ class PraxisApp(App[None]):
     def _apply_event(self, session_id: str, payload: dict[str, object]) -> None:
         kind = str(payload.get("kind") or "")
         if kind == "text":
-            chunk = str(payload.get("text") or "")
+            chunk = sanitize(payload.get("text") or "")
             if chunk:
-                current = self.sessions.last_with_prefix(session_id, "prime: ")
-                self.sessions.replace_last(session_id, "prime: ", f"prime: {current}{chunk}")
+                self.sessions.add_assistant_chunk(session_id, chunk)
                 if self.sessions.current == session_id:
-                    self._render_transcript()
+                    self._sync_transcript()
             return
         if kind == "tool":
+            self.sessions.seal_assistant(session_id)
             self._timeline_add(_span("tool", payload))
             return
         if kind == "status":
             self._timeline_add(_span("status", payload))
             return
         if kind == "turn":
-            self._timeline_add(f"turn {payload.get('phase', '')}".strip())
+            phase = sanitize(payload.get("phase", ""), newlines=False)
+            self._timeline_add(f"turn {phase}".strip())
             return
         if kind == "approval":
             approval = payload.get("approval")
             if isinstance(approval, dict):
+                self.sessions.seal_assistant(session_id)
                 self._upsert_approval(approval)
-                self._timeline_add(f"approval {approval.get('id', '')}")
+                approval_id = sanitize(approval.get("id", ""), newlines=False)
+                self._timeline_add(f"approval {approval_id}")
 
     def _chat_finished(self, target: str, result: dict[str, object]) -> None:
         self._busy = False
         payload = result.get("payload")
         body = payload if isinstance(payload, dict) else {}
-        final = str(body.get("text") or "")
-        streamed = self.sessions.last_with_prefix(target, "prime: ")
-        if final and final != streamed:
-            if streamed:
-                self.sessions.replace_last(target, "prime: ", f"prime: {final}")
-            else:
-                self.sessions.append(target, f"prime: {final}")
+        final = sanitize(body.get("text") or "", newlines=False)
+        self.sessions.finish_assistant(target, final)
         error = body.get("error")
         if error:
-            self.sessions.append(target, f"error: {error}")
+            self.sessions.append(target, f"error: {sanitize(error)}")
         session_id = str(body.get("sessionId") or "")
-        if session_id and target == "":
-            self.sessions.adopt(session_id)
-        elif session_id and session_id != target:
-            self.sessions.switch(session_id)
-        self._render_transcript()
+        if session_id:
+            self.sessions.rename(target, session_id)
+        self._sync_transcript(force=True)
         self._render_sessions()
         self._render_status()
 
     def _chat_failed(self, target: str, message: str) -> None:
         self._busy = False
-        self.sessions.append(target, f"error: {message}")
-        self._timeline_add(f"error: {message}")
-        self._render_transcript()
+        visible = sanitize(message)
+        self.sessions.append(target, f"error: {visible}")
+        self._timeline_add(f"error: {visible}")
+        self._sync_transcript(force=True)
         self._render_status()
+
+    def _decision_failed(self, approval_id: str, message: str) -> None:
+        self._latched.discard(approval_id)
+        self._timeline_add(f"error: {sanitize(message)}")
+
+    def _send_decision(self, approval_id: str, decision: str) -> None:
+        def work() -> None:
+            try:
+                state = self.gateway.decide(approval_id, decision)
+            except (GatewayError, ValueError, OSError) as exc:
+                self.call_from_thread(self._decision_failed, approval_id, str(exc))
+                return
+            self.call_from_thread(
+                self._timeline_add,
+                f"decision {decision} {approval_id} ({state})",
+            )
+
+        self.run_worker(work, thread=True, group="decide", exit_on_error=False)
 
     def _bootstrap(self) -> None:
         try:
@@ -475,8 +702,6 @@ class PraxisApp(App[None]):
         readiness: Readiness,
         approvals: list[dict[str, object]] | None,
     ) -> None:
-        from praxis_prime.tui.palette import Palette
-
         if isinstance(palette, Palette):
             self._apply_palette(palette)
         self._can_chat = readiness.ready
@@ -491,10 +716,19 @@ class PraxisApp(App[None]):
     def _boot_failed(self, message: str) -> None:
         self._can_chat = True
         self._booted = True
-        self._timeline_add(f"error: {message}")
+        self._timeline_add(f"error: {sanitize(message)}")
         self._render_status()
 
     def _poll_approvals(self) -> None:
+        if not self.gateway.connected:
+            self.run_worker(
+                self._reconnect,
+                thread=True,
+                group="reconnect",
+                exclusive=True,
+                exit_on_error=False,
+            )
+            return
         if self._busy or self.gateway.in_chat:
             return
         self.run_worker(
@@ -504,6 +738,10 @@ class PraxisApp(App[None]):
             exclusive=True,
             exit_on_error=False,
         )
+
+    def _reconnect(self) -> None:
+        self.gateway.try_reconnect()
+        self.call_from_thread(self._render_status)
 
     def _load_approvals(self) -> None:
         try:
@@ -535,22 +773,20 @@ class PraxisApp(App[None]):
         self.call_from_thread(self._apply_palette, palette)
 
     def _apply_palette(self, palette: object) -> None:
-        from praxis_prime.tui.palette import Palette
-
         if not isinstance(palette, Palette):
             return
         self._palette = palette
-        mapped = theme_for(palette, no_color=self._no_color)
-        if isinstance(mapped, str):
-            self.theme = mapped
-        else:
-            self.register_theme(mapped)
+        mapped = theme_for(palette)
+        self.register_theme(mapped)
+        if self.theme != mapped.name:
             self.theme = mapped.name
+        else:
+            self.refresh_css()
         self._render_status()
 
     def _set_banner(self, message: str) -> None:
         banner = self.query_one("#banner", Static)
-        banner.update(message)
+        banner.update(sanitize(message))
         if message:
             banner.add_class("show")
         else:
@@ -565,11 +801,38 @@ class PraxisApp(App[None]):
         theme_id = self._palette.theme_id if self._palette is not None else "smf.praxis"
         mode = self._palette.mode if self._palette is not None else ""
         profile = self.profile or "profile"
-        busy = "  busy" if self._busy else ""
-        widget.update(f"Praxis Prime  {profile}  {session}  {theme_id} {mode}{busy}")
+        if not self.gateway.connected:
+            flag = "  disconnected, retrying"
+        elif self._busy:
+            flag = "  busy"
+        else:
+            flag = ""
+        widget.update(sanitize(f"Praxis Prime  {profile}  {session}  {theme_id} {mode}{flag}"))
 
-    def _render_transcript(self) -> None:
-        self.query_one("#transcript-body", Static).update(self.sessions.text())
+    def _sync_transcript(self, *, force: bool = False) -> None:
+        try:
+            body = self.query_one("#transcript-body", Vertical)
+        except Exception:
+            return
+        lines = list(self.sessions.transcripts.get(self.sessions.current, []))
+        mounted = list(body.children)
+        current = [_static_text(child) for child in mounted]
+        if not force and current == lines:
+            return
+        if not force and lines[: len(current)] == current:
+            for line in lines[len(current) :]:
+                body.mount(_line_widget(line))
+            self.query_one("#transcript", VerticalScroll).scroll_end(animate=False)
+            return
+        if not force and current and len(current) == len(lines) and current[:-1] == lines[:-1]:
+            mounted[-1].update(lines[-1] or " ")
+            mounted[-1].set_classes(_line_class(lines[-1]))
+            return
+        body.remove_children()
+        for line in lines:
+            body.mount(_line_widget(line))
+        if lines:
+            self.query_one("#transcript", VerticalScroll).scroll_end(animate=False)
 
     def _render_sessions(self) -> None:
         widget = self.query_one("#sessions", SessionList)
@@ -579,32 +842,39 @@ class PraxisApp(App[None]):
         for index, (session_id, title) in enumerate(rows):
             option_id = session_id or "draft"
             mark = ">" if session_id == self.sessions.current else " "
-            short = session_id[:8] if session_id else "draft"
-            widget.add_option(Option(f"{mark} {title}  {short}", id=option_id))
+            widget.add_option(Option(_session_label(mark, title, session_id), id=option_id))
             if session_id == self.sessions.current:
                 current_index = index
         if widget.option_count:
             widget.highlighted = current_index
 
     def _set_approvals(self, items: list[dict[str, object]]) -> None:
-        ids = [str(item.get("id") or "") for item in items if item.get("id")]
-        self._approvals = [item for item in items if item.get("id")]
-        if ids == self._approval_ids:
-            return
+        cleaned = [item for item in items if item.get("id")]
+        ids = [str(item.get("id") or "") for item in cleaned]
+        selected = self._selected_id
+        previous = list(self._approval_ids)
+        self._approvals = cleaned
         widget = self.query_one("#approvals", ApprovalList)
-        previous = widget.highlighted
         widget.clear_options()
-        for item in self._approvals:
+        for item in cleaned:
             approval_id = str(item.get("id") or "")
-            label = f"{item.get('risk', '')}  {item.get('tool', '')}  {approval_id}"
-            widget.add_option(Option(label, id=approval_id))
+            risk = sanitize(item.get("risk") or "", newlines=False)
+            tool = sanitize(item.get("tool") or "", newlines=False)
+            widget.add_option(Option(f"{risk}  {tool}  {approval_id}", id=approval_id))
         self._approval_ids = ids
-        if not widget.option_count:
-            self._show_card(None)
+        if selected and selected in ids:
+            widget.highlighted = ids.index(selected)
+            self._selected_id = selected
+            self._show_card(self._find_approval(selected))
             return
-        index = 0 if previous is None else min(previous, widget.option_count - 1)
-        widget.highlighted = index
-        self._show_card(self._approvals[index])
+        if not previous and ids:
+            widget.highlighted = 0
+            self._selected_id = ids[0]
+            self._show_card(cleaned[0])
+            return
+        widget.highlighted = None
+        self._selected_id = None
+        self._show_card(None)
 
     def _upsert_approval(self, item: dict[str, object]) -> None:
         approval_id = str(item.get("id") or "")
@@ -621,7 +891,6 @@ class PraxisApp(App[None]):
         if not replaced:
             updated.append(item)
         self._set_approvals(updated)
-        self._show_card(item)
 
     def _find_approval(self, approval_id: str) -> dict[str, object] | None:
         for item in self._approvals:
@@ -634,10 +903,24 @@ class PraxisApp(App[None]):
         if not item:
             widget.update("")
             return
-        widget.update(format_approval_card(item))
+        widget.update(render_card(item))
+        scroller = self.query_one("#card-scroll", VerticalScroll)
+        scroller.scroll_to(y=0, animate=False)
+
+    def _card_at_end(self) -> bool:
+        try:
+            scroller = self.query_one("#card-scroll", VerticalScroll)
+        except Exception:
+            return False
+        max_y = scroller.max_scroll_y
+        if max_y <= 0:
+            return True
+        return scroller.scroll_y >= max_y - 1
 
     def _timeline_add(self, line: str) -> None:
-        self._timeline.append(line)
+        self._timeline.append(_hanging(sanitize(line)))
+        if len(self._timeline) > _TIMELINE_CAP:
+            self._timeline = self._timeline[-_TIMELINE_CAP:]
         try:
             self.query_one("#timeline-body", Static).update("\n".join(self._timeline))
         except Exception:
@@ -645,7 +928,66 @@ class PraxisApp(App[None]):
 
 
 def _span(kind: str, payload: dict[str, object]) -> str:
-    name = str(payload.get("name") or "")
-    phase = str(payload.get("phase") or "")
-    detail = str(payload.get("detail") or "")
+    name = sanitize(payload.get("name") or "", newlines=False)
+    phase = sanitize(payload.get("phase") or "", newlines=False)
+    detail = sanitize(payload.get("detail") or "", newlines=False)
     return f"{kind} {name} {phase} {detail}".strip()
+
+
+def _line_class(line: str) -> str:
+    if line == "":
+        return "gap"
+    if line.startswith("you:"):
+        return "you"
+    if line.startswith("prime:"):
+        return "prime"
+    return "note"
+
+
+def _line_widget(line: str) -> Static:
+    shown = line if line else " "
+    return Static(shown, markup=False, classes=_line_class(line))
+
+
+def _static_text(widget: object) -> str:
+    text = str(getattr(widget, "content", ""))
+    classes = getattr(widget, "classes", ())
+    if "gap" in classes:
+        return ""
+    return text
+
+
+def _session_label(mark: str, title: str, session_id: str) -> str:
+    ident = sanitize(session_id or "draft", newlines=False)
+    if len(ident) > 8:
+        ident = ident[:8]
+    clean = sanitize(title, newlines=False)
+    if len(clean) > 14:
+        clean = clean[:13] + "…"
+    return f"{mark} {clean}  {ident}"
+
+
+def _hanging(text: str, width: int = 36) -> str:
+    blocks = [_wrap_one(block, width) for block in text.split("\n")]
+    return "\n".join(blocks)
+
+
+def _wrap_one(text: str, width: int) -> str:
+    if len(text) <= width:
+        return text
+    lines: list[str] = []
+    rest = text
+    first = True
+    while rest:
+        limit = width if first else max(1, width - 2)
+        if len(rest) <= limit:
+            lines.append(rest if first else f"  {rest}")
+            break
+        cut = rest.rfind(" ", 0, limit + 1)
+        if cut <= 0:
+            cut = limit
+        chunk = rest[:cut].rstrip()
+        rest = rest[cut:].lstrip()
+        lines.append(chunk if first else f"  {chunk}")
+        first = False
+    return "\n".join(lines)
