@@ -41,6 +41,13 @@ How to add an entry (people and agents alike):
 | Nunito Project Authors (Vernon Adams), via google/fonts | https://github.com/google/fonts/tree/main/ofl/nunito | OFL-1.1 | Nunito display font, Latin subset WOFF2 | `packages/prime-core/praxis_prime/ui_themes/smf.dental/assets/fonts/Nunito.woff2`, OFL text in `packages/prime-core/praxis_prime/ui_themes/smf.dental/assets/fonts/OFL.txt` | Version 3.602; google/fonts 8b0a1d0f5983c89bc2b93f1b5fb55f9e252744b5 (retrieved 2026-10) |
 | Figtree Project Authors (Erik Kennedy), via google/fonts | https://github.com/google/fonts/tree/main/ofl/figtree | OFL-1.1 | Figtree body font, Latin subset WOFF2 | `packages/prime-core/praxis_prime/ui_themes/smf.dental/assets/fonts/Figtree.woff2`, OFL text in `packages/prime-core/praxis_prime/ui_themes/smf.dental/assets/fonts/OFL.txt` | Version 2.002; google/fonts a60a77e14f28abd4ef243a1b5dfc48df0cec5205 (retrieved 2026-10) |
 | JetBrains Mono Project Authors (JetBrains), via google/fonts | https://github.com/google/fonts/tree/main/ofl/jetbrainsmono | OFL-1.1 | JetBrains Mono, subset WOFF2 copied into this package | `packages/prime-core/praxis_prime/ui_themes/smf.dental/assets/fonts/JetBrainsMono.woff2`, OFL text in `packages/prime-core/praxis_prime/ui_themes/smf.dental/assets/fonts/OFL.txt` | Version 2.211 (retrieved 2026-10) |
+| Textualize (textual) | https://github.com/Textualize/textual | MIT | Textual application framework for `praxis-prime tui`. Installed, not vendored. | `pyproject.toml` | 8.2.8 |
+| Textualize (rich) | https://github.com/Textualize/rich | MIT | Rich text rendering, pulled in by textual. Installed, not vendored. | `pyproject.toml` | 15.0.0 |
+| Executable Book Project (markdown-it-py) | https://github.com/executablebooks/markdown-it-py | MIT | Markdown parser, pulled in by textual via rich. Installed, not vendored. | `pyproject.toml` | 4.2.0 |
+| Executable Book Project (mdit-py-plugins) | https://github.com/executablebooks/mdit-py-plugins | MIT | Markdown-it plugins, pulled in by markdown-it-py. Installed, not vendored. | `pyproject.toml` | 0.6.1 |
+| Executable Book Project (mdurl) | https://github.com/executablebooks/mdurl | MIT | URL parser, pulled in by markdown-it-py. Installed, not vendored. | `pyproject.toml` | 0.1.2 |
+| tox-dev (platformdirs) | https://github.com/tox-dev/platformdirs | MIT | Platform directories, pulled in by textual. Installed, not vendored. | `pyproject.toml` | 4.12.3 |
+| tsutsu3 (linkify-it-py) | https://github.com/tsutsu3/linkify-it-py | MIT | Link detection, pulled in by markdown-it-py. Installed, not vendored. | `pyproject.toml` | 2.2.0 |
 
 Python packages and runtime programs are installed or invoked, not copied into
 this tree. Their notices are in [THIRD_PARTY.md](THIRD_PARTY.md).
