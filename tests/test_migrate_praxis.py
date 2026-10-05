@@ -377,7 +377,8 @@ def test_import_is_idempotent_and_leaves_the_source_unchanged(tmp_path: Path) ->
         assert routines[0]["prompt"] == "Send the weekly note"
         messages = db.conn.execute("SELECT role, content FROM messages ORDER BY id").fetchall()
         assert [row["role"] for row in messages] == ["user", "assistant"]
-        assert _ESC in messages[0]["content"]
+        assert _ESC not in messages[0]["content"]
+        assert "\\x1b" in messages[0]["content"]
         provenance = db.conn.execute(
             """
             SELECT source, source_table, source_sha256
@@ -420,8 +421,10 @@ def test_import_is_idempotent_and_leaves_the_source_unchanged(tmp_path: Path) ->
     archive = Path(report.history_archive)
     assert stat.S_IMODE(archive.stat().st_mode) == 0o400
     assert stat.S_IMODE(archive.parent.stat().st_mode) == 0o700
+    archive_text = archive.read_text(encoding="utf-8")
     assert _ESC.encode() not in archive.read_bytes()
-    assert "Hello" in archive.read_text(encoding="utf-8")
+    assert "\\u001b" not in archive_text
+    assert "Hello" in archive_text
     summary = Path(report.summary_path).read_text(encoding="utf-8")
     assert _ESC not in summary
     assert _OPENAI not in summary
@@ -461,6 +464,55 @@ def test_import_is_idempotent_and_leaves_the_source_unchanged(tmp_path: Path) ->
         db.close()
     assert row is not None
     assert changed is None
+
+
+def test_history_redacts_a_channel_thread_secret(tmp_path: Path) -> None:
+    source = tmp_path / "praxis"
+    source.mkdir()
+    key = "sk-histsecretkeyvalue"
+    ghp = "ghp_" + ("A" * 20)
+    database = sqlite3.connect(source / "praxis.db")
+    database.execute(
+        """
+        CREATE TABLE channel_threads (
+            thread_key TEXT PRIMARY KEY,
+            messages_json TEXT NOT NULL
+        )
+        """
+    )
+    payload = json.dumps(
+        [
+            {"role": "user", "content": f"token {key} and {ghp} {_ESC}]0;owned"},
+            {"role": "assistant", "content": "ok"},
+        ]
+    )
+    database.execute(
+        "INSERT INTO channel_threads (thread_key, messages_json) VALUES ('thr', ?)",
+        (payload,),
+    )
+    database.commit()
+    database.close()
+    report = _import(source, tmp_path / "data", tmp_path / "config", only={"history"})
+    assert report.categories["history"].imported == 1
+    assert report.history_archive
+    home = ProfileHome(tmp_path / "data", "default")
+    db = StateDB(home.db_path)
+    try:
+        stored = "\n".join(
+            row["content"] for row in db.conn.execute("SELECT content FROM messages")
+        )
+        title = db.conn.execute("SELECT title FROM sessions").fetchone()["title"]
+    finally:
+        db.close()
+    archive = Path(report.history_archive).read_text(encoding="utf-8")
+    for blob in (stored, archive, title):
+        assert key not in blob
+        assert ghp not in blob
+        assert _ESC not in blob
+    assert "[redacted]" in stored
+    assert "[redacted]" in archive
+    assert "\\x1b" in stored
+    assert "ok" in stored
 
 
 def test_only_memory_skips_skills_and_packs(tmp_path: Path) -> None:

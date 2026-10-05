@@ -204,7 +204,7 @@ praxis-prime migrate --from-praxis --json
 | `skills/<name>/SKILL.md` | That profile's `skills/` directory. Parsed as data. Not executed. A Praxis `trigger` is written as `description` when the file has none, so the Prime loader can read it. The source file is not edited. |
 | `packs/<name>/pack.json` | `vertical-packs/<name>`. Regulated packs move mapped dials from off to monitor. |
 | `cron_jobs` | A paused routine. Delivery targets are not copied. |
-| `channel_threads` chat messages | A local session, plus a mode-0400 `history.jsonl` archive. |
+| `channel_threads` chat messages | A new local session, plus a mode-0400 `history.jsonl` archive. Message bodies use the memory secret redaction, including a bare `sk-` or `ghp_` token, and control characters are stored in visible form. |
 | `praxis.json` providers and model | Names only. The model is not selected. Run `praxis-prime setup`. |
 
 A row that is expired, redacted, already imported, or a duplicate of the same tier and scope is skipped. An existing skill or pack name is left in place. A quarantined Praxis skill is skipped. Unknown tables are counted and not imported. Each imported row records source `praxis`, the original table and id, the source file sha256, the run id, and the time. Running the command again skips those rows.

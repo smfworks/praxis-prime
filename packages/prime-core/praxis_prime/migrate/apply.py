@@ -4,7 +4,8 @@ Imported skills, memory, and packs stay untrusted data. Tools and grants are
 not enabled. Routines are inserted paused. Regulated packs move mapped dials
 from off to monitor and never to enforce. Secrets stay out unless
 ``include_secrets`` is set, and even then only a known provider key that
-``secrets.env`` already accepts is written.
+``secrets.env`` already accepts is written. Channel messages are redacted with
+the memory secret patterns and sanitized before they are stored.
 """
 
 from __future__ import annotations
@@ -842,15 +843,17 @@ def _import_history(
         if not isinstance(payload, list):
             tally.add(False, "messages were not a list")
             continue
-        messages = _chat_messages(payload)
-        for item in messages:
+        messages = [(role, _display_history(content)) for role, content in _chat_messages(payload)]
+        messages = [(role, content) for role, content in messages if content.strip()]
+        visible_id = _display_history(str(source_id))
+        for role, content in messages:
             lines.append(
                 json.dumps(
                     {
                         "source_table": "channel_threads",
-                        "source_id": str(source_id),
-                        "role": item[0],
-                        "content": item[1],
+                        "source_id": visible_id,
+                        "role": role,
+                        "content": content,
                     },
                     ensure_ascii=True,
                 )
@@ -863,8 +866,7 @@ def _import_history(
             session_id = store.create(model="imported", preamble="")
             for role, content in messages:
                 store.append(session_id, ChatMessage(role=role, content=content))
-            title = str(source_id)
-            store.note_title(session_id, title[:80])
+            store.note_title(session_id, visible_id[:80])
         else:
             session_id = f"dry-{source_id}"
         ledger.add(
@@ -1084,9 +1086,7 @@ def _summary(report: MigrationReport) -> str:
     ]
     for name in CATEGORIES:
         tally = report.categories[name]
-        lines.append(
-            f"{name}: found {tally.found}, import {tally.imported}, skip {tally.skipped}"
-        )
+        lines.append(f"{name}: found {tally.found}, import {tally.imported}, skip {tally.skipped}")
         for reason, count in sorted(tally.reasons.items()):
             lines.append(f"  {reason}: {count}")
     if report.providers:
@@ -1226,6 +1226,12 @@ def _schedule(expression: str) -> tuple[str, str] | tuple[None, None]:
     return "cron", text
 
 
+def _display_history(text: str) -> str:
+    """Redact secrets the way memory does, then make controls visible."""
+    cleaned = redact_text(text, mode="secrets", dials=default_positions())
+    return sanitize(cleaned)
+
+
 def _chat_messages(payload: list[object]) -> list[tuple[str, str]]:
     messages: list[tuple[str, str]] = []
     for item in payload:
@@ -1290,9 +1296,7 @@ def _copy_skill_tree(source: Path, dest: Path) -> None:
     total = 0
     for dirpath, dirnames, filenames in os.walk(source, followlinks=False):
         dirnames[:] = [
-            name
-            for name in dirnames
-            if name not in _SKIP_DIRS and not name.startswith(".")
+            name for name in dirnames if name not in _SKIP_DIRS and not name.startswith(".")
         ]
         for name in filenames:
             if name.startswith("."):
