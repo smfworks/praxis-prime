@@ -88,6 +88,33 @@ _REGULATED_VERTICALS = frozenset(
 )
 _PACK_NAME = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 _SKIP_DIRS = frozenset({".git", "__pycache__", ".venv", "venv", "node_modules"})
+_SKILL_SECRET_NAMES = frozenset(
+    {
+        ".env",
+        "secrets.env",
+        "secrets.env.age",
+        "credentials",
+        "credentials.json",
+        "credentials.yml",
+        "credentials.yaml",
+        "credentials.toml",
+        "credentials.txt",
+        "credentials.ini",
+        ".credentials",
+        "netrc",
+        ".netrc",
+        "_netrc",
+        ".git-credentials",
+        "git-credentials",
+        "gateway.token",
+        "worker-master.key",
+        "service_account.json",
+        "service-account.json",
+        ".boto",
+    }
+)
+_SKILL_SECRET_SUFFIXES = (".pem", ".key", ".keyring", ".p12", ".pfx")
+_SKILL_KEY_PREFIXES = ("id_rsa", "id_ed25519", "id_ecdsa", "id_dsa")
 _MAX_SKILL_FILE = 1024 * 1024
 _MAX_SKILL_TREE = 8 * 1024 * 1024
 _MAX_TEXT = 100_000
@@ -292,14 +319,15 @@ def _run(
         notes.append("praxis.db is not a regular file. Database rows were not read.")
         quarantined = frozenset()
     if "skills" in selected:
-        _import_skills(
+        if _import_skills(
             root,
             home,
             ledger,
             categories["skills"],
             quarantined,
             dry_run=dry_run,
-        )
+        ):
+            notes.append("Secret-named files in a skill tree were not copied.")
     if "packs" in selected:
         dials = _import_packs(
             root,
@@ -608,18 +636,19 @@ def _import_skills(
     quarantined: frozenset[str],
     *,
     dry_run: bool,
-) -> None:
+) -> bool:
     skills_root = root / "skills"
+    denied_secret = False
     if lstat_kind(skills_root) is StatKind.MISSING:
-        return
+        return False
     if lstat_kind(skills_root) is not StatKind.DIR:
         tally.add(False, "skills path is not a directory")
-        return
+        return False
     try:
         children = sorted(skills_root.iterdir(), key=lambda path: path.name)
     except OSError:
         tally.add(False, "skills directory could not be listed")
-        return
+        return False
     for child in children:
         source_id = child.name
         if ledger.has("skills", source_id):
@@ -647,6 +676,8 @@ def _import_skills(
         if lstat_kind(dest) is not StatKind.MISSING:
             tally.add(False, "skill name already exists")
             continue
+        if _skill_tree_has_secret(child):
+            denied_secret = True
         if not dry_run:
             try:
                 _copy_skill_tree(child, dest)
@@ -666,6 +697,7 @@ def _import_skills(
             target_id=skill.name,
         )
         tally.add(True)
+    return denied_secret
 
 
 def _import_packs(
@@ -1307,6 +1339,26 @@ def _stored_secret(entry: object, auth_entry: object) -> str | None:
     return None
 
 
+def _skill_secret_name(name: str) -> bool:
+    """True for credential files that must not be copied out of a skill tree."""
+    lower = name.lower()
+    if lower in _SKILL_SECRET_NAMES or lower.startswith(".env."):
+        return True
+    if lower.endswith(_SKILL_SECRET_SUFFIXES):
+        return True
+    return lower.startswith(_SKILL_KEY_PREFIXES)
+
+
+def _skill_tree_has_secret(source: Path) -> bool:
+    for _dirpath, dirnames, filenames in os.walk(source, followlinks=False):
+        dirnames[:] = [
+            name for name in dirnames if name not in _SKIP_DIRS and not name.startswith(".")
+        ]
+        if any(_skill_secret_name(name) for name in filenames):
+            return True
+    return False
+
+
 def _copy_skill_tree(source: Path, dest: Path) -> None:
     files: list[Path] = []
     total = 0
@@ -1315,7 +1367,7 @@ def _copy_skill_tree(source: Path, dest: Path) -> None:
             name for name in dirnames if name not in _SKIP_DIRS and not name.startswith(".")
         ]
         for name in filenames:
-            if name.startswith("."):
+            if _skill_secret_name(name) or name.startswith("."):
                 continue
             path = Path(dirpath) / name
             if lstat_kind(path) is not StatKind.FILE:

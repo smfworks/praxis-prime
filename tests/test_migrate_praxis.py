@@ -218,6 +218,11 @@ def _build(root: Path) -> None:
     script = good / "helper.sh"
     script.write_text("#!/bin/sh\necho nope\n", encoding="utf-8")
     os.chmod(script, 0o755)
+    (good / "notes.md").write_text("keep this\n", encoding="utf-8")
+    (good / "credentials.json").write_text('{"token":"skill-secret"}\n', encoding="utf-8")
+    (good / "secrets.env").write_text("API_KEY=skill-secret\n", encoding="utf-8")
+    (good / "cert.pem").write_text("-----BEGIN CERT-----\n", encoding="utf-8")
+    (good / "id_ed25519").write_text("private-key\n", encoding="utf-8")
     outside = root.parent / "outside-secret"
     outside.mkdir()
     (outside / "secret.txt").write_text(_OUTSIDE, encoding="utf-8")
@@ -418,7 +423,14 @@ def test_import_is_idempotent_and_leaves_the_source_unchanged(tmp_path: Path) ->
     skill = home.skills_dir / "good-skill"
     assert (skill / "SKILL.md").is_file()
     assert stat.S_IMODE((skill / "helper.sh").stat().st_mode) == 0o644
+    assert (skill / "notes.md").read_text(encoding="utf-8") == "keep this\n"
     assert not (skill / "escape.md").exists()
+    assert not (skill / "credentials.json").exists()
+    assert not (skill / "secrets.env").exists()
+    assert not (skill / "cert.pem").exists()
+    assert not (skill / "id_ed25519").exists()
+    assert (source / "skills" / "good-skill" / "credentials.json").is_file()
+    assert any("Secret-named files" in note for note in report.notes)
     hostile_file = (home.skills_dir / "hostile-skill" / "SKILL.md").read_bytes()
     assert _ESC.encode() in hostile_file
     assert not (home.skills_dir / "locked-skill").exists()

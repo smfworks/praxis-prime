@@ -201,7 +201,7 @@ praxis-prime migrate --from-praxis --json
 | `memory_items` tier `episodic` | Episodic memory. Expires at the earlier of the Praxis time and 90 days. |
 | `memory_items` tier `durable`, kind fact, preference, or decision | Profile memory. |
 | Other durable memory, and `vectors` text | Semantic memory. Embeddings are not copied. |
-| `skills/<name>/SKILL.md` | That profile's `skills/` directory. Parsed as data. Not executed. A Praxis `trigger` is written as `description` when the file has none, so the Prime loader can read it. The source file is not edited. |
+| `skills/<name>/SKILL.md` | That profile's `skills/` directory. Parsed as data. Not executed. A Praxis `trigger` is written as `description` when the file has none, so the Prime loader can read it. The source file is not edited. `credentials.json`, `secrets.env`, and files ending in `.pem`, `.key`, `.keyring`, `.p12`, or `.pfx` are not copied. |
 | `packs/<name>/pack.json` | `vertical-packs/<name>`. Regulated packs move mapped dials from off to monitor and record a `dial_change` audit event. `config.toml` is backed up before that rewrite. |
 | `cron_jobs` | A paused routine. Delivery targets are not copied. |
 | `channel_threads` chat messages | A new local session, plus a mode-0400 `history.jsonl` archive. Message bodies use the memory secret redaction, including a bare `sk-` or `ghp_` token, and control characters are stored in visible form. |
