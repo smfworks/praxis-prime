@@ -12,6 +12,6 @@ The blueprint is the source of truth for layout, names, and stack.
 | [OPENCLAW-HERMES-GAPS.md](OPENCLAW-HERMES-GAPS.md) | Gaps against OpenClaw and Hermes Agent (ideas only), with milestones and the security lessons that are now requirements |
 | [architecture.html](architecture.html) | Rendered copy of the blueprint, the matrix, and the source notes |
 
-These files were approved as the design. The repository still points at later sections with `TODO: ARCHITECTURE §…` notes.
+These files were approved as the design. The repository still points at later sections with `TODO: ARCHITECTURE §…` notes. What has landed is summarized in [CHANGELOG.md](../CHANGELOG.md). There is no tagged release yet.
 
 [USAGE.md](USAGE.md) is the operator note for chat, ask, the daemon, coding mode, and `praxis-prime decide`. [SECURITY.md](SECURITY.md) covers the one owner, profile allowlists, auditors, and the loopback bearer token. [COMPLIANCE.md](COMPLIANCE.md) and [packs](packs/) cover dial enforcement. [DECISION-ENGINE.md](DECISION-ENGINE.md) describes the local cascade. [ROUTINES.md](ROUTINES.md), [MEMORY.md](MEMORY.md), and [SKILLS.md](SKILLS.md) cover the scheduler, memory tiers, and `SKILL.md` folders. [MCP.md](MCP.md) covers the MCP client and `praxis-prime mcp serve`. [BROWSER.md](BROWSER.md) covers the optional Playwright browser tool.

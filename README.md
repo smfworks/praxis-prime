@@ -246,6 +246,7 @@ praxis-prime doctor
 | [docs/CAPABILITY-MATRIX.md](docs/CAPABILITY-MATRIX.md) | Feature-by-feature plan against the source systems |
 | [docs/SOURCE-NOTES.md](docs/SOURCE-NOTES.md) | Licenses, file paths, reuse plan, unverified items |
 | [docs/architecture.html](docs/architecture.html) | Rendered blueprint (architecture, matrix, and notes) |
+| [CHANGELOG.md](CHANGELOG.md) | What has landed. No tagged release yet |
 | [AGENTS.md](AGENTS.md) | Notes for coding agents working in this repo |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | How to build, test, and send a change |
 | [SECURITY.md](SECURITY.md) | How to report a vulnerability |
