@@ -1,6 +1,6 @@
 # Praxis Prime
 
-[![Status: alpha](https://img.shields.io/badge/status-alpha%20(MVP%20feature--complete)-yellow)](https://github.com/smfworks/praxis-prime)
+[![Status: alpha](https://img.shields.io/badge/status-alpha%20%28MVP%20feature--complete%29-yellow)](https://github.com/smfworks/praxis-prime)
 [![CI](https://github.com/smfworks/praxis-prime/actions/workflows/ci.yml/badge.svg)](https://github.com/smfworks/praxis-prime/actions/workflows/ci.yml)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-3776AB)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)

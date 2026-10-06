@@ -8,15 +8,6 @@ The package version is `0.1.0`. There is no git tag and no GitHub release.
 Entries below are taken from `git log` on `main` (squash-merge subjects and
 bodies) and from the tree. Dates are omitted because nothing has been released.
 
-## Unreleased / this branch
-
-Not on `main` yet. The version number is unchanged.
-
-- `bundled_commit()` reads a built-in pack's `SOURCE.toml` with `lstat` and `O_NOFOLLOW`. A symlink is refused even when the earlier `Path.is_symlink` check is raced, and the target's commit is not returned.
-- An installed module whose path contains `site-packages` or `dist-packages` does not use the source-checkout fallback. A `pyproject.toml` above a virtualenv cannot supply `packs/regulated` or `packs/compliance`. The wheel `importlib.resources` path is still tried first.
-- The README shows the hero image at `docs/assets/praxis-prime-hero.jpg`.
-- Status text moves from pre-alpha to alpha (MVP feature-complete). The version stays `0.1.0`. There is still no tag and no security-supported release. Dials stay off by default.
-
 ## [0.1.0] - Unreleased
 
 What is on `main`.
@@ -128,6 +119,7 @@ What is on `main`.
 - OpenDots patterns ([#34](https://github.com/smfworks/praxis-prime/pull/34), [#35](https://github.com/smfworks/praxis-prime/pull/35)) and the OpenClaw/Hermes gap review ([#36](https://github.com/smfworks/praxis-prime/pull/36)).
 - Decision Engine, dials, and the M1 split documented as running ([#39](https://github.com/smfworks/praxis-prime/pull/39)).
 - SMF attribution kit ([#75](https://github.com/smfworks/praxis-prime/pull/75)) and credits nits ([#77](https://github.com/smfworks/praxis-prime/pull/77)).
+- The README shows the hero image at `docs/assets/praxis-prime-hero.jpg`, and this changelog records unreleased `0.1.0`. Status text moves from pre-alpha to alpha (MVP feature-complete). The version stays `0.1.0`. There is still no tag and no security-supported release. Dials stay off by default ([#89](https://github.com/smfworks/praxis-prime/pull/89)).
 
 ### Security
 
@@ -140,7 +132,7 @@ What is on `main`.
 - NVIDIA OpenShell, NemoClaw, and container-toolkit isolation are not the plan. Isolation is the local bubblewrap sandbox, the data-root mask, and the denylist ([#47](https://github.com/smfworks/praxis-prime/pull/47)).
 - The test suite isolates `HOME` and the XDG base directories so it does not touch the real data root ([#84](https://github.com/smfworks/praxis-prime/pull/84)).
 - Pack install refuses names that escape `vertical-packs`, refuses symlink members, and refuses an install directory that is already a symlink ([#12](https://github.com/smfworks/praxis-prime/pull/12), [#17](https://github.com/smfworks/praxis-prime/pull/17)).
-- `SOURCE.toml` symlink refusal and the installed-copy checkout skip are in [Unreleased / this branch](#unreleased--this-branch).
+- `bundled_commit()` reads a built-in pack's `SOURCE.toml` with `lstat` and `O_NOFOLLOW`. A symlink is refused even when the earlier `Path.is_symlink` check is raced, and the target's commit is not returned. An installed module whose path contains `site-packages` or `dist-packages` does not use the source-checkout fallback. A `pyproject.toml` above a virtualenv cannot supply `packs/regulated` or `packs/compliance`. The wheel `importlib.resources` path is still tried first ([#89](https://github.com/smfworks/praxis-prime/pull/89)).
 
 ## Known limits
 
