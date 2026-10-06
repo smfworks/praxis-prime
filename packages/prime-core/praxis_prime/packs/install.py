@@ -1,10 +1,12 @@
 """Install a legacy pack as data.
 
-A catalog name copies the built-in pack under ``packs/regulated`` (wheel
-path ``praxis_prime/_data/packs/regulated``) and does not clone git. A local
-directory is copied. A git URL is cloned with ``git clone --depth 1`` and no
-pack script is run. JavaScript, dashboard files, and Python modules are
-recorded and left out of the install directory.
+A bare catalog name copies the built-in pack under ``packs/regulated``
+(wheel path ``praxis_prime/_data/packs/regulated``) and does not clone git.
+That name wins over a local directory of the same name. A path (``./name``,
+a leading ``.`` or ``~``, or any slash) is copied from disk. A git URL is
+cloned with ``git clone --depth 1`` and no pack script is run. JavaScript,
+dashboard files, and Python modules are recorded and left out of the
+install directory.
 
 TODO: ARCHITECTURE §17 and §32. Addendum A §7.
 """
@@ -36,6 +38,7 @@ from praxis_prime.packs.legacy import (
     skill_markdown,
 )
 from praxis_prime.packs.model import LegacyPack, PackWarning, Provenance
+from praxis_prime.paths import source_checkout_root
 
 GitRunner = Callable[[list[str]], None]
 
@@ -48,6 +51,7 @@ _SCAN_CODES = frozenset(
     }
 )
 _GIT_URL = re.compile(r"^(https://|http://|ssh://|git@)[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]+$")
+_COMMIT = re.compile(r"^[0-9a-f]{40}$")
 # One path segment. Underscore is included because public pack.json names use it
 # (law_firm, school_system). No leading dot, no slash, no backslash, max 64 chars.
 _PACK_DIR_NAME = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
@@ -71,9 +75,10 @@ def bundled_regulated_root() -> Path | None:
 
     An installed wheel is read from ``praxis_prime/_data/packs/regulated``
     through ``importlib.resources``. A source checkout that has not been
-    packaged still uses ``packs/regulated``, found by walking up from this
-    file. That is the same split ``compliance.packs.bundled_pack_dir`` uses
-    for ``packs/compliance``.
+    packaged uses ``packs/regulated`` under the repository root from
+    :func:`praxis_prime.paths.source_checkout_root`. Directories above that
+    root are ignored. ``compliance.packs.bundled_pack_dir`` uses the same
+    root for ``packs/compliance``.
     """
     resource = _resource_regulated_root()
     if resource is not None:
@@ -94,18 +99,33 @@ def builtin_pack_dir(public: PublicPack) -> Path | None:
 
 
 def bundled_commit(directory: Path) -> str:
-    """Full commit recorded in ``SOURCE.toml``, or empty."""
-    path = Path(directory) / "SOURCE.toml"
-    if not path.is_file() or path.is_symlink():
-        return ""
+    """40-character commit recorded in a built-in pack's ``SOURCE.toml``.
+
+    Raises ``PackError`` when the file is missing, a symlink, unparsable,
+    or ``commit`` is not 40 lowercase hex characters. Callers that only
+    list packs do not need this.
+    """
+    folder = Path(directory)
+    path = folder / "SOURCE.toml"
+    pack = folder.name
+    if path.is_symlink():
+        raise PackError(f"built-in pack {pack} SOURCE.toml is a symlink ({path})")
+    if not path.is_file():
+        raise PackError(f"built-in pack {pack} is missing SOURCE.toml ({path})")
     try:
         loaded = tomllib.loads(path.read_text(encoding="utf-8"))
-    except (OSError, tomllib.TOMLDecodeError):
-        return ""
-    commit = loaded.get("commit", "")
-    if isinstance(commit, str):
-        return commit.strip()
-    return ""
+    except (OSError, UnicodeError, tomllib.TOMLDecodeError) as exc:
+        raise PackError(
+            f"built-in pack {pack} has an unreadable SOURCE.toml ({path}): {exc}"
+        ) from exc
+    if not isinstance(loaded, dict):
+        raise PackError(f"built-in pack {pack} SOURCE.toml is not a table ({path})")
+    commit = loaded.get("commit")
+    if not isinstance(commit, str) or _COMMIT.fullmatch(commit) is None:
+        raise PackError(
+            f"built-in pack {pack} SOURCE.toml commit is not 40 lowercase hex characters ({path})"
+        )
+    return commit
 
 
 def _resource_regulated_root() -> Path | None:
@@ -121,12 +141,18 @@ def _resource_regulated_root() -> Path | None:
     return candidate
 
 
-def _source_regulated_root() -> Path | None:
-    here = Path(__file__).resolve()
-    for parent in here.parents:
-        candidate = parent / "packs" / "regulated"
-        if candidate.is_dir() and any(candidate.glob("*/pack.json")):
-            return candidate
+def _source_regulated_root(start: Path | None = None) -> Path | None:
+    """``packs/regulated`` under the praxis-prime checkout, or None.
+
+    ``start`` defaults to this file. The walk stops at the checkout root.
+    """
+    here = Path(__file__) if start is None else Path(start)
+    root = source_checkout_root(here)
+    if root is None:
+        return None
+    candidate = root / "packs" / "regulated"
+    if candidate.is_dir() and any(candidate.glob("*/pack.json")):
+        return candidate
     return None
 
 
@@ -229,6 +255,11 @@ def _stage(
     tmp: Path,
     runner: GitRunner,
 ) -> tuple[Path, str, str, str]:
+    # A bare catalog name is the built-in pack even when ./<name> exists.
+    # Paths (./legal, ~/legal, anything with a slash) stay on disk.
+    public = resolve_public(source)
+    if public is not None and not _looks_like_path(source):
+        return _stage_public(public, tmp, runner)
     local = Path(source).expanduser()
     if local.exists():
         if local.is_file() and local.suffix.lower() == ".zip":
@@ -239,19 +270,8 @@ def _stage(
         if local.is_dir():
             return local.resolve(), "", "", ""
         raise PackError(f"pack source is not a directory or zip: {source}")
-    public = resolve_public(source)
     if public is not None:
-        bundled = builtin_pack_dir(public)
-        if bundled is not None:
-            return bundled.resolve(), public.repo, bundled_commit(bundled), public.pack_name
-        dist_root = _materialize_distribution(public, tmp / "dist")
-        if dist_root is not None:
-            return dist_root, public.repo, "", public.pack_name
-        cloned = tmp / "repo"
-        url = _safe_git_url(public.repo)
-        _clone(url, cloned, runner)
-        commit = _rev_parse(cloned)
-        return cloned, url, commit, public.pack_name
+        return _stage_public(public, tmp, runner)
     if _looks_like_git(source):
         cloned = tmp / "repo"
         url = _safe_git_url(source)
@@ -262,6 +282,31 @@ def _stage(
         return cloned, url, commit, wanted
     known_list = ", ".join(known_names())
     raise PackError(f"unknown pack source {source!r}. Known names: {known_list}")
+
+
+def _stage_public(
+    public: PublicPack,
+    tmp: Path,
+    runner: GitRunner,
+) -> tuple[Path, str, str, str]:
+    bundled = builtin_pack_dir(public)
+    if bundled is not None:
+        return bundled.resolve(), public.repo, bundled_commit(bundled), public.pack_name
+    dist_root = _materialize_distribution(public, tmp / "dist")
+    if dist_root is not None:
+        return dist_root, public.repo, "", public.pack_name
+    cloned = tmp / "repo"
+    url = _safe_git_url(public.repo)
+    _clone(url, cloned, runner)
+    commit = _rev_parse(cloned)
+    return cloned, url, commit, public.pack_name
+
+
+def _looks_like_path(source: str) -> bool:
+    """True when ``source`` is a filesystem path, not a bare catalog name."""
+    if source.startswith((".", "~")):
+        return True
+    return "/" in source or "\\" in source or os.sep in source
 
 
 def _looks_like_git(source: str) -> bool:

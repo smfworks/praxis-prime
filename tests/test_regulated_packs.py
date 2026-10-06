@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import tomllib
 from pathlib import Path
@@ -11,13 +12,17 @@ import pytest
 
 from praxis_prime.audit.log import AuditLog
 from praxis_prime.cli import main
+from praxis_prime.compliance.packs import bundled_pack_dir
 from praxis_prime.packs.catalog import PUBLIC_PACKS, SUGGESTED_DIALS, SUGGESTED_POSITION
+from praxis_prime.packs.cli import _format_info
 from praxis_prime.packs.install import (
+    _source_regulated_root,
     builtin_pack_dir,
     bundled_regulated_root,
     install_pack,
 )
-from praxis_prime.packs.legacy import load_legacy_pack
+from praxis_prime.packs.legacy import PackError, load_legacy_pack
+from praxis_prime.paths import source_checkout_root
 from praxis_prime.policy.dials import default_positions
 from praxis_prime.state import StateDB
 
@@ -198,3 +203,213 @@ def test_cli_lists_and_describes_builtin_packs(
     assert "education  school_system  MIT  built in, installed" in again
     assert not (data / "config.toml").exists()
     assert set(default_positions().values()) == {"off"}
+
+
+def _project_toml(name: str) -> str:
+    return f'[project]\nname = "{name}"\n'
+
+
+def _write_project(directory: Path, name: str) -> None:
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "pyproject.toml").write_text(_project_toml(name), encoding="utf-8")
+
+
+def _touch_start(directory: Path) -> Path:
+    start = directory / "packages" / "prime-core" / "praxis_prime" / "install.py"
+    start.parent.mkdir(parents=True, exist_ok=True)
+    start.write_text("# start\n", encoding="utf-8")
+    return start
+
+
+def test_source_lookup_ignores_a_decoy_above_the_checkout(tmp_path: Path) -> None:
+    decoy = tmp_path / "decoy"
+    regulated = decoy / "packs" / "regulated" / "x"
+    regulated.mkdir(parents=True)
+    (regulated / "pack.json").write_text("{}\n", encoding="utf-8")
+    compliance = decoy / "packs" / "compliance"
+    compliance.mkdir(parents=True)
+    (compliance / "a.toml").write_text('id = "a"\n', encoding="utf-8")
+    repo = decoy / "repo"
+    _write_project(repo, "praxis-prime")
+    start = _touch_start(repo)
+    assert source_checkout_root(start) == repo.resolve()
+    assert _source_regulated_root(start) is None
+    with pytest.raises(FileNotFoundError, match="packs/compliance"):
+        bundled_pack_dir(start)
+
+
+def test_source_lookup_skips_a_different_project_name(tmp_path: Path) -> None:
+    above = tmp_path / "packs" / "regulated" / "x"
+    above.mkdir(parents=True)
+    (above / "pack.json").write_text("{}\n", encoding="utf-8")
+    (tmp_path / "packs" / "compliance").mkdir(parents=True)
+    (tmp_path / "packs" / "compliance" / "a.toml").write_text('id = "above"\n', encoding="utf-8")
+
+    root = tmp_path / "repo"
+    _write_project(root, "praxis-prime")
+    real_regulated = root / "packs" / "regulated" / "law_firm"
+    real_regulated.mkdir(parents=True)
+    (real_regulated / "pack.json").write_text('{"name":"law_firm"}\n', encoding="utf-8")
+    real_compliance = root / "packs" / "compliance"
+    real_compliance.mkdir()
+    (real_compliance / "hipaa.toml").write_text('id = "hipaa"\n', encoding="utf-8")
+
+    nested = root / "nested"
+    _write_project(nested, "other-project")
+    decoy = nested / "packs" / "regulated" / "x"
+    decoy.mkdir(parents=True)
+    (decoy / "pack.json").write_text("{}\n", encoding="utf-8")
+    (nested / "packs" / "compliance").mkdir(parents=True)
+    (nested / "packs" / "compliance" / "a.toml").write_text('id = "nested"\n', encoding="utf-8")
+    start = _touch_start(nested)
+
+    assert source_checkout_root(start) == root.resolve()
+    found = _source_regulated_root(start)
+    assert found is not None
+    assert found.resolve() == (root / "packs" / "regulated").resolve()
+    assert bundled_pack_dir(start).resolve() == real_compliance.resolve()
+
+
+def test_source_lookup_without_a_praxis_prime_pyproject(tmp_path: Path) -> None:
+    root = tmp_path / "loose"
+    _write_project(root, "other-project")
+    decoy = root / "packs" / "regulated" / "x"
+    decoy.mkdir(parents=True)
+    (decoy / "pack.json").write_text("{}\n", encoding="utf-8")
+    (root / "packs" / "compliance").mkdir(parents=True)
+    (root / "packs" / "compliance" / "a.toml").write_text('id = "a"\n', encoding="utf-8")
+    start = _touch_start(root)
+    assert source_checkout_root(start) is None
+    assert _source_regulated_root(start) is None
+    with pytest.raises(FileNotFoundError, match="packs/compliance"):
+        bundled_pack_dir(start)
+
+
+def test_symlinked_pyproject_is_not_the_checkout_root(tmp_path: Path) -> None:
+    payload = tmp_path / "payload.toml"
+    payload.write_text(_project_toml("praxis-prime"), encoding="utf-8")
+    linked = tmp_path / "linked"
+    linked.mkdir()
+    (linked / "pyproject.toml").symlink_to(payload)
+    decoy = linked / "packs" / "regulated" / "x"
+    decoy.mkdir(parents=True)
+    (decoy / "pack.json").write_text("{}\n", encoding="utf-8")
+    start = _touch_start(linked)
+    assert source_checkout_root(start) is None
+    assert _source_regulated_root(start) is None
+
+
+def test_real_checkout_resolves_regulated_and_compliance_packs() -> None:
+    assert source_checkout_root(Path(__file__)) == _REPO
+    regulated = _source_regulated_root(Path(__file__))
+    assert regulated is not None
+    assert regulated.resolve() == _REGULATED.resolve()
+    checkout = bundled_regulated_root()
+    assert checkout is not None
+    assert checkout.resolve() == _REGULATED.resolve()
+    compliance = bundled_pack_dir()
+    assert compliance.resolve() == (_REPO / "packs" / "compliance").resolve()
+    assert any(compliance.glob("*.toml"))
+
+
+def test_catalog_name_beats_a_local_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    git_calls: list[list[str]] = []
+    real_run = subprocess.run
+
+    def guarded(argv, *args, **kwargs):
+        if isinstance(argv, (list, tuple)) and argv and str(argv[0]).endswith("git"):
+            git_calls.append([str(part) for part in argv])
+        return real_run(argv, *args, **kwargs)
+
+    monkeypatch.setattr("praxis_prime.packs.legacy.subprocess.run", guarded)
+    monkeypatch.setattr("praxis_prime.packs.install.subprocess.run", guarded)
+    local = tmp_path / "legal"
+    local.mkdir()
+    (local / "pack.json").write_text(
+        json.dumps(
+            {
+                "name": "not_law_firm",
+                "version": "9.9.9",
+                "description": "A local folder that must not win over the catalog name.",
+                "systemPrompt": "Stay on this machine.",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (local / "knowledge.md").write_text("local notes\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    def runner(argv: list[str]) -> None:
+        raise AssertionError(f"git runner: {argv}")
+
+    data = tmp_path / "data"
+    installed = install_pack("legal", data, git_runner=runner)
+    assert installed.pack.name == "law_firm"
+    assert installed.pack.provenance.repo == "https://github.com/smfworks/smf-praxis-legal.git"
+    assert installed.pack.provenance.commit == _COMMITS["law_firm"]
+    assert len(installed.pack.provenance.commit) == 40
+    assert git_calls == []
+
+    local_installed = install_pack("./legal", data)
+    assert local_installed.pack.name == "not_law_firm"
+    assert (local_installed.path / "pack.json").is_file()
+    assert "not_law_firm" in (local_installed.path / "pack.json").read_text(encoding="utf-8")
+
+
+def _break_source_toml(pack: Path, kind: str) -> None:
+    path = pack / "SOURCE.toml"
+    if kind == "missing":
+        path.unlink()
+    elif kind == "invalid":
+        path.write_text("commit = [\n", encoding="utf-8")
+    elif kind == "short":
+        path.write_text('commit = "abc"\n', encoding="utf-8")
+    elif kind == "symlink":
+        path.unlink()
+        path.symlink_to(pack / "pack.json")
+    else:
+        raise AssertionError(kind)
+
+
+@pytest.mark.parametrize("kind", ["missing", "invalid", "short", "symlink"])
+def test_builtin_pack_requires_a_real_source_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+) -> None:
+    _forbid_git(monkeypatch)
+    pack = tmp_path / "regulated" / "law_firm"
+    shutil.copytree(_REGULATED / "law_firm", pack)
+    _break_source_toml(pack, kind)
+    monkeypatch.setattr(
+        "praxis_prime.packs.install.bundled_regulated_root",
+        lambda: pack.parent,
+    )
+    data = tmp_path / "data"
+
+    def runner(argv: list[str]) -> None:
+        raise AssertionError(f"git runner: {argv}")
+
+    with pytest.raises(PackError, match="law_firm") as install_error:
+        install_pack("legal", data, git_runner=runner)
+    assert "SOURCE.toml" in str(install_error.value)
+    installed_root = data / "vertical-packs"
+    assert installed_root.is_dir()
+    assert list(installed_root.iterdir()) == []
+
+    with pytest.raises(PackError, match="law_firm") as info_error:
+        _format_info(data, "legal")
+    assert "SOURCE.toml" in str(info_error.value)
+    assert list(installed_root.iterdir()) == []
+
+    loaded = load_legacy_pack(
+        pack,
+        source="built-in",
+        repo="https://github.com/smfworks/smf-praxis-legal.git",
+    )
+    assert loaded.name == "law_firm"
+    assert loaded.provenance.commit == ""
+    assert main(["packs", "list", "--data-dir", str(data)]) == 0

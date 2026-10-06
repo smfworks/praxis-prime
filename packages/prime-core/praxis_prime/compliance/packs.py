@@ -3,7 +3,9 @@
 Bundled packs ship inside the wheel at
 ``praxis_prime/_data/packs/compliance`` and are read with
 ``importlib.resources``. A source checkout that has not been packaged still
-loads ``packs/compliance`` by walking up from this file.
+loads ``packs/compliance`` from the repository root
+(:func:`praxis_prime.paths.source_checkout_root`). Directories above that
+root are ignored.
 
 A file in ``~/.config/praxis-prime/packs`` or ``.prime/packs`` with the same
 pack id replaces the bundled one. Packs are starter policy, not legal advice.
@@ -21,6 +23,7 @@ from importlib.resources import files
 from pathlib import Path
 
 from praxis_prime.compliance.detectors import DetectorSpec
+from praxis_prime.paths import source_checkout_root
 
 _ACTIONS = frozenset({"block", "require_approval", "redact", "route_local", "egress_deny"})
 _STYLES = frozenset({"mask", "last4"})
@@ -57,17 +60,18 @@ class PolicyPack:
     source: str = ""
 
 
-def bundled_pack_dir() -> Path:
-    """Find a source-tree ``packs/compliance`` directory.
+def bundled_pack_dir(start: Path | None = None) -> Path:
+    """``packs/compliance`` under the praxis-prime checkout.
 
-    Installed wheels do not have that directory. They use
-    :func:`_resource_pack_texts` instead.
+    ``start`` defaults to this file. Installed wheels do not use this
+    directory; they use :func:`_resource_pack_texts`. The walk stops at the
+    checkout root and does not search above it.
     """
-    here = Path(__file__).resolve()
-    for parent in here.parents:
-        candidate = parent / "packs" / "compliance"
-        if candidate.is_dir() and any(candidate.glob("*.toml")):
-            return candidate
+    here = Path(__file__) if start is None else Path(start)
+    root = source_checkout_root(here)
+    candidate = None if root is None else root / "packs" / "compliance"
+    if candidate is not None and candidate.is_dir() and any(candidate.glob("*.toml")):
+        return candidate
     raise FileNotFoundError("bundled packs/compliance directory was not found")
 
 

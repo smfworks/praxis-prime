@@ -23,7 +23,9 @@ praxis-prime packs install https://github.com/smfworks/smf-praxis-legal.git
 praxis-prime packs info law_firm
 ```
 
-`install` accepts a catalog name, a directory, a `.zip`, or a git URL. A catalog name (`legal`, `law_firm`, and the other aliases) copies the built-in directory first and does not clone git. The audit commit is the one in that pack's `SOURCE.toml`. A directory or zip of some other pack still installs as data. A git URL still uses `git clone --depth 1` and does not run pack scripts. A git install has no size limit. Zip archives are capped at 200 members and 15 MiB uncompressed. Files land in `$XDG_DATA_HOME/praxis-prime/vertical-packs/<name>/` (or `--data-dir`). Each install appends an audit event `pack.install` with the repo, version, commit, and license. `packs list` shows the six as built in. `packs info` reads a built-in pack before it is installed.
+`install` accepts a catalog name, a directory, a `.zip`, or a git URL. A bare catalog name (`legal`, `law_firm`, and the other aliases) copies the built-in directory and does not clone git. That name wins over a directory of the same name in the working directory. A path still installs the local folder or zip: `./legal`, a source that starts with `.` or `~`, or any source that contains `/` or `\`. A bare `foo.zip` is a local zip when it is not a catalog name. The audit commit for a built-in pack is the `commit` field in that pack's `SOURCE.toml`, and it must be 40 lowercase hex characters. When `SOURCE.toml` is missing, a symlink, unparsable, or the commit is not that form, `packs install` and `packs info` stop with an error. They do not record this repository's git HEAD. `packs list` does not read that commit. A directory or zip of some other pack still installs as data. A git URL still uses `git clone --depth 1` and does not run pack scripts. A git install has no size limit. Zip archives are capped at 200 members and 15 MiB uncompressed. Files land in `$XDG_DATA_HOME/praxis-prime/vertical-packs/<name>/` (or `--data-dir`). Each install appends an audit event `pack.install` with the repo, version, commit, and license. `packs list` shows the six as built in. `packs info` reads a built-in pack before it is installed.
+
+A source checkout resolves `packs/regulated` and `packs/compliance` only under the repository root. That root is the nearest directory whose `pyproject.toml` is a regular file, not a symlink, and whose `[project] name` is `praxis-prime`. A directory above that root is ignored.
 
 ## What is loaded
 
@@ -49,7 +51,7 @@ praxis-prime packs info law_firm
 
 ## Compliance TOML packs
 
-Bundled dial packs in `packs/compliance/*.toml` are installed with the wheel at `praxis_prime/_data/packs/compliance` and read with `importlib.resources`. A source checkout still reads `packs/compliance` from the repo. The same pack id in `~/.config/praxis-prime/packs` or `<project>/.prime/packs` replaces the bundled file.
+Bundled dial packs in `packs/compliance/*.toml` are installed with the wheel at `praxis_prime/_data/packs/compliance` and read with `importlib.resources`. A source checkout reads `packs/compliance` from the repository root described above. The same pack id in `~/.config/praxis-prime/packs` or `<project>/.prime/packs` replaces the bundled file.
 
 ## Follow-ups
 
