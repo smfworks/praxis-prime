@@ -11,7 +11,8 @@ Package: praxis-prime
 Architecture: any
 Depends: python3 (>= 3.12), bubblewrap
 Description: local-first autonomous AI agent
- Praxis Prime is a local-first autonomous AI agent for Linux (pre-alpha).
+ Praxis Prime is a local-first autonomous AI agent for Linux
+ (alpha, MVP feature-complete).
  The binary package installs a virtual environment at /opt/praxis-prime
  and puts praxis-prime, pprime, and praxis-primed on PATH. It bundles the
  locked runtime wheels under each project's own license.

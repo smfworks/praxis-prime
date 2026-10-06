@@ -15,6 +15,7 @@ Not on `main` yet. The version number is unchanged.
 - `bundled_commit()` reads a built-in pack's `SOURCE.toml` with `lstat` and `O_NOFOLLOW`. A symlink is refused even when the earlier `Path.is_symlink` check is raced, and the target's commit is not returned.
 - An installed module whose path contains `site-packages` or `dist-packages` does not use the source-checkout fallback. A `pyproject.toml` above a virtualenv cannot supply `packs/regulated` or `packs/compliance`. The wheel `importlib.resources` path is still tried first.
 - The README shows the hero image at `docs/assets/praxis-prime-hero.jpg`.
+- Status text moves from pre-alpha to alpha (MVP feature-complete). The version stays `0.1.0`. There is still no tag and no security-supported release. Dials stay off by default.
 
 ## [0.1.0] - Unreleased
 

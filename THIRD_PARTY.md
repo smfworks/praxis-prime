@@ -3,8 +3,9 @@
 Copyright (c) 2026 SMF Works. Praxis Prime itself is MIT; see LICENSE and NOTICE.
 
 This file is the third-party notice named in the architecture blueprint
-(§24, §32). No upstream source tree is vendored in this pre-alpha skeleton.
-The built-in themes ship subset WOFF2 fonts under the SIL Open Font License;
+(§24, §32). No upstream source tree is vendored. Regulated pack data is
+vendored under `packs/regulated/` (see below). The built-in themes ship
+subset WOFF2 fonts under the SIL Open Font License;
 see [Bundled fonts](#bundled-fonts). The entries below are the attribution
 record for code and assets that may be reused later, and the notices that
 must stay attached if they are.

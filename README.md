@@ -1,6 +1,6 @@
 # Praxis Prime
 
-[![Status: pre-alpha](https://img.shields.io/badge/status-pre--alpha-orange)](https://github.com/smfworks/praxis-prime)
+[![Status: alpha](https://img.shields.io/badge/status-alpha%20(MVP%20feature--complete)-yellow)](https://github.com/smfworks/praxis-prime)
 [![CI](https://github.com/smfworks/praxis-prime/actions/workflows/ci.yml/badge.svg)](https://github.com/smfworks/praxis-prime/actions/workflows/ci.yml)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-3776AB)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -9,7 +9,7 @@
   <img src="docs/assets/praxis-prime-hero.jpg" alt="Praxis Prime" width="400">
 </p>
 
-**Status: pre-alpha.** A local agent loop is running: terminal chat, a model router, tools, a session audit log, coding mode (`praxis-prime code`), a loopback daemon (`praxis-primed`) with a WebSocket and HTTP gateway, and a local Decision Engine (`praxis-prime decide`, `POST /v1/decide`). When profiles exist, the daemon supervises one worker process per profile (memory, skills, routines, and approvals stay in that profile's data root). Telegram can chat and approve, and a bound chat only decides that person's approvals. The loopback daemon also serves the local web app: sign in, chat, and approve on `http://127.0.0.1:18790/`. Swarm, voice, and the desktop shell are still stubs. Compliance dials, and the decision pre-screener, still default to off.
+**Status: alpha (MVP feature-complete).** The setup wizard, local web app, TUI, themes, `.deb` and `praxis-prime-git` installers, Omarchy theme template and Super+Alt+A keybind, and built-in regulated packs are in the tree, with the agent loop, loopback daemon, Decision Engine, and accounts. Swarm, voice, and the desktop shell are stubs. There is no stable release or git tag yet. Compliance dials and the decision pre-screener default to off.
 
 Praxis Prime is an open-source, local-first autonomous AI agent for Linux, by [SMF Works](https://github.com/smfworks) (Michael Gannotti). It is the flagship evolution of [SMF Praxis](https://github.com/smfworks/smf-praxis): a governed agent that can read, research, and draft on its own, and that stops for a human when an action has consequences. Sending, deleting, spending, sharing, and publishing stay behind that approval spine. Regulatory overlays are optional dials, and they ship **off**.
 

@@ -34,5 +34,7 @@ for the people who received them. Any further private pack repository is still
 out of this tree. See packs/regulated/README.md and THIRD_PARTY.md.
 
 This software is not a certification of HIPAA, FERPA, GDPR, or any other
-regime. The compliance dials are off by default and, in this pre-alpha
-skeleton, do not enforce anything.
+regime. The compliance dials are off by default. At monitor, a match is
+audited and the action still runs. At enforce, pack rules can block,
+require approval, redact, or deny egress. A dial that is off enforces
+nothing.

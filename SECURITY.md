@@ -1,6 +1,6 @@
 # Security policy
 
-Praxis Prime is **pre-alpha**. It is not a security-supported release. `praxis-primed` listens on `127.0.0.1` only, and only when you start it. Compliance dials do not enforce policy. Treat the code as a pre-alpha agent, not as a control you can rely on.
+Praxis Prime is **alpha** (MVP feature-complete). It is not a security-supported release. `praxis-primed` listens on `127.0.0.1` only, and only when you start it. Compliance dials default to off. At monitor, a match is audited and the action still runs. At enforce, a pack rule can block, require approval, redact, or deny egress. That is not a certification, and a dial left off enforces nothing. Treat this alpha as an agent, not as a control you can rely on.
 
 ## Reporting a vulnerability
 
@@ -14,16 +14,16 @@ There is no security mailing list published yet. If private reporting on GitHub 
 
 ## What to expect
 
-We will acknowledge reports that include enough detail to understand the issue. This skeleton has no patch SLA. Fixes land on `main` when there is something to fix. We will credit reporters who want to be named.
+We will acknowledge reports that include enough detail to understand the issue. There is no patch SLA. Fixes land on `main` when there is something to fix. We will credit reporters who want to be named.
 
 ## Supported versions
 
 | Version | Status |
 |---|---|
-| 0.0.x (pre-alpha, `main`) | Not a supported security release |
+| 0.1.0 (alpha, unreleased, `main`) | Not a supported security release |
 
 ## Scope notes
 
 - Default config must keep every compliance dial off, the gateway on loopback, and the sandbox network off. A change that flips those defaults is a bug even before the features exist.
 - The project does not want proof-of-concept exploits against third-party systems. Reports should describe an issue in this repository.
-- Compliance dials are technical controls on a roadmap. They are not HIPAA, FERPA, GDPR, SOC 2, or ISO certifications. Do not deploy this skeleton as one.
+- Compliance dials are technical controls. They are not HIPAA, FERPA, GDPR, SOC 2, or ISO certifications. Do not deploy this alpha as one.

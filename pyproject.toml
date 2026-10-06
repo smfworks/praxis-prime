@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "praxis-prime"
 dynamic = ["version"]
-description = "Local-first autonomous AI agent for Linux. Pre-alpha."
+description = "Local-first autonomous AI agent for Linux. Alpha (MVP feature-complete)."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE", "NOTICE", "THIRD_PARTY.md"]
@@ -13,7 +13,7 @@ requires-python = ">=3.12"
 authors = [{ name = "SMF Works" }]
 keywords = ["agent", "linux", "local-first", "omarchy", "ubuntu"]
 classifiers = [
-  "Development Status :: 2 - Pre-Alpha",
+  "Development Status :: 3 - Alpha",
   "Environment :: Console",
   "Intended Audience :: Developers",
   "License :: OSI Approved :: MIT License",
