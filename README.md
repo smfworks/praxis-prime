@@ -1,6 +1,6 @@
 # Praxis Prime
 
-[![Status: alpha](https://img.shields.io/badge/status-alpha%20%28MVP%20feature--complete%29-yellow)](https://github.com/smfworks/praxis-prime)
+[![Status: alpha (M0–M3 roadmap complete; some blueprint MVP items deferred)](https://img.shields.io/badge/status-alpha%3A%20M0%E2%80%93M3%20complete-yellow)](https://github.com/smfworks/praxis-prime)
 [![CI](https://github.com/smfworks/praxis-prime/actions/workflows/ci.yml/badge.svg)](https://github.com/smfworks/praxis-prime/actions/workflows/ci.yml)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-3776AB)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -9,7 +9,9 @@
   <img src="docs/assets/praxis-prime-hero.jpg" alt="Praxis Prime" width="400">
 </p>
 
-**Status: alpha (MVP feature-complete).** The setup wizard, local web app, TUI, themes, `.deb` and `praxis-prime-git` installers, Omarchy theme template and Super+Alt+A keybind, and built-in regulated packs are in the tree, with the agent loop, loopback daemon, Decision Engine, and accounts. Swarm, voice, and the desktop shell are stubs. There is no stable release or git tag yet. Compliance dials and the decision pre-screener default to off.
+**Status: alpha (M0–M3 roadmap complete; some blueprint MVP items deferred).** The setup wizard, local web app, TUI, themes, `.deb` and `praxis-prime-git` installers, Omarchy theme template and Super+Alt+A keybind, and built-in regulated packs are in the tree, with the agent loop, loopback daemon, Decision Engine, and accounts. Swarm, voice, and the desktop shell are stubs. There is no stable release or git tag yet. Compliance dials and the decision pre-screener default to off.
+
+Not built yet from the blueprint MVP: Signal, Email (IMAP/SMTP), Slack, Discord, and generic webhook channels (Telegram is the only channel), the Decision Engine's ONNX T1 classifiers (GLiClass/GLiNER; T1 is a keyword classifier today), and routine delivery by email. See [CHANGELOG.md](CHANGELOG.md#known-limits).
 
 Praxis Prime is an open-source, local-first autonomous AI agent for Linux, by [SMF Works](https://github.com/smfworks) (Michael Gannotti). It is the flagship evolution of [SMF Praxis](https://github.com/smfworks/smf-praxis): a governed agent that can read, research, and draft on its own, and that stops for a human when an action has consequences. Sending, deleting, spending, sharing, and publishing stay behind that approval spine. Regulatory overlays are optional dials, and they ship **off**.
 

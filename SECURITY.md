@@ -1,6 +1,6 @@
 # Security policy
 
-Praxis Prime is **alpha** (MVP feature-complete). It is not a security-supported release. `praxis-primed` listens on `127.0.0.1` only, and only when you start it. Compliance dials default to off. At monitor, a match is audited and the action still runs. At enforce, a pack rule can block, require approval, redact, or deny egress. That is not a certification, and a dial left off enforces nothing. Treat this alpha as an agent, not as a control you can rely on.
+Praxis Prime is **alpha** (M0–M3 roadmap complete; some blueprint MVP items deferred). It is not a security-supported release. `praxis-primed` listens on `127.0.0.1` only, and only when you start it. Compliance dials default to off. At monitor, a match is audited and the action still runs. At enforce, a pack rule can block, require approval, redact, or deny egress. That is not a certification, and a dial left off enforces nothing. Treat this alpha as an agent, not as a control you can rely on.
 
 ## Reporting a vulnerability
 

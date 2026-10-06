@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "praxis-prime"
 dynamic = ["version"]
-description = "Local-first autonomous AI agent for Linux. Alpha (MVP feature-complete)."
+description = "Local-first autonomous AI agent for Linux. Alpha: M0–M3 roadmap complete; some blueprint MVP items deferred."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE", "NOTICE", "THIRD_PARTY.md"]

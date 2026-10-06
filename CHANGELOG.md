@@ -119,7 +119,7 @@ What is on `main`.
 - OpenDots patterns ([#34](https://github.com/smfworks/praxis-prime/pull/34), [#35](https://github.com/smfworks/praxis-prime/pull/35)) and the OpenClaw/Hermes gap review ([#36](https://github.com/smfworks/praxis-prime/pull/36)).
 - Decision Engine, dials, and the M1 split documented as running ([#39](https://github.com/smfworks/praxis-prime/pull/39)).
 - SMF attribution kit ([#75](https://github.com/smfworks/praxis-prime/pull/75)) and credits nits ([#77](https://github.com/smfworks/praxis-prime/pull/77)).
-- The README shows the hero image at `docs/assets/praxis-prime-hero.jpg`, and this changelog records unreleased `0.1.0`. Status text moves from pre-alpha to alpha (MVP feature-complete). The version stays `0.1.0`. There is still no tag and no security-supported release. Dials stay off by default ([#89](https://github.com/smfworks/praxis-prime/pull/89)).
+- The README shows the hero image at `docs/assets/praxis-prime-hero.jpg`, and this changelog records unreleased `0.1.0`. Status text moves from pre-alpha to alpha (M0–M3 roadmap complete; some blueprint MVP items deferred). The version stays `0.1.0`. There is still no tag and no security-supported release. Dials stay off by default ([#89](https://github.com/smfworks/praxis-prime/pull/89)).
 
 ### Security
 
@@ -129,7 +129,7 @@ What is on `main`.
 - Migration refuses to run while any process has `prime.db` open ([#28](https://github.com/smfworks/praxis-prime/pull/28)).
 - M1a review follow-ups on the data-directory cache, login audit, profile layout, and locks ([#30](https://github.com/smfworks/praxis-prime/pull/30), [#38](https://github.com/smfworks/praxis-prime/pull/38)).
 - Pre-M1d follow-ups: step-up tokens are single-use, an unsandboxed MCP host start fails closed when account data exists, session lookups stay inside the caller's profiles, and the socket sweep lock stays private ([#53](https://github.com/smfworks/praxis-prime/pull/53)).
-- NVIDIA OpenShell, NemoClaw, and container-toolkit isolation are not the plan. Isolation is the local bubblewrap sandbox, the data-root mask, and the denylist ([#47](https://github.com/smfworks/praxis-prime/pull/47)).
+- Dropped the external sandbox runtime dependency. Isolation is the local bubblewrap sandbox, the data-root mask, and the denylist ([#47](https://github.com/smfworks/praxis-prime/pull/47)).
 - The test suite isolates `HOME` and the XDG base directories so it does not touch the real data root ([#84](https://github.com/smfworks/praxis-prime/pull/84)).
 - Pack install refuses names that escape `vertical-packs`, refuses symlink members, and refuses an install directory that is already a symlink ([#12](https://github.com/smfworks/praxis-prime/pull/12), [#17](https://github.com/smfworks/praxis-prime/pull/17)).
 - `bundled_commit()` reads a built-in pack's `SOURCE.toml` with `lstat` and `O_NOFOLLOW`. A symlink is refused even when the earlier `Path.is_symlink` check is raced, and the target's commit is not returned. An installed module whose path contains `site-packages` or `dist-packages` does not use the source-checkout fallback. A `pyproject.toml` above a virtualenv cannot supply `packs/regulated` or `packs/compliance`. The wheel `importlib.resources` path is still tried first ([#89](https://github.com/smfworks/praxis-prime/pull/89)).
@@ -139,3 +139,6 @@ What is on `main`.
 - Swarm, voice, and the desktop shell are stubs.
 - There is no stable release, no git tag, and no security-supported version.
 - Compliance dials default to `off`. The decision pre-screener defaults off.
+- Signal, Email (IMAP/SMTP), Slack, Discord, and the generic webhook channel are not built. ARCHITECTURE §12 lists those, with Telegram, as MVP channels. Telegram is the only channel (`praxis_prime/channels/telegram.py`). Routines have a webhook trigger; that is not a webhook channel.
+- Decision Engine v0 T1 ONNX classifiers (GLiClass zero-shot / GLiNER PII) are not built. ARCHITECTURE §29 lists them in the MVP row. T1 is a keyword-overlap classifier (`praxis_prime/decide/classifiers.py`).
+- Routine delivery by email is not built. ARCHITECTURE §29's MVP row says routines deliver to Telegram/email. Delivery is Telegram only (`praxis_prime/scheduler/runner.py`, [docs/ROUTINES.md](docs/ROUTINES.md)).

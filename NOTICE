@@ -3,6 +3,9 @@ Copyright (c) 2026 SMF Works
 
 This project is licensed under the MIT License. See LICENSE.
 
+Status is alpha: M0–M3 roadmap complete; some blueprint MVP items deferred.
+There is no stable release yet.
+
 Praxis Prime is the flagship evolution of SMF Praxis (smfworks/smf-praxis),
 by SMF Works. The design reuses ideas, and later may reuse MIT-licensed code,
 from projects SMF Works does not own. Those projects remain the work of their

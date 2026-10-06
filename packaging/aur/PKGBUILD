@@ -7,7 +7,7 @@
 pkgname=praxis-prime-git
 pkgver=0.1.0
 pkgrel=1
-pkgdesc="Local-first autonomous AI agent for Linux (alpha, MVP feature-complete, not in the AUR)"
+pkgdesc="Local-first autonomous AI agent for Linux (alpha: M0–M3 roadmap complete; some blueprint MVP items deferred; not in the AUR)"
 # Native wheels (cryptography, cffi, argon2-cffi-bindings, cbor2) are built
 # for the machine that runs makepkg. This is not a prebuilt binary and not
 # an architecture-independent package. The virtualenv embeds that Python's ABI, so after an Arch

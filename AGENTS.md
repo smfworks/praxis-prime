@@ -11,7 +11,7 @@ This file is for agents (and people) changing Praxis Prime. Read it before editi
 
 ## What this repo is
 
-Praxis Prime is an open-source (MIT), local-first agent for Ubuntu and Omarchy. It is alpha (MVP feature-complete). The agent loop, gateway, policy, Decision Engine, accounts, setup wizard, web app, and TUI are running. Swarm, voice, and the desktop UI are still stubs so the tree matches the blueprint. A stub's docstring should name the blueprint section and should not pretend the feature works.
+Praxis Prime is an open-source (MIT), local-first agent for Ubuntu and Omarchy. It is alpha (M0–M3 roadmap complete; some blueprint MVP items deferred). The agent loop, gateway, policy, Decision Engine, accounts, setup wizard, web app, and TUI are running. Swarm, voice, and the desktop UI are still stubs so the tree matches the blueprint. A stub's docstring should name the blueprint section and should not pretend the feature works.
 
 Preferred stack, from ARCHITECTURE §23:
 
