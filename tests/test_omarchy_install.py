@@ -659,8 +659,9 @@ def test_uninstall_force_skips_a_bindings_symlink_that_is_not_a_file(
     _template().parent.mkdir(parents=True, exist_ok=True)
     _template().write_bytes(shipped_template())
     assert _uninstall(keybind=True, theme=True, yes=True, force=True) == 0
-    err = capsys.readouterr().err
-    assert "not a regular file" in err
+    captured = capsys.readouterr()
+    assert "not a regular file" in captured.err
+    assert f"skipped the keybind: {link} is not a regular file" in captured.out
     assert link.is_symlink()
     assert os.readlink(link) == str(folder)
     assert folder.is_dir()
@@ -672,10 +673,13 @@ def test_uninstall_force_skips_a_bindings_symlink_that_is_not_a_file(
     link.symlink_to(missing)
     _template().write_bytes(shipped_template())
     assert _uninstall(keybind=True, yes=True) == 0
+    quiet = capsys.readouterr()
+    assert "skipped the keybind:" not in quiet.out
     assert link.is_symlink()
     assert _uninstall(keybind=True, theme=True, yes=True, force=True) == 0
-    err = capsys.readouterr().err
-    assert "cannot resolve symlink" in err or "No such file" in err
+    captured = capsys.readouterr()
+    assert "cannot resolve symlink" in captured.err or "No such file" in captured.err
+    assert f"skipped the keybind: {link} is a dangling symlink" in captured.out
     assert link.is_symlink()
     assert os.readlink(link) == str(missing)
     assert not missing.exists()
