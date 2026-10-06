@@ -157,7 +157,7 @@ def source_checkout_root(start: Path) -> Path | None:
 
 
 def _pyproject_names_project(path: Path, name: str) -> bool:
-    text = _read_regular_text(path)
+    text = read_regular_text(path)
     if text is None:
         return False
     try:
@@ -172,8 +172,13 @@ def _pyproject_names_project(path: Path, name: str) -> bool:
     return project.get("name") == name
 
 
-def _read_regular_text(path: Path) -> str | None:
-    """UTF-8 text of a regular file. A symlink is not read."""
+def read_regular_text(path: Path) -> str | None:
+    """UTF-8 text of a regular file. A symlink is not read.
+
+    The file is classified with ``lstat`` and opened with ``O_NOFOLLOW``,
+    so a symlink swapped in after a ``Path.is_symlink`` check is not
+    followed.
+    """
     try:
         info = path.lstat()
     except OSError:
@@ -196,3 +201,6 @@ def _read_regular_text(path: Path) -> str | None:
         return blob.decode("utf-8")
     except UnicodeError:
         return None
+
+
+_read_regular_text = read_regular_text

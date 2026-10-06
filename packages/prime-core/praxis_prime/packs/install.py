@@ -38,7 +38,7 @@ from praxis_prime.packs.legacy import (
     skill_markdown,
 )
 from praxis_prime.packs.model import LegacyPack, PackWarning, Provenance
-from praxis_prime.paths import source_checkout_root
+from praxis_prime.paths import read_regular_text, source_checkout_root
 
 GitRunner = Callable[[list[str]], None]
 
@@ -102,8 +102,10 @@ def bundled_commit(directory: Path) -> str:
     """40-character commit recorded in a built-in pack's ``SOURCE.toml``.
 
     Raises ``PackError`` when the file is missing, a symlink, unparsable,
-    or ``commit`` is not 40 lowercase hex characters. Callers that only
-    list packs do not need this.
+    or ``commit`` is not 40 lowercase hex characters. The bytes are read
+    with :func:`praxis_prime.paths.read_regular_text` (``lstat`` plus
+    ``O_NOFOLLOW``), so a symlink is not followed when the ``Path.is_symlink``
+    check above is raced. Callers that only list packs do not need this.
     """
     folder = Path(directory)
     path = folder / "SOURCE.toml"
@@ -112,9 +114,22 @@ def bundled_commit(directory: Path) -> str:
         raise PackError(f"built-in pack {pack} SOURCE.toml is a symlink ({path})")
     if not path.is_file():
         raise PackError(f"built-in pack {pack} is missing SOURCE.toml ({path})")
+    text = read_regular_text(path)
+    if text is None:
+        try:
+            info = os.lstat(path)
+        except OSError as exc:
+            raise PackError(
+                f"built-in pack {pack} has an unreadable SOURCE.toml ({path}): {exc}"
+            ) from exc
+        if stat.S_ISLNK(info.st_mode):
+            raise PackError(f"built-in pack {pack} SOURCE.toml is a symlink ({path})")
+        if not stat.S_ISREG(info.st_mode):
+            raise PackError(f"built-in pack {pack} is missing SOURCE.toml ({path})")
+        raise PackError(f"built-in pack {pack} has an unreadable SOURCE.toml ({path})")
     try:
-        loaded = tomllib.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, tomllib.TOMLDecodeError) as exc:
+        loaded = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
         raise PackError(
             f"built-in pack {pack} has an unreadable SOURCE.toml ({path}): {exc}"
         ) from exc

@@ -18,6 +18,7 @@ from praxis_prime.packs.cli import _format_info
 from praxis_prime.packs.install import (
     _source_regulated_root,
     builtin_pack_dir,
+    bundled_commit,
     bundled_regulated_root,
     install_pack,
 )
@@ -372,6 +373,32 @@ def _break_source_toml(pack: Path, kind: str) -> None:
         path.symlink_to(pack / "pack.json")
     else:
         raise AssertionError(kind)
+
+
+def test_bundled_commit_refuses_a_symlink_when_the_precheck_passes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The read itself must refuse the symlink, not only ``Path.is_symlink``."""
+    pack = tmp_path / "law_firm"
+    pack.mkdir()
+    commit = "a" * 40
+    target = tmp_path / "real.toml"
+    target.write_text(f'commit = "{commit}"\n', encoding="utf-8")
+    assert tomllib.loads(target.read_text(encoding="utf-8"))["commit"] == commit
+    link = pack / "SOURCE.toml"
+    link.symlink_to(target)
+    real_is_symlink = Path.is_symlink
+
+    def hide_this_link(self: Path) -> bool:
+        if self == link:
+            return False
+        return real_is_symlink(self)
+
+    monkeypatch.setattr(Path, "is_symlink", hide_this_link)
+    with pytest.raises(PackError, match="SOURCE.toml") as caught:
+        bundled_commit(pack)
+    assert commit not in str(caught.value)
+    assert "symlink" in str(caught.value)
 
 
 @pytest.mark.parametrize("kind", ["missing", "invalid", "short", "symlink"])
