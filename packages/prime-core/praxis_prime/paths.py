@@ -133,6 +133,16 @@ def env_value(env: Mapping[str, str], key: str) -> str | None:
 
 
 _PROJECT_NAME = "praxis-prime"
+_INSTALLED_DIR_NAMES = frozenset({"site-packages", "dist-packages"})
+
+
+def is_installed_location(path: Path) -> bool:
+    """True when any component of ``path`` is an installed-package directory.
+
+    ``site-packages`` and ``dist-packages`` mark a wheel or Debian install.
+    A ``pyproject.toml`` above that tree is not this project's checkout.
+    """
+    return any(part in _INSTALLED_DIR_NAMES for part in Path(path).parts)
 
 
 def source_checkout_root(start: Path) -> Path | None:
@@ -141,12 +151,18 @@ def source_checkout_root(start: Path) -> Path | None:
     Walks ``start`` and its parents. The file must be a regular file, not a
     symlink, and must parse as TOML with ``[project] name = "praxis-prime"``.
     A different project name is skipped. Returns None when no such file
-    exists. Nothing above the matching directory is considered.
+    exists, and when ``start`` lies under ``site-packages`` or
+    ``dist-packages``, so a file planted above a virtualenv cannot supply
+    packs. Nothing above the matching directory is considered.
     """
     origin = Path(start)
+    if is_installed_location(origin):
+        return None
     try:
         current = origin.resolve()
     except OSError:
+        return None
+    if is_installed_location(current):
         return None
     if not current.is_dir():
         current = current.parent
@@ -157,7 +173,7 @@ def source_checkout_root(start: Path) -> Path | None:
 
 
 def _pyproject_names_project(path: Path, name: str) -> bool:
-    text = _read_regular_text(path)
+    text = read_regular_text(path)
     if text is None:
         return False
     try:
@@ -172,8 +188,13 @@ def _pyproject_names_project(path: Path, name: str) -> bool:
     return project.get("name") == name
 
 
-def _read_regular_text(path: Path) -> str | None:
-    """UTF-8 text of a regular file. A symlink is not read."""
+def read_regular_text(path: Path) -> str | None:
+    """UTF-8 text of a regular file. A symlink is not read.
+
+    The file is classified with ``lstat`` and opened with ``O_NOFOLLOW``,
+    so a symlink swapped in after a ``Path.is_symlink`` check is not
+    followed.
+    """
     try:
         info = path.lstat()
     except OSError:
@@ -196,3 +217,6 @@ def _read_regular_text(path: Path) -> str | None:
         return blob.decode("utf-8")
     except UnicodeError:
         return None
+
+
+_read_regular_text = read_regular_text

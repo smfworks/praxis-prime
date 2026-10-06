@@ -5,7 +5,8 @@ Bundled packs ship inside the wheel at
 ``importlib.resources``. A source checkout that has not been packaged still
 loads ``packs/compliance`` from the repository root
 (:func:`praxis_prime.paths.source_checkout_root`). Directories above that
-root are ignored.
+root are ignored. An installed module under ``site-packages`` or
+``dist-packages`` does not use the checkout fallback.
 
 A file in ``~/.config/praxis-prime/packs`` or ``.prime/packs`` with the same
 pack id replaces the bundled one. Packs are starter policy, not legal advice.
@@ -65,7 +66,9 @@ def bundled_pack_dir(start: Path | None = None) -> Path:
 
     ``start`` defaults to this file. Installed wheels do not use this
     directory; they use :func:`_resource_pack_texts`. The walk stops at the
-    checkout root and does not search above it.
+    checkout root and does not search above it. A module under
+    ``site-packages`` or ``dist-packages`` raises ``FileNotFoundError``
+    instead of reading a ``pyproject.toml`` above that install.
     """
     here = Path(__file__) if start is None else Path(start)
     root = source_checkout_root(here)

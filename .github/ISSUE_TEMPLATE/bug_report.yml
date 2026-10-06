@@ -5,8 +5,8 @@ body:
   - type: markdown
     attributes:
       value: |
-        This project is **pre-alpha**. Please do not include secrets, access
-        tokens, or private data.
+        This project is **alpha** (M0–M3 roadmap complete; some blueprint MVP items deferred, no stable release yet).
+        Please do not include secrets, access tokens, or private data.
   - type: textarea
     id: what
     attributes:

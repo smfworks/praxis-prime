@@ -104,7 +104,10 @@ def _main(argv: list[str] | None = None) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="praxis-prime",
-        description="Praxis Prime, a local-first autonomous AI agent for Linux (pre-alpha).",
+        description=(
+            "Praxis Prime, a local-first autonomous AI agent for Linux "
+            "(alpha: M0–M3 roadmap complete; some blueprint MVP items deferred)."
+        ),
     )
     parser.add_argument("--version", action="store_true", help="Print the version and exit.")
     commands = parser.add_subparsers(dest="command")

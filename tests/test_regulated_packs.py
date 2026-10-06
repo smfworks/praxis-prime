@@ -18,6 +18,7 @@ from praxis_prime.packs.cli import _format_info
 from praxis_prime.packs.install import (
     _source_regulated_root,
     builtin_pack_dir,
+    bundled_commit,
     bundled_regulated_root,
     install_pack,
 )
@@ -299,6 +300,25 @@ def test_symlinked_pyproject_is_not_the_checkout_root(tmp_path: Path) -> None:
     assert _source_regulated_root(start) is None
 
 
+@pytest.mark.parametrize("leaf", ["site-packages", "dist-packages"])
+def test_installed_location_ignores_a_pyproject_above_the_venv(tmp_path: Path, leaf: str) -> None:
+    venv = tmp_path / "venv"
+    _write_project(venv, "praxis-prime")
+    regulated = venv / "packs" / "regulated" / "x"
+    regulated.mkdir(parents=True)
+    (regulated / "pack.json").write_text("{}\n", encoding="utf-8")
+    compliance = venv / "packs" / "compliance"
+    compliance.mkdir(parents=True)
+    (compliance / "a.toml").write_text('id = "a"\n', encoding="utf-8")
+    start = venv / "lib" / "python3.12" / leaf / "praxis_prime" / "packs" / "install.py"
+    start.parent.mkdir(parents=True, exist_ok=True)
+    start.write_text("# installed\n", encoding="utf-8")
+    assert source_checkout_root(start) is None
+    assert _source_regulated_root(start) is None
+    with pytest.raises(FileNotFoundError, match="packs/compliance"):
+        bundled_pack_dir(start)
+
+
 def test_real_checkout_resolves_regulated_and_compliance_packs() -> None:
     assert source_checkout_root(Path(__file__)) == _REPO
     regulated = _source_regulated_root(Path(__file__))
@@ -372,6 +392,32 @@ def _break_source_toml(pack: Path, kind: str) -> None:
         path.symlink_to(pack / "pack.json")
     else:
         raise AssertionError(kind)
+
+
+def test_bundled_commit_refuses_a_symlink_when_the_precheck_passes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The read itself must refuse the symlink, not only ``Path.is_symlink``."""
+    pack = tmp_path / "law_firm"
+    pack.mkdir()
+    commit = "a" * 40
+    target = tmp_path / "real.toml"
+    target.write_text(f'commit = "{commit}"\n', encoding="utf-8")
+    assert tomllib.loads(target.read_text(encoding="utf-8"))["commit"] == commit
+    link = pack / "SOURCE.toml"
+    link.symlink_to(target)
+    real_is_symlink = Path.is_symlink
+
+    def hide_this_link(self: Path) -> bool:
+        if self == link:
+            return False
+        return real_is_symlink(self)
+
+    monkeypatch.setattr(Path, "is_symlink", hide_this_link)
+    with pytest.raises(PackError, match="SOURCE.toml") as caught:
+        bundled_commit(pack)
+    assert commit not in str(caught.value)
+    assert "symlink" in str(caught.value)
 
 
 @pytest.mark.parametrize("kind", ["missing", "invalid", "short", "symlink"])
