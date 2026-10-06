@@ -1,17 +1,17 @@
 # Legacy vertical packs
 
-Praxis Prime can install the six public MIT packs without vendoring them and without running their Python.
+The six public MIT packs ship as built-in data under `packs/regulated/` and in the wheel at `praxis_prime/_data/packs/regulated`. Installing one copies that data. It does not run pack Python.
 
-| CLI name | Repository | `pack.json` name |
-|---|---|---|
-| `homeschool` | `smfworks/smf-praxis-homeschool` | `homeschool` |
-| `education` | `smfworks/smf-praxis-education` | `school_system` |
-| `forensic` | `smfworks/smf-praxis-forensic` | `forensic` |
-| `legal` | `smfworks/smf-praxis-legal` | `law_firm` |
-| `medical` | `smfworks/smf-praxis-medical` | `medical_office` |
-| `mbh` | `smfworks/smf-praxis-mbh` | `behavioral_health` |
+| CLI name | Repository | Commit | `pack.json` name |
+|---|---|---|---|
+| `homeschool` | `smfworks/smf-praxis-homeschool` | `d2adbbf997e14b74854e64552af06832da274868` | `homeschool` |
+| `education` | `smfworks/smf-praxis-education` | `421a7f26432315779247913da6c5f5386984b268` | `school_system` |
+| `forensic` | `smfworks/smf-praxis-forensic` | `ab1797920350a4f4ae21297da8d9cd3c8c5a3c92` | `forensic` |
+| `legal` | `smfworks/smf-praxis-legal` | `afc2340578138de71b9af6dc935dc288cf068fbe` | `law_firm` |
+| `medical` | `smfworks/smf-praxis-medical` | `e19290c689156bc3a25de6627058392ba577eb68` | `medical_office` |
+| `mbh` | `smfworks/smf-praxis-mbh` | `c3d1cc1d22a38d5d62ff1c71e6b68355ac79611d` | `behavioral_health` |
 
-Those repositories use the older praxis-agent layout: `pack.json`, `knowledge.md`, and Python modules registered on the `praxis.verticals` entry point. Five of them pin a model such as `ollama-cloud/…:cloud`. Three ship dashboard JavaScript under `web/`.
+Upstream still uses the older praxis-agent layout: `pack.json`, `knowledge.md`, and Python modules registered on the `praxis.verticals` entry point. Five upstream manifests pin a model such as `ollama-cloud/…:cloud`. Those keys are removed from the vendored `pack.json`. `SOURCE.toml` keeps the removed value. Homeschool had no model pin. Three upstream repos ship dashboard JavaScript under `web/`. That JavaScript, the CSS, and the pack Python are not in this tree. Porting the modules to Praxis plugins remains a follow-up.
 
 ## Commands
 
@@ -23,7 +23,7 @@ praxis-prime packs install https://github.com/smfworks/smf-praxis-legal.git
 praxis-prime packs info law_firm
 ```
 
-`install` accepts a catalog name, a directory, a `.zip`, or a git URL. Git clones use `git clone --depth 1` and do not run pack scripts. A git install has no size limit. Zip archives are capped at 200 members and 15 MiB uncompressed. Files land in `$XDG_DATA_HOME/praxis-prime/vertical-packs/<name>/` (or `--data-dir`). Each install appends an audit event `pack.install` with the repo, version, commit, and license.
+`install` accepts a catalog name, a directory, a `.zip`, or a git URL. A catalog name (`legal`, `law_firm`, and the other aliases) copies the built-in directory first and does not clone git. The audit commit is the one in that pack's `SOURCE.toml`. A directory or zip of some other pack still installs as data. A git URL still uses `git clone --depth 1` and does not run pack scripts. A git install has no size limit. Zip archives are capped at 200 members and 15 MiB uncompressed. Files land in `$XDG_DATA_HOME/praxis-prime/vertical-packs/<name>/` (or `--data-dir`). Each install appends an audit event `pack.install` with the repo, version, commit, and license. `packs list` shows the six as built in. `packs info` reads a built-in pack before it is installed.
 
 ## What is loaded
 

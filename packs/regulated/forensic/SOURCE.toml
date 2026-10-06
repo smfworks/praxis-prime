@@ -1,0 +1,35 @@
+repo = "https://github.com/smfworks/smf-praxis-forensic.git"
+commit = "ab1797920350a4f4ae21297da8d9cd3c8c5a3c92"
+source_path = "hybridagent_praxis_forensic/packs/forensic"
+license = "MIT"
+copyright = "Copyright (c) 2026 SMF Works"
+upstream_model_removed = "ollama-cloud/kimi-k2.7-code:cloud"
+
+# Copied into this directory: pack.json (model and provider keys removed),
+# knowledge.md, LICENSE, and NOTICE. Those four files are the pack data.
+# Praxis Prime does not import pack Python or serve pack JavaScript.
+# Porting the modules to Praxis plugins remains a follow-up.
+
+[[excluded]]
+path = "hybridagent_praxis_forensic/personas, hybridagent_praxis_forensic/__init__.py, hybridagent_praxis_forensic/registration.py"
+reason = "Pack Python. Praxis Prime does not import it. Porting these modules to Praxis plugins remains a follow-up."
+
+[[excluded]]
+path = "pyproject.toml"
+reason = "Upstream package metadata and the praxis.verticals entry point. Not executed."
+
+[[excluded]]
+path = "scripts/"
+reason = "Upstream release scripts. Not pack data."
+
+[[excluded]]
+path = "tests/"
+reason = "Upstream tests. Not pack data."
+
+[[excluded]]
+path = "README.md"
+reason = "Upstream repository README. Not pack data."
+
+[[excluded]]
+path = ".gitignore"
+reason = "Upstream ignore file. Not pack data."

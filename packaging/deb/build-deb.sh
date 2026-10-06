@@ -252,6 +252,14 @@ else
     --no-deps "$wheel"
 fi
 
+regulated_pack=$(find "$venv" -path '*/praxis_prime/_data/packs/regulated/law_firm/pack.json' -print -quit)
+[[ -n "$regulated_pack" ]] || die "built-in regulated packs are missing from the wheel install"
+if find "$venv" -path '*/praxis_prime/_data/packs/regulated/*' \
+  \( -name '*.py' -o -name '*.js' -o -name '*.mjs' -o -name '*.wasm' -o -name '*.css' -o -name '*.html' \) \
+  -print -quit | grep -q .; then
+  die "built-in regulated packs include code or dashboard files"
+fi
+
 drop_bootstrap_installer "$venv/bin/python"
 if find "$venv" \( -type d -name pip -o -type d -name 'pip-*.dist-info' \) -print -quit | grep -q .; then
   die "package virtualenv still contains pip"
@@ -399,6 +407,12 @@ require_fixed './usr/share/doc/praxis-prime/copyright'
 require_fixed './usr/share/doc/praxis-prime/LICENSE'
 require_fixed './usr/share/doc/praxis-prime/CREDITS.md'
 require_fixed './usr/share/doc/praxis-prime/python-licenses.txt'
+if ! grep -F -q 'praxis_prime/_data/packs/regulated/law_firm/pack.json' <<<"$contents"; then
+  die "package missing built-in regulated packs"
+fi
+if ! grep -F -q 'praxis_prime/_data/packs/regulated/law_firm/knowledge.md' <<<"$contents"; then
+  die "package missing built-in regulated pack knowledge"
+fi
 for stub in \
   praxis-prime-voice.service \
   'praxis-prime-gateway@.service' \

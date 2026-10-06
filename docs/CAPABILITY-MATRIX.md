@@ -108,7 +108,7 @@
 | Data classification + retention | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✅ 7 classes, retention days, legal hold | ✗ | ✅ classification pattern | — | **R** + DE |
 | Jurisdiction packs (13 US states) | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✅ (some low-confidence) | ✗ | — | — | **R** (first-wave dial) |
 | North Carolina pack (N.C.G.S. §§ 75-60–75-66, NC professional overlays) | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ (NC not among the 13) | ✗ | — | — | **N** (first-wave dial; ARCHITECTURE §17.2) |
-| Regulated vertical packs (legal, medical, behavioral health, school, homeschool, forensic) | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✅ extracted to private repos in 0.29.0 | ✗ | — | — | **R**: bundled into `packs/regulated/` (approved by Michael); license per §32 |
+| Regulated vertical packs (legal, medical, behavioral health, school, homeschool, forensic) | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✅ extracted to private repos in 0.29.0 | ✗ | — | — | **R**: shipped as data in `packs/regulated/` (MIT; Python and dashboard JS excluded; dials off) |
 | HIPAA / FERPA(+COPPA) / GDPR controls | ✗ | ✗ | ✗ | ◐ (enterprise terms) | ◐ (enterprise terms) | ◐ (enterprise terms) | ✅ HIPAA/FERPA templates; ◐ GDPR-style forgetting | ✗ | ✗ (no BAA seen) | — | **R** + N (BAA registry, COPPA, DSAR) — first-wave dials |
 | CCPA / PCI / SOC 2 / EU AI Act / NIST RMF / ISO 42001 dials (v1.0) | ✗ | ✗ | ✗ | ◐ vendor certs only | ◐ vendor certs only | ◐ vendor certs only | ◐ GDPR-style forgetting only | ✗ | ✗ | — | **N** |
 | Hash-chained audit log | ✗ | ◐ transcripts | ◐ | ◐ | ◐ | ◐ | ✅ evidence chain + attestation | ✅ SHA-256 chain | — | ★ voice actions audited | **R** Swarm + Praxis |

@@ -180,9 +180,7 @@ def test_install_records_provenance_and_drops_code(tmp_path: Path):
         assert "web/dashboard.js" in reloaded.ignored_javascript
         assert any(item.code == "javascript_ignored" for item in reloaded.warnings)
         assert any(item.endswith("side_effect.py") for item in reloaded.python_modules)
-        rows = db.conn.execute(
-            "SELECT kind, summary, payload_json FROM audit_events"
-        ).fetchall()
+        rows = db.conn.execute("SELECT kind, summary, payload_json FROM audit_events").fetchall()
         assert len(rows) == 1
         assert rows[0]["kind"] == "pack.install"
         payload = json.loads(rows[0]["payload_json"])
@@ -243,7 +241,13 @@ def test_git_install_clones_without_running_pack_code(tmp_path: Path):
     assert "web/dashboard.js" in installed.pack.ignored_javascript
 
 
-def test_known_name_points_at_the_public_repo(tmp_path: Path):
+def test_known_name_points_at_the_public_repo(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # The bundled copy is preferred. This covers the git fallback when it is absent.
+    monkeypatch.setattr("praxis_prime.packs.install.builtin_pack_dir", lambda _public: None)
+
     def runner(argv: list[str]) -> None:
         assert "https://github.com/smfworks/smf-praxis-legal.git" in argv
         target = Path(argv[-1])
@@ -281,7 +285,7 @@ def test_cli_packs_list_install_and_info(tmp_path: Path, capsys: pytest.CaptureF
     assert main(["packs", "list", *base]) == 0
     listed = capsys.readouterr().out
     assert "legal" in listed
-    assert "not installed" in listed
+    assert "built in" in listed
     assert "(none)" in listed
     assert main(["packs", "install", str(source), *base]) == 0
     installed_out = capsys.readouterr()

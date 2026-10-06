@@ -84,7 +84,7 @@ The retention sweep deletes rows whose `expires_at` has passed. Enforce dials co
 
 ## Vertical packs
 
-The six public MIT packs (homeschool, education, forensic, legal, medical, behavioral health) are not copied into this repository. `praxis-prime packs install` reads their `pack.json` and `knowledge.md` as data. It ignores hard-coded model pins and does not load their dashboard JavaScript or Python. See [PACKS-LEGACY.md](PACKS-LEGACY.md).
+The six public MIT packs (homeschool, education, forensic, legal, medical, behavioral health) ship as data under `packs/regulated/` and in the wheel. `praxis-prime packs install <name>` copies that bundled data. It does not clone git, and it does not turn a dial on. Hard-coded model pins are removed from the vendored `pack.json` and still ignored if a later pack includes one. Dashboard JavaScript and pack Python are not in the tree and are not loaded. See [PACKS-LEGACY.md](PACKS-LEGACY.md).
 
 `packs/compliance/*.toml` ships inside the wheel. A file with the same pack id in `~/.config/praxis-prime/packs` or `<project>/.prime/packs` replaces the bundled pack. North Carolina professional overlays that SOURCE-NOTES §11 marks S or U are not encoded as rules.
 

@@ -148,6 +148,7 @@ So the dials in the "not found" rows are **new work**.
   - `hybridagent/vertical_templates.py` and `jurisdictions/` remain in the public MIT repo.
 - **Decision (Michael, 2026-09-29):** bundle the regulated packs into Praxis Prime and modify them as needed. Versions released under MIT before 0.29.0 stay MIT for their recipients (ARCHITECTURE §32).
 - **Update (2026-09-30):** the six public repositories `smfworks/smf-praxis-{homeschool,education,forensic,legal,medical,mbh}` are MIT. M0 installs them as data and does not vendor their trees. See `docs/PACKS-LEGACY.md`. Any further private pack repository is still unverified.
+- **Update (2026-10-05):** those six repositories are vendored as data under `packs/regulated/` (`pack.json`, `knowledge.md`, `LICENSE`, `NOTICE`). Python modules and dashboard JavaScript are not included. `praxis-prime packs install <name>` copies the bundled data and does not clone git. Dials stay off. See `docs/PACKS-LEGACY.md`.
 - The jurisdiction data's confidence varies and needs legal review.
 
 ## 4. SMF Swarm 2.0 (SMF Works)
@@ -298,7 +299,7 @@ No single upstream. It is assembled from:
 
 ## 10. Consolidated list of unverified items
 
-1. **Further private Praxis pack repos**, if any remain besides the six public MIT verticals. Those six were confirmed MIT on 2026-09-30 and are loaded as data, not vendored (`docs/PACKS-LEGACY.md`).
+1. **Further private Praxis pack repos**, if any remain besides the six public MIT verticals. Those six are MIT and ship as data under `packs/regulated/` (`docs/PACKS-LEGACY.md`). Their Python and dashboard JavaScript are not included.
 2. **NC pack rows marked S/U** (§11 below):
    - the full text of NC State Bar 2024 FEO 1;
    - §§ 115C-548/-549 record-keeping text;

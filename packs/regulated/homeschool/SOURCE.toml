@@ -1,0 +1,39 @@
+repo = "https://github.com/smfworks/smf-praxis-homeschool.git"
+commit = "d2adbbf997e14b74854e64552af06832da274868"
+source_path = "hybridagent_praxis_homeschool/packs/homeschool"
+license = "MIT"
+copyright = "Copyright (c) 2026 SMF Works"
+upstream_model_removed = ""
+
+# Copied into this directory: pack.json (upstream had no model or provider key),
+# knowledge.md, LICENSE, and NOTICE. Those four files are the pack data.
+# Praxis Prime does not import pack Python or serve pack JavaScript.
+# Porting the modules to Praxis plugins remains a follow-up.
+
+[[excluded]]
+path = "hybridagent_praxis_homeschool/modules, hybridagent_praxis_homeschool/__init__.py, hybridagent_praxis_homeschool/registration.py"
+reason = "Pack Python. Praxis Prime does not import it. Porting these modules to Praxis plugins remains a follow-up."
+
+[[excluded]]
+path = "hybridagent_praxis_homeschool/web/ (homeschool.css, homeschool.js)"
+reason = "Dashboard JavaScript and CSS. Praxis Prime does not load or serve pack JavaScript."
+
+[[excluded]]
+path = "pyproject.toml"
+reason = "Upstream package metadata and the praxis.verticals entry point. Not executed."
+
+[[excluded]]
+path = "scripts/"
+reason = "Upstream release scripts. Not pack data."
+
+[[excluded]]
+path = "tests/"
+reason = "Upstream tests. Not pack data."
+
+[[excluded]]
+path = "README.md"
+reason = "Upstream repository README. Not pack data."
+
+[[excluded]]
+path = ".gitignore"
+reason = "Upstream ignore file. Not pack data."

@@ -10,7 +10,7 @@ The maintainer address `maintainers@praxis-prime.invalid` does not receive mail.
 
 | Path | Role |
 |---|---|
-| `/opt/praxis-prime` | Virtualenv. Locked runtime wheels are bundled here. `textual` is not installed. pip is not installed. |
+| `/opt/praxis-prime` | Virtualenv. Locked runtime wheels are bundled here. The six regulated packs ship inside the project wheel at `praxis_prime/_data/packs/regulated`. `textual` is not installed. pip is not installed. |
 | `/usr/bin/praxis-prime`, `/usr/bin/pprime`, `/usr/bin/praxis-primed` | Symlinks into that virtualenv. |
 | `/usr/lib/systemd/user/` | `praxis-prime.service` and `praxis-prime-workers.slice` only. Stub units stay in [`../systemd`](../systemd). Not enabled. Linger is not enabled. There is no `.install` script. |
 | `/usr/share/licenses/praxis-prime-git/` | `LICENSE`, `NOTICE`, `CREDITS.md`, `THIRD_PARTY.md`, `THIRD_PARTY_NOTICES.md`, `copyright`, and `python-licenses.txt` (generated at package build time from each wheel's `METADATA`). |
@@ -69,4 +69,4 @@ A future `praxis-prime-bin` package would install a versioned release tarball (o
 
 ## Not in this package
 
-After the package is installed, `praxis-prime omarchy install` writes the theme template and the Hyprland keybind. The Quickshell bar plugin is still a follow-up. See [apps/omarchy](../../apps/omarchy) and [docs/USAGE.md](../../docs/USAGE.md).
+The six regulated packs are in the main package, not a separate `praxis-prime-packs` package. After the package is installed, `praxis-prime omarchy install` writes the theme template and the Hyprland keybind. The Quickshell bar plugin is still a follow-up. See [apps/omarchy](../../apps/omarchy) and [docs/USAGE.md](../../docs/USAGE.md).

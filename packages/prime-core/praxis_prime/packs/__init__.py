@@ -1,6 +1,7 @@
 """Vertical pack loader.
 
-Reads legacy ``pack.json`` packs as data. Pack Python, JavaScript, and
+The six regulated packs ship as data under ``packs/regulated``. This loader
+reads legacy ``pack.json`` packs as data. Pack Python, JavaScript, and
 dashboard files are not executed or served. Hard-coded model pins are ignored.
 
 TODO: ARCHITECTURE §17 and §32. Addendum A §7.

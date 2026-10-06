@@ -1,34 +1,36 @@
 # Regulated packs
 
-This directory stays empty of pack code. The six public MIT verticals
-(legal, medical, behavioral health, education, homeschool, forensic) live in
-`smfworks/smf-praxis-*` and are installed with `praxis-prime packs install`.
-The loader reads `pack.json` and `knowledge.md` only. It does not vendor the
-repositories, import their Python, or serve their dashboard JavaScript.
-See `docs/PACKS-LEGACY.md`.
+The six public MIT verticals ship in this directory as built-in data. They are part of the Praxis Prime wheel, the sdist, and therefore the `.deb` and AUR packages. There is no separate `praxis-prime-packs` package.
 
-Compliance dial TOML still loads from `packs/compliance`,
-`~/.config/praxis-prime/packs`, and `.prime/packs`.
+`praxis-prime packs install legal` (or `homeschool`, `education`, `forensic`, `medical`, `mbh`, or the `pack.json` name) copies the bundled directory. It does not clone git. Compliance dials stay off. A pack only suggests dials. Nothing here turns on monitor or enforce.
 
-This directory is reserved for a future in-tree copy of the Praxis regulated verticals:
+The loader reads `pack.json` and `knowledge.md`. It does not import pack Python or serve dashboard JavaScript. See [docs/PACKS-LEGACY.md](../../docs/PACKS-LEGACY.md).
 
-- legal and law firm
-- medical and medical office
-- behavioral health
-- school system
-- homeschool
-- forensic
+| CLI name | Repository | Commit | `pack.json` name |
+|---|---|---|---|
+| `mbh` | `smfworks/smf-praxis-mbh` | `c3d1cc1d22a38d5d62ff1c71e6b68355ac79611d` | `behavioral_health` |
+| `medical` | `smfworks/smf-praxis-medical` | `e19290c689156bc3a25de6627058392ba577eb68` | `medical_office` |
+| `legal` | `smfworks/smf-praxis-legal` | `afc2340578138de71b9af6dc935dc288cf068fbe` | `law_firm` |
+| `education` | `smfworks/smf-praxis-education` | `421a7f26432315779247913da6c5f5386984b268` | `school_system` |
+| `homeschool` | `smfworks/smf-praxis-homeschool` | `d2adbbf997e14b74854e64552af06832da274868` | `homeschool` |
+| `forensic` | `smfworks/smf-praxis-forensic` | `ab1797920350a4f4ae21297da8d9cd3c8c5a3c92` | `forensic` |
 
-**Their code is not copied into this directory.** The public MIT repositories are installed by `praxis_prime.packs` as data. Any additional private tree still needs a license check before it is copied here (ARCHITECTURE §32).
+Each pack directory contains `pack.json`, `knowledge.md`, the upstream `LICENSE` and `NOTICE`, and `SOURCE.toml` (repo URL, commit, source path, license, and what was left out). All six are MIT, Copyright (c) 2026 SMF Works.
 
-Before copying a pack into this directory:
+## What was left out
 
-1. Confirm the current LICENSE and that SMF Works holds the contributor rights (ARCHITECTURE §32).
-2. Remember that copies released under MIT before 0.29.0 stay MIT for the people who received them.
-3. Keep third-party text (statutes, forms, datasets) under its own terms.
-4. Keep the core on the data loader. Do not import pack Python from this tree.
-5. Update `THIRD_PARTY.md` and this directory's README in the same change.
+Upstream `model` pins (`ollama-cloud/…:cloud` on five packs; homeschool had none) are not in the vendored `pack.json`. `SOURCE.toml` records the removed value as `upstream_model_removed`. The user picks the provider during setup. A pack cannot select one. The loader still ignores a `model` or `provider` key if one is present.
 
-The `LICENSE` file here covers the placeholder files only. It is MIT, copyright (c) 2026 SMF Works, matching the recommended default (option A in §32). If the imported packs use a different license, replace that file at import time. The Debian/AUR package name reserved for them is `praxis-prime-packs`.
+These upstream paths were not copied. `SOURCE.toml` lists them per pack:
 
-Nothing in this directory enables a compliance dial. Dials default to off.
+- Pack Python (`modules/`, `personas/`, `registration.py`, package `__init__.py`). Praxis Prime does not import it. Porting those modules to Praxis plugins remains a follow-up.
+- Dashboard files under `web/` (`*.js`, `*.css`) from homeschool, legal, and behavioral health. They are not loaded or served.
+- `pyproject.toml`, `scripts/`, `tests/`, and the upstream README. Those are the repository, not pack data.
+
+No `.py`, `.js`, `.mjs`, `.wasm`, `.css`, or `.html` file belongs in this directory.
+
+## License
+
+The `LICENSE` file in this directory covers the directory README. It is MIT, Copyright (c) 2026 SMF Works. Each pack directory keeps the upstream MIT `LICENSE` and `NOTICE`. Copies released under MIT before Praxis 0.29.0 stay MIT for the people who received them. Any further private pack tree stays out of this repository until its license is confirmed (ARCHITECTURE §32). Quoted statutes and other third-party text inside a pack keep their own terms.
+
+Compliance dial TOML still loads from `packs/compliance`, `~/.config/praxis-prime/packs`, and `.prime/packs`.

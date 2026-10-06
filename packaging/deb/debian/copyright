@@ -11,7 +11,10 @@ License: MIT
  .
  Upstream attribution for projects SMF Works does not own is in NOTICE,
  THIRD_PARTY.md, and CREDITS.md. The source package does not vendor
- third-party Python trees. The binary package built by
+ third-party Python trees. It does ship six MIT pack-data directories
+ under packs/regulated (pack.json, knowledge.md, and each repository's
+ LICENSE and NOTICE). Their Python and dashboard JavaScript are not
+ included. See THIRD_PARTY.md. The binary package built by
  packaging/deb/build-deb.sh bundles the locked runtime wheels from PyPI
  into /opt/praxis-prime under each project's own license. Those
  distributions keep their licenses under each *.dist-info directory and

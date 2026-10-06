@@ -80,4 +80,4 @@ praxis-prime service install
 
 ## Not in this package
 
-Desktop (Tauri), voice, regulated packs, an APT repository, AppImage, and Flatpak are follow-ups. See [`../apt-repo`](../apt-repo), [`../appimage`](../appimage), and [`../flatpak`](../flatpak).
+The six regulated packs ship in this package as wheel data at `praxis_prime/_data/packs/regulated`. Dials stay off. There is no separate `praxis-prime-packs` package. Desktop (Tauri), voice, an APT repository, AppImage, and Flatpak are follow-ups. See [`../apt-repo`](../apt-repo), [`../appimage`](../appimage), and [`../flatpak`](../flatpak).

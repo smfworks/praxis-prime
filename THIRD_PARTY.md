@@ -85,22 +85,29 @@ file is later copied:
 
 ## SMF Praxis regulated packs
 
-SMF Works owns SMF Praxis. Release 0.29.0 (2026-07-19) moved regulated
-verticals out of the public `praxis-agent` wheel. Six of those verticals are
-public MIT repositories. Praxis Prime does not vendor them. `praxis-prime
-packs install` reads `pack.json` and `knowledge.md` at install time and does
-not copy their Python or dashboard JavaScript into this tree.
+SMF Works owns SMF Praxis and the six public pack repositories. Release
+0.29.0 (2026-07-19) moved the regulated verticals out of the public
+`praxis-agent` wheel. Those six repositories are MIT, Copyright (c) 2026
+SMF Works. Their pack data is vendored under `packs/regulated/<pack.json name>/`
+and ships in the wheel at `praxis_prime/_data/packs/regulated`. `praxis-prime
+packs install <name>` copies that bundled data. It does not clone git.
 
-| Repository | Distribution | License |
-|---|---|---|
-| `smfworks/smf-praxis-homeschool` | `praxis-homeschool` | MIT |
-| `smfworks/smf-praxis-education` | `praxis-education` | MIT |
-| `smfworks/smf-praxis-forensic` | `praxis-forensic` | MIT |
-| `smfworks/smf-praxis-legal` | `praxis-legal` | MIT |
-| `smfworks/smf-praxis-medical` | `praxis-medical` | MIT |
-| `smfworks/smf-praxis-mbh` | `praxis-mbh` | MIT |
+Each directory has `pack.json` (any `model` or `provider` key removed),
+`knowledge.md`, the upstream `LICENSE` and `NOTICE`, and `SOURCE.toml` with
+the commit below. Pack Python (`modules/`, `personas/`, `registration.py`)
+and dashboard `web/*.js` / `web/*.css` are not included. Porting the modules
+to Praxis plugins remains a follow-up. Compliance dials stay off.
 
-- `packs/regulated/` stays empty of their code. See its README and `docs/PACKS-LEGACY.md`.
+| Repository | Distribution | License | Commit | Where |
+|---|---|---|---|---|
+| `smfworks/smf-praxis-homeschool` | `praxis-homeschool` | MIT | `d2adbbf997e14b74854e64552af06832da274868` | `packs/regulated/homeschool/` |
+| `smfworks/smf-praxis-education` | `praxis-education` | MIT | `421a7f26432315779247913da6c5f5386984b268` | `packs/regulated/school_system/` |
+| `smfworks/smf-praxis-forensic` | `praxis-forensic` | MIT | `ab1797920350a4f4ae21297da8d9cd3c8c5a3c92` | `packs/regulated/forensic/` |
+| `smfworks/smf-praxis-legal` | `praxis-legal` | MIT | `afc2340578138de71b9af6dc935dc288cf068fbe` | `packs/regulated/law_firm/` |
+| `smfworks/smf-praxis-medical` | `praxis-medical` | MIT | `e19290c689156bc3a25de6627058392ba577eb68` | `packs/regulated/medical_office/` |
+| `smfworks/smf-praxis-mbh` | `praxis-mbh` | MIT | `c3d1cc1d22a38d5d62ff1c71e6b68355ac79611d` | `packs/regulated/behavioral_health/` |
+
+- See `packs/regulated/README.md` and `docs/PACKS-LEGACY.md`.
 - Code released under MIT before 0.29.0, including `hybridagent/vertical_templates.py`
   and `hybridagent/jurisdictions/` in the public Praxis repo, stays MIT for
   recipients of those versions.

@@ -51,6 +51,12 @@ How to add an entry (people and agents alike):
 | Georg Brandl and Pygments contributors (Pygments) | https://github.com/pygments/pygments | BSD-2-Clause | Syntax highlighting, pulled in by rich. Installed, not vendored. | `pyproject.toml` | 2.21.0 |
 | SMF Praxis (praxis-agent / hybridagent, SMF Works) | https://github.com/smfworks/smf-praxis | MIT | SQLite schema and `~/.praxis` pack, skills, and config layout mapping used by `migrate --from-praxis`. The mapping is original. No Praxis source was copied. | `packages/prime-core/praxis_prime/migrate/` | 69121b2 |
 | David Heinemeier Hansson / Basecamp (Omarchy, @basecamp) | https://github.com/basecamp/omarchy | MIT | Omarchy paths, commands, bind helpers and template key names, for interop only; no code copied | `packages/prime-core/praxis_prime/omarchy/`, `apps/omarchy/` | 81145eb1fd41532fcae4310b26f860608e2eaf82; v3.1.0 for the 3.x bindings.conf layout |
+| SMF Praxis behavioral health (SMF Works) | https://github.com/smfworks/smf-praxis-mbh | MIT | `pack.json` and `knowledge.md` for the behavioral health vertical. The `model` pin was removed. Python modules and `web/*.js` / `web/*.css` were not copied. | `packs/regulated/behavioral_health/` | c3d1cc1d22a38d5d62ff1c71e6b68355ac79611d |
+| SMF Praxis medical office (SMF Works) | https://github.com/smfworks/smf-praxis-medical | MIT | `pack.json` and `knowledge.md` for the medical office vertical. The `model` pin was removed. Python modules were not copied. | `packs/regulated/medical_office/` | e19290c689156bc3a25de6627058392ba577eb68 |
+| SMF Praxis law firm (SMF Works) | https://github.com/smfworks/smf-praxis-legal | MIT | `pack.json` and `knowledge.md` for the law firm vertical. The `model` pin was removed. Python modules and `web/*.js` / `web/*.css` were not copied. | `packs/regulated/law_firm/` | afc2340578138de71b9af6dc935dc288cf068fbe |
+| SMF Praxis school system (SMF Works) | https://github.com/smfworks/smf-praxis-education | MIT | `pack.json` and `knowledge.md` for the school system vertical. The `model` pin was removed. Python modules were not copied. | `packs/regulated/school_system/` | 421a7f26432315779247913da6c5f5386984b268 |
+| SMF Praxis homeschool (SMF Works) | https://github.com/smfworks/smf-praxis-homeschool | MIT | `pack.json` and `knowledge.md` for the homeschool vertical. Upstream had no model pin. Python modules and `web/*.js` / `web/*.css` were not copied. | `packs/regulated/homeschool/` | d2adbbf997e14b74854e64552af06832da274868 |
+| SMF Praxis forensic engineering (SMF Works) | https://github.com/smfworks/smf-praxis-forensic | MIT | `pack.json` and `knowledge.md` for the forensic vertical. The `model` pin was removed. Python modules were not copied. | `packs/regulated/forensic/` | ab1797920350a4f4ae21297da8d9cd3c8c5a3c92 |
 
 Python packages and runtime programs are installed or invoked, not copied into
 this tree. Their notices are in [THIRD_PARTY.md](THIRD_PARTY.md).
@@ -61,6 +67,7 @@ Projects whose design ideas Praxis Prime follows (Hermes Agent, OpenClaw, SMF Pr
 No upstream source code is copied in. The only copied files are the bundled
 OFL-1.1 fonts listed above, logged in THIRD_PARTY.md's copied-file log with the
 OFL text kept beside them in each theme's `assets/fonts/OFL.txt`.
+Exception, since the regulated packs change: the six SMF Praxis regulated packs are copied in as data under `packs/regulated/` (pack.json, knowledge.md, LICENSE, NOTICE). See the six SMF Praxis rows above and THIRD_PARTY.md. Their Python and dashboard JavaScript are not included.
 
 ### Runtime wheels bundled by the `.deb` and AUR package
 

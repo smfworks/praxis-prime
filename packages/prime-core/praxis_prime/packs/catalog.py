@@ -1,6 +1,8 @@
 """The six public MIT vertical packs.
 
-These repositories are not vendored. ``packs install`` reads them as data.
+Pack data ships under ``packs/regulated/`` and in the wheel at
+``praxis_prime/_data/packs/regulated``. ``packs install <name>`` copies that
+bundled data and does not clone git. It does not import pack Python.
 Names here are the CLI aliases. ``pack_name`` is the ``pack.json`` name.
 
 TODO: ARCHITECTURE §32. Addendum A §7.2.
