@@ -74,10 +74,18 @@ package() {
     --no-compile \
     --no-deps \
     dist/*.whl
-  if ! find "${venv}" -path '*/praxis_prime/_data/packs/regulated/law_firm/pack.json' -print -quit | grep -q .; then
-    echo "praxis-prime-git: built-in regulated packs missing from the wheel" >&2
-    exit 1
-  fi
+  local regulated_name
+  local -a regulated_packs=(behavioral_health forensic homeschool law_firm medical_office school_system)
+  for regulated_name in "${regulated_packs[@]}"; do
+    if ! find "${venv}" -path "*/praxis_prime/_data/packs/regulated/${regulated_name}/pack.json" -print -quit | grep -q .; then
+      echo "praxis-prime-git: built-in regulated pack ${regulated_name} is missing pack.json" >&2
+      exit 1
+    fi
+    if ! find "${venv}" -path "*/praxis_prime/_data/packs/regulated/${regulated_name}/knowledge.md" -print -quit | grep -q .; then
+      echo "praxis-prime-git: built-in regulated pack ${regulated_name} is missing knowledge.md" >&2
+      exit 1
+    fi
+  done
 
   local seed
   local -a drop=()

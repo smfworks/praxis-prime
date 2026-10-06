@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import tarfile
@@ -14,6 +15,7 @@ from pathlib import Path
 
 from praxis_prime.compliance import packs as pack_module
 from praxis_prime.compliance.packs import bundled_packs
+from praxis_prime.packs.catalog import PUBLIC_PACKS
 
 _REPO = Path(__file__).resolve().parents[1]
 _CHILD = """
@@ -184,3 +186,35 @@ def test_wheel_and_sdist_ship_compliance_packs(tmp_path: Path):
     assert "coppa" in installed_ids
     assert "gdpr" in installed_ids
     assert "pci" in installed_ids
+
+
+_PACK_ARRAY = re.compile(r"regulated_packs=\(([^)]*)\)")
+
+
+def _regulated_pack_array(path: Path) -> list[str]:
+    text = path.read_text(encoding="utf-8")
+    matches = _PACK_ARRAY.findall(text)
+    assert len(matches) == 1, path
+    return matches[0].split()
+
+
+def test_packaging_scripts_list_every_regulated_pack() -> None:
+    expected = {pack.pack_name for pack in PUBLIC_PACKS}
+    on_disk = {
+        path.name
+        for path in (_REPO / "packs" / "regulated").iterdir()
+        if path.is_dir() and (path / "pack.json").is_file()
+    }
+    assert expected == on_disk == set(_REGULATED_PACKS)
+    for relative in ("packaging/deb/build-deb.sh", "packaging/aur/PKGBUILD"):
+        script = _REPO / relative
+        names = _regulated_pack_array(script)
+        assert set(names) == expected
+        assert len(names) == len(expected)
+        completed = subprocess.run(
+            ["bash", "-n", str(script)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert completed.returncode == 0, completed.stderr
