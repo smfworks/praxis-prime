@@ -432,10 +432,15 @@ def _uninstall(
                 print(f"{_PREFIX} {keep}")
 
     key_edits: list[KeyEdit] = []
+    key_skips: list[str] = []
     if do_key:
-        key_edits = _plan_key_removal(env, force=force)
+        key_edits, key_skips = _plan_key_removal(env, force=force)
         if not key_edits:
             print(f"{_PREFIX} keybind block is not installed")
+
+    def _summarize_skips() -> None:
+        for phrase in key_skips:
+            print(f"{_PREFIX} {phrase}")
 
     if dry_run:
         if theme_remove:
@@ -444,12 +449,14 @@ def _uninstall(
             print(f"{_PREFIX} dry-run: would remove {kind_word}{removing}")
         for edit in key_edits:
             print(f"{_PREFIX} dry-run: {_key_edit_phrase(edit)}")
+        _summarize_skips()
         print(f"{_PREFIX} dry-run: wrote nothing")
         print(f"{_PREFIX} {THEME_CLEAR_HINT}")
         return 0
 
     needs = theme_remove or bool(key_edits)
     if needs and not yes and not _isatty():
+        _summarize_skips()
         print(
             f"{_PREFIX} no terminal, so nothing was changed. "
             "Re-run with --yes to apply, or --dry-run to preview.",
@@ -469,6 +476,7 @@ def _uninstall(
             print(f"{_PREFIX} skipped {edit.link or edit.path}")
 
     if do_theme or do_key:
+        _summarize_skips()
         print(f"{_PREFIX} profile selections were left unchanged")
         print(f"{_PREFIX} {THEME_CLEAR_HINT}")
     return 0
@@ -1106,29 +1114,33 @@ def _uninstall_key_paths(env: Mapping[str, str], host: Host) -> list[Path]:
     return [bindings_path(env, "lua"), bindings_path(env, "conf")]
 
 
-def _plan_key_removal(env: Mapping[str, str], *, force: bool) -> list[KeyEdit]:
+def _plan_key_removal(env: Mapping[str, str], *, force: bool) -> tuple[list[KeyEdit], list[str]]:
     """Bindings files whose managed block should be stripped.
 
     A leaf symlink is refused without ``--force``. With ``--force`` the
     block is removed from the regular file the link names, after a backup
     beside that file. The link stays. A symlinked parent is refused unless
-    ``--force``, and then the block is edited in place.
+    ``--force``, and then the block is edited in place. A dangling or
+    non-file target is skipped; the phrase is for the stdout summary.
     """
     edits: list[KeyEdit] = []
+    skipped: list[str] = []
     for path in _uninstall_key_paths(env, detect_host(env)):
         if lstat_kind(path) is StatKind.SYMLINK:
-            edit = _plan_symlink_key(path, force=force)
+            edit, phrase = _plan_symlink_key(path, force=force)
             if edit is not None:
                 edits.append(edit)
+            elif phrase:
+                skipped.append(phrase)
             continue
         if not _file_has_mark(path):
             continue
         _refuse_symlink(path, force=force)
         edits.append(KeyEdit(path=path))
-    return edits
+    return edits, skipped
 
 
-def _plan_symlink_key(path: Path, *, force: bool) -> KeyEdit | None:
+def _plan_symlink_key(path: Path, *, force: bool) -> tuple[KeyEdit | None, str]:
     if not force:
         if _symlink_contains_mark(path):
             raise OmarchyInstallError(
@@ -1137,17 +1149,26 @@ def _plan_symlink_key(path: Path, *, force: bool) -> KeyEdit | None:
                 "--force removes the managed block from the file it names "
                 "and leaves the link in place."
             )
-        return None
+        return None, ""
     try:
         target = _resolve_bindings_target(path)
     except OmarchyInstallError as exc:
         # Dangling / non-file / unreadable targets must not abort uninstall;
-        # the theme step should still run.
+        # the theme step should still run. The summary line is printed later.
         print(f"{_PREFIX} {exc}", file=sys.stderr)
-        return None
+        return None, _key_skip_summary(path, exc)
     if not _file_has_mark(target):
-        return None
-    return KeyEdit(path=target, link=path)
+        return None, ""
+    return KeyEdit(path=target, link=path), ""
+
+
+def _key_skip_summary(path: Path, exc: OmarchyInstallError) -> str:
+    text = str(exc)
+    if "not a regular file" in text:
+        return f"skipped the keybind: {path} is not a regular file"
+    if "cannot be read" in text:
+        return f"skipped the keybind: {path} cannot be read"
+    return f"skipped the keybind: {path} is a dangling symlink"
 
 
 def _resolve_bindings_target(path: Path) -> Path:

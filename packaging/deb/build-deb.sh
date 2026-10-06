@@ -252,8 +252,13 @@ else
     --no-deps "$wheel"
 fi
 
-regulated_pack=$(find "$venv" -path '*/praxis_prime/_data/packs/regulated/law_firm/pack.json' -print -quit)
-[[ -n "$regulated_pack" ]] || die "built-in regulated packs are missing from the wheel install"
+regulated_packs=(behavioral_health forensic homeschool law_firm medical_office school_system)
+for regulated_name in "${regulated_packs[@]}"; do
+  regulated_json=$(find "$venv" -path "*/praxis_prime/_data/packs/regulated/${regulated_name}/pack.json" -print -quit)
+  [[ -n "$regulated_json" ]] || die "built-in regulated pack ${regulated_name} is missing pack.json"
+  regulated_knowledge=$(find "$venv" -path "*/praxis_prime/_data/packs/regulated/${regulated_name}/knowledge.md" -print -quit)
+  [[ -n "$regulated_knowledge" ]] || die "built-in regulated pack ${regulated_name} is missing knowledge.md"
+done
 if find "$venv" -path '*/praxis_prime/_data/packs/regulated/*' \
   \( -name '*.py' -o -name '*.js' -o -name '*.mjs' -o -name '*.wasm' -o -name '*.css' -o -name '*.html' \) \
   -print -quit | grep -q .; then
@@ -407,12 +412,14 @@ require_fixed './usr/share/doc/praxis-prime/copyright'
 require_fixed './usr/share/doc/praxis-prime/LICENSE'
 require_fixed './usr/share/doc/praxis-prime/CREDITS.md'
 require_fixed './usr/share/doc/praxis-prime/python-licenses.txt'
-if ! grep -F -q 'praxis_prime/_data/packs/regulated/law_firm/pack.json' <<<"$contents"; then
-  die "package missing built-in regulated packs"
-fi
-if ! grep -F -q 'praxis_prime/_data/packs/regulated/law_firm/knowledge.md' <<<"$contents"; then
-  die "package missing built-in regulated pack knowledge"
-fi
+for regulated_name in "${regulated_packs[@]}"; do
+  if ! grep -F -q "praxis_prime/_data/packs/regulated/${regulated_name}/pack.json" <<<"$contents"; then
+    die "package missing built-in regulated pack ${regulated_name}"
+  fi
+  if ! grep -F -q "praxis_prime/_data/packs/regulated/${regulated_name}/knowledge.md" <<<"$contents"; then
+    die "package missing built-in regulated pack knowledge (${regulated_name})"
+  fi
+done
 for stub in \
   praxis-prime-voice.service \
   'praxis-prime-gateway@.service' \

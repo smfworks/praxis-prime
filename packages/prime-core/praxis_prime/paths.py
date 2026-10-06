@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 import stat
+import tomllib
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -129,3 +130,69 @@ def env_value(env: Mapping[str, str], key: str) -> str | None:
     if value:
         return value
     return None
+
+
+_PROJECT_NAME = "praxis-prime"
+
+
+def source_checkout_root(start: Path) -> Path | None:
+    """Nearest checkout whose ``pyproject.toml`` names ``praxis-prime``.
+
+    Walks ``start`` and its parents. The file must be a regular file, not a
+    symlink, and must parse as TOML with ``[project] name = "praxis-prime"``.
+    A different project name is skipped. Returns None when no such file
+    exists. Nothing above the matching directory is considered.
+    """
+    origin = Path(start)
+    try:
+        current = origin.resolve()
+    except OSError:
+        return None
+    if not current.is_dir():
+        current = current.parent
+    for directory in (current, *current.parents):
+        if _pyproject_names_project(directory / "pyproject.toml", _PROJECT_NAME):
+            return directory
+    return None
+
+
+def _pyproject_names_project(path: Path, name: str) -> bool:
+    text = _read_regular_text(path)
+    if text is None:
+        return False
+    try:
+        loaded = tomllib.loads(text)
+    except tomllib.TOMLDecodeError:
+        return False
+    if not isinstance(loaded, dict):
+        return False
+    project = loaded.get("project")
+    if not isinstance(project, dict):
+        return False
+    return project.get("name") == name
+
+
+def _read_regular_text(path: Path) -> str | None:
+    """UTF-8 text of a regular file. A symlink is not read."""
+    try:
+        info = path.lstat()
+    except OSError:
+        return None
+    if not stat.S_ISREG(info.st_mode):
+        return None
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags)
+    except OSError:
+        return None
+    try:
+        with os.fdopen(descriptor, "rb") as handle:
+            blob = handle.read()
+    except OSError:
+        return None
+    try:
+        return blob.decode("utf-8")
+    except UnicodeError:
+        return None

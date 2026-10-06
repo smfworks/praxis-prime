@@ -224,10 +224,25 @@ def load_legacy_pack(
                 ),
             )
         )
+    # A built-in pack's commit comes from SOURCE.toml. This repository's
+    # HEAD is not that commit, including when the caller passed an empty one.
+    builtin = _is_builtin_pack(base, source)
+    if repo:
+        recorded_repo = repo
+    elif builtin:
+        recorded_repo = str(base)
+    else:
+        recorded_repo = _git_remote(base) or str(base)
+    if commit:
+        recorded_commit = commit
+    elif builtin:
+        recorded_commit = ""
+    else:
+        recorded_commit = _git_commit(base)
     provenance = Provenance(
-        repo=repo or _git_remote(base) or str(base),
+        repo=recorded_repo,
         version=version,
-        commit=commit or _git_commit(base),
+        commit=recorded_commit,
         license=_license(base, pack_dir),
         source=source or str(base),
     )
@@ -747,6 +762,23 @@ def _license(root: Path, pack_dir: Path) -> str:
     if "MIT License" in text or "Permission is hereby granted, free of charge" in text:
         return "MIT"
     return "unknown"
+
+
+def _is_builtin_pack(base: Path, source: str) -> bool:
+    """True when ``base`` is built-in pack data and must not use git HEAD."""
+    if source == "built-in":
+        return True
+    # install.py imports this module, so the lookup stays inside the call.
+    from praxis_prime.packs.install import bundled_regulated_root
+
+    root = bundled_regulated_root()
+    if root is None:
+        return False
+    try:
+        base.resolve().relative_to(Path(root).resolve())
+    except ValueError:
+        return False
+    return True
 
 
 def _git_remote(root: Path) -> str:
