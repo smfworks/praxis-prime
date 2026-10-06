@@ -77,8 +77,10 @@ def bundled_regulated_root() -> Path | None:
     through ``importlib.resources``. A source checkout that has not been
     packaged uses ``packs/regulated`` under the repository root from
     :func:`praxis_prime.paths.source_checkout_root`. Directories above that
-    root are ignored. ``compliance.packs.bundled_pack_dir`` uses the same
-    root for ``packs/compliance``.
+    root are ignored, and an installed module under ``site-packages`` or
+    ``dist-packages`` does not use the checkout fallback.
+    ``compliance.packs.bundled_pack_dir`` uses the same root for
+    ``packs/compliance``.
     """
     resource = _resource_regulated_root()
     if resource is not None:
@@ -160,6 +162,8 @@ def _source_regulated_root(start: Path | None = None) -> Path | None:
     """``packs/regulated`` under the praxis-prime checkout, or None.
 
     ``start`` defaults to this file. The walk stops at the checkout root.
+    A module under ``site-packages`` or ``dist-packages`` returns None
+    instead of reading a ``pyproject.toml`` above that install.
     """
     here = Path(__file__) if start is None else Path(start)
     root = source_checkout_root(here)

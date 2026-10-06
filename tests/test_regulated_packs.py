@@ -300,6 +300,25 @@ def test_symlinked_pyproject_is_not_the_checkout_root(tmp_path: Path) -> None:
     assert _source_regulated_root(start) is None
 
 
+@pytest.mark.parametrize("leaf", ["site-packages", "dist-packages"])
+def test_installed_location_ignores_a_pyproject_above_the_venv(tmp_path: Path, leaf: str) -> None:
+    venv = tmp_path / "venv"
+    _write_project(venv, "praxis-prime")
+    regulated = venv / "packs" / "regulated" / "x"
+    regulated.mkdir(parents=True)
+    (regulated / "pack.json").write_text("{}\n", encoding="utf-8")
+    compliance = venv / "packs" / "compliance"
+    compliance.mkdir(parents=True)
+    (compliance / "a.toml").write_text('id = "a"\n', encoding="utf-8")
+    start = venv / "lib" / "python3.12" / leaf / "praxis_prime" / "packs" / "install.py"
+    start.parent.mkdir(parents=True, exist_ok=True)
+    start.write_text("# installed\n", encoding="utf-8")
+    assert source_checkout_root(start) is None
+    assert _source_regulated_root(start) is None
+    with pytest.raises(FileNotFoundError, match="packs/compliance"):
+        bundled_pack_dir(start)
+
+
 def test_real_checkout_resolves_regulated_and_compliance_packs() -> None:
     assert source_checkout_root(Path(__file__)) == _REPO
     regulated = _source_regulated_root(Path(__file__))
