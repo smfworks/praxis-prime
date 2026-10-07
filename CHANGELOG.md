@@ -14,7 +14,7 @@ What is on `main`.
 
 ### Security
 
-- Provider locality follows the address ([#92](https://github.com/smfworks/praxis-prime/issues/92)). A public Ollama or OpenAI-compatible host is recorded as `cloud` and is not `local` for an enforce dial. Loopback stays local. A LAN host counts as on-prem when it is listed in `[models] trusted_inference_hosts`, or when the owner sets `local = true`.
+- Provider locality follows the address ([#92](https://github.com/smfworks/praxis-prime/issues/92)). A public Ollama or OpenAI-compatible host is recorded as `cloud` and is not `local` for an enforce dial. Loopback stays local. A LAN host counts as on-prem when it is listed in `[models] trusted_inference_hosts`, or when the owner sets `local = true`. A `*.localhost` name is resolved and must be loopback. Locality lookups are single-flight with a short negative cache, and the enforce block message and `praxis-prime compliance status` point a private-network server at `trusted_inference_hosts`.
 
 ### Added
 

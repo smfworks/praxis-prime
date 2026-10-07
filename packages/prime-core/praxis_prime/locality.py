@@ -1,8 +1,15 @@
 """Classify a provider base URL as local, lan, or cloud.
 
-The result is not cached. A cache would keep a name's old addresses after
-DNS changes and widen the rebinding window. Callers that enforce routing
-classify again at request time; see ``compliance.providers.filter_chain``.
+A successful lookup is not cached. A positive cache would keep a name's old
+addresses after DNS changes and widen the rebinding window. Callers that
+enforce routing classify again at request time; see
+``compliance.providers.filter_chain``.
+
+Lookups are single-flight: one resolver call per host is in flight at a
+time, and concurrent callers wait on it. A failed, empty, or timed-out
+lookup is remembered for ``NEGATIVE_TTL`` seconds and answers ``cloud``
+straight away (fail closed), so a dead resolver does not stall every
+request or pile up threads stuck in ``getaddrinfo``.
 """
 
 from __future__ import annotations
@@ -10,6 +17,7 @@ from __future__ import annotations
 import ipaddress
 import socket
 import threading
+import time
 from collections.abc import Callable, Sequence
 from typing import Literal
 from urllib.parse import urlsplit
@@ -18,6 +26,9 @@ Locality = Literal["local", "lan", "cloud"]
 Resolver = Callable[[str], Sequence[str]]
 
 _RANK = {"local": 0, "lan": 1, "cloud": 2}
+
+# Seconds a failed, empty, or timed-out lookup keeps answering cloud.
+NEGATIVE_TTL = 10.0
 
 # Explicit ranges. Do not use ``ipaddress`` ``is_private`` or ``is_global``
 # for the lan decision: Python marks documentation and benchmark ranges
@@ -96,12 +107,14 @@ def classify_host(
 ) -> Locality:
     """Classify a host. Names use every resolved address.
 
-    An empty host is cloud. ``localhost`` and names ending in ``.localhost``
-    are local and are not resolved (RFC 6761). An IP literal uses
-    ``classify_address``. Any other name is resolved. The result is the most
-    remote class: cloud beats lan, and lan beats local, so one public
-    address makes the host cloud and a mix of loopback and lan is lan.
-    A timeout, any resolver error, or no addresses is cloud.
+    An empty host is cloud. Bare ``localhost`` is local and is not resolved.
+    A name ending in ``.localhost`` is resolved, because a stock glibc
+    resolver can send it to DNS; it is local only when every address is
+    loopback, and cloud otherwise. An IP literal uses ``classify_address``.
+    Any other name is resolved. The result is the most remote class: cloud
+    beats lan, and lan beats local, so one public address makes the host
+    cloud and a mix of loopback and lan is lan. A timeout, any resolver
+    error, or no addresses is cloud.
     """
     text = host.strip().lower().rstrip(".")
     if text.startswith("[") and text.endswith("]") and len(text) >= 2:
@@ -110,19 +123,18 @@ def classify_host(
         text = text.split("%", 1)[0]
     if not text:
         return "cloud"
-    if text == "localhost" or text.endswith(".localhost"):
+    if text == "localhost":
         return "local"
     try:
         return classify_address(text)
     except ValueError:
         pass
     lookup = resolve_host if resolver is None else resolver
-    try:
-        found = _invoke(lookup, text, timeout)
-    except Exception:  # any resolver failure fails closed
-        return "cloud"
+    found = _lookup(lookup, text, timeout)
     if not found:
         return "cloud"
+    if text.endswith(".localhost"):
+        return "local" if all(_is_loopback(item) for item in found) else "cloud"
     classes: list[Locality] = []
     for item in found:
         try:
@@ -181,22 +193,88 @@ def _ipv4_compatible(address: ipaddress.IPv6Address) -> bool:
     return int(address) >> 32 == 0
 
 
-def _invoke(resolver: Resolver, host: str, timeout: float) -> list[str]:
-    """Run ``resolver`` in a daemon thread. A timeout yields no addresses."""
-    box: list[list[str] | BaseException] = []
+def _is_loopback(item: str) -> bool:
+    try:
+        address = _parse_address(item)
+    except ValueError:
+        return False
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+        address = address.ipv4_mapped
+    return address.is_loopback
 
-    def run() -> None:
-        try:
-            box.append([str(item) for item in resolver(host)])
-        except Exception as exc:  # handed back to the caller thread
-            box.append(exc)
 
-    worker = threading.Thread(target=run, name="praxis-locality", daemon=True)
-    worker.start()
-    worker.join(timeout if timeout > 0 else 0)
-    if worker.is_alive() or not box:
+class _Pending:
+    __slots__ = ("done", "error", "result")
+
+    def __init__(self) -> None:
+        self.done = threading.Event()
+        self.result: list[str] = []
+        self.error: BaseException | None = None
+
+
+_LOCK = threading.Lock()
+_INFLIGHT: dict[tuple[int, str], _Pending] = {}
+_NEGATIVE: dict[tuple[int, str], float] = {}
+
+
+def clear_cache() -> None:
+    """Forget in-flight bookkeeping and negative entries. For tests."""
+    with _LOCK:
+        _INFLIGHT.clear()
+        _NEGATIVE.clear()
+
+
+def _lookup(resolver: Resolver, host: str, timeout: float) -> list[str]:
+    """Addresses for ``host``, or [] when the lookup failed or timed out.
+
+    One resolver call per (resolver, host) runs at a time. Other callers
+    wait on it, each for at most its own ``timeout``. A failure, an empty
+    answer, or a timeout is remembered for ``NEGATIVE_TTL`` seconds.
+    """
+    key = (id(resolver), host)
+    now = time.monotonic()
+    start = False
+    with _LOCK:
+        expiry = _NEGATIVE.get(key)
+        if expiry is not None:
+            if expiry > now:
+                return []
+            del _NEGATIVE[key]
+        pending = _INFLIGHT.get(key)
+        if pending is None:
+            pending = _Pending()
+            _INFLIGHT[key] = pending
+            start = True
+    if start:
+        worker = threading.Thread(
+            target=_run,
+            args=(resolver, host, key, pending),
+            name="praxis-locality",
+            daemon=True,
+        )
+        worker.start()
+    if not pending.done.wait(timeout if timeout > 0 else 0):
+        with _LOCK:
+            _NEGATIVE[key] = time.monotonic() + NEGATIVE_TTL
         return []
-    result = box[0]
-    if isinstance(result, BaseException):
-        raise result
-    return result
+    if pending.error is not None:
+        return []
+    return list(pending.result)
+
+
+def _run(resolver: Resolver, host: str, key: tuple[int, str], pending: _Pending) -> None:
+    try:
+        pending.result = [str(item) for item in resolver(host)]
+    except Exception as exc:  # any resolver failure fails closed
+        pending.error = exc
+    failed = pending.error is not None or not pending.result
+    with _LOCK:
+        # Only the current lookup for this key updates the shared state.
+        # After ``clear_cache`` a late finisher just wakes its own waiters.
+        if _INFLIGHT.get(key) is pending:
+            del _INFLIGHT[key]
+            if failed:
+                _NEGATIVE[key] = time.monotonic() + NEGATIVE_TTL
+            else:
+                _NEGATIVE.pop(key, None)
+    pending.done.set()

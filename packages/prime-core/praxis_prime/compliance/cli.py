@@ -168,9 +168,7 @@ def _gdpr(args: argparse.Namespace) -> int:
         return 2
     finally:
         db.close()
-    print(
-        f"erased memory={result['memory_deleted']} messages={result['messages_deleted']}"
-    )
+    print(f"erased memory={result['memory_deleted']} messages={result['messages_deleted']}")
     return 0
 
 
@@ -232,10 +230,27 @@ def _print_status(
             f"eu_region={str(meta.eu_region).lower()} "
             f"zero_retention={str(meta.zero_retention).lower()}"
         )
+        hint = _trusted_hint(meta)
+        if hint:
+            print(f"    {hint}")
     active = [dial_id for dial_id, position in dials.items() if position != "off"]
     if not active:
         print("Every dial is off. Behavior matches a fresh install.")
     print(f"Packs loaded: {len(packs)}")
+
+
+def _trusted_hint(meta: ProviderFlags) -> str:
+    """Point a private-network server that is not local at the trusted list."""
+    if meta.local or meta.local_explicit or not meta.base_url.strip():
+        return ""
+    from praxis_prime.locality import host_of, locality
+
+    if locality(meta.base_url) != "lan":
+        return ""
+    return (
+        f"{host_of(meta.base_url)} is on a private network. Add it to "
+        "[models] trusted_inference_hosts to count it as local for enforce dials."
+    )
 
 
 def _print_probe(text: str, dials: dict[str, str], packs: tuple[PolicyPack, ...]) -> None:

@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 from pathlib import Path
 
 import pytest
 
+from praxis_prime import locality as locality_module
 from praxis_prime.compliance.providers import ProviderFlags, filter_chain, flags_from_config
 from praxis_prime.locality import classify_address, classify_host, host_of, locality
 from praxis_prime.onboarding.probe import FetchResult, ProbeError
@@ -61,19 +63,119 @@ def test_address_table(url: str, host: str, kind: str):
     assert classify_address(host) == kind
 
 
-def test_localhost_names_do_not_resolve():
+def test_bare_localhost_does_not_resolve():
     def boom(host: str) -> list[str]:
         raise AssertionError(host)
 
     assert host_of("localhost") == "localhost"
     assert host_of("foo.localhost") == "foo.localhost"
     assert classify_host("localhost", resolver=boom) == "local"
-    assert classify_host("Foo.LocalHost.", resolver=boom) == "local"
+    assert classify_host("LocalHost.", resolver=boom) == "local"
     assert locality("localhost", resolver=boom) == "local"
-    assert locality("foo.localhost", resolver=boom) == "local"
-    assert locality("http://api.localhost:11434", resolver=boom) == "local"
+    assert locality("http://localhost:11434", resolver=boom) == "local"
     assert locality("", resolver=boom) == "cloud"
     assert classify_host("   ", resolver=boom) == "cloud"
+
+
+def test_localhost_subdomains_resolve_and_must_all_be_loopback():
+    """A stock glibc resolver can send foo.localhost to DNS. Fail closed."""
+    answers = {
+        "loop.localhost": ["127.0.0.1", "::1"],
+        "api.localhost": ["203.0.113.9"],
+        "lan.localhost": ["192.168.1.5"],
+        "mixed.localhost": ["127.0.0.1", "192.168.1.5"],
+        "any.localhost": ["0.0.0.0"],
+        "empty.localhost": [],
+    }
+
+    def resolve(host: str) -> list[str]:
+        return answers[host]
+
+    def boom(host: str) -> list[str]:
+        raise OSError(host)
+
+    assert classify_host("loop.localhost", resolver=resolve) == "local"
+    assert locality("http://Loop.LocalHost.:11434", resolver=resolve) == "local"
+    assert classify_host("api.localhost", resolver=resolve) == "cloud"
+    assert classify_host("lan.localhost", resolver=resolve) == "cloud"
+    assert classify_host("mixed.localhost", resolver=resolve) == "cloud"
+    assert classify_host("any.localhost", resolver=resolve) == "cloud"
+    assert classify_host("empty.localhost", resolver=resolve) == "cloud"
+    assert classify_host("down.localhost", resolver=boom) == "cloud"
+
+
+def test_public_localhost_subdomain_is_dropped_by_filter_chain(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    def public(host: str) -> list[str]:
+        assert host == "api.localhost"
+        return ["203.0.113.9"]
+
+    monkeypatch.setattr("praxis_prime.locality.resolve_host", public)
+    base = "http://api.localhost:11434"
+    assert locality(base) == "cloud"
+    assert flags_from_config("ollama", base_url=base).local is False
+    # A flag that was local at load is rechecked at request time and dropped.
+    stale = ProviderFlags(local=True, base_url=base)
+    chain = [ModelRef("ollama", "qwen")]
+    assert filter_chain(chain, [("local",)], {"ollama": stale}) == []
+
+
+def test_concurrent_lookups_share_one_resolver_call():
+    gate = threading.Event()
+    calls: list[str] = []
+
+    def slow(host: str) -> list[str]:
+        calls.append(host)
+        gate.wait(5)
+        return ["127.0.0.1"]
+
+    results: list[str] = []
+
+    def ask() -> None:
+        results.append(classify_host("slow.example", resolver=slow, timeout=0.2))
+
+    workers = [threading.Thread(target=ask) for _ in range(6)]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(5)
+    assert results == ["cloud"] * 6
+    assert calls == ["slow.example"]
+    # The timeout is remembered: the next caller answers cloud without waiting.
+    started = time.monotonic()
+    assert classify_host("slow.example", resolver=slow, timeout=2.0) == "cloud"
+    assert time.monotonic() - started < 0.5
+    assert calls == ["slow.example"]
+    gate.set()
+
+
+def test_failures_are_negative_cached_and_successes_are_not(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(locality_module, "NEGATIVE_TTL", 0.2)
+    failures: list[str] = []
+
+    def broken(host: str) -> list[str]:
+        failures.append(host)
+        raise OSError(host)
+
+    assert classify_host("down.example", resolver=broken) == "cloud"
+    assert classify_host("down.example", resolver=broken) == "cloud"
+    assert failures == ["down.example"]
+    time.sleep(0.3)
+    assert classify_host("down.example", resolver=broken) == "cloud"
+    assert failures == ["down.example", "down.example"]
+
+    hits: list[str] = []
+
+    def loop(host: str) -> list[str]:
+        hits.append(host)
+        return ["127.0.0.1"]
+
+    assert classify_host("loop.example", resolver=loop) == "local"
+    assert classify_host("loop.example", resolver=loop) == "local"
+    assert hits == ["loop.example", "loop.example"]
 
 
 def test_translators_and_link_local_fail_closed():
@@ -327,6 +429,24 @@ def test_hipaa_enforce_follows_ollama_locality(
     else:
         assert providers == []
         assert message.startswith("Blocked by compliance enforce")
+        assert "[models] trusted_inference_hosts" in message
+
+
+def test_compliance_status_points_a_lan_server_at_the_trusted_list(capsys):
+    from praxis_prime.compliance.cli import _print_status
+
+    flags = {
+        "ollama": flags_from_config("ollama", base_url="http://192.168.1.5:11434"),
+        "openai-compatible": flags_from_config(
+            "openai-compatible", base_url="http://10.0.0.7:8000", trusted_hosts=("10.0.0.7",)
+        ),
+        "xai": flags_from_config("xai", base_url="https://api.x.ai/v1"),
+    }
+    _print_status({}, flags, ())
+    out = capsys.readouterr().out
+    assert "192.168.1.5 is on a private network" in out
+    assert "10.0.0.7 is on a private network" not in out
+    assert out.count("trusted_inference_hosts") == 1
 
 
 def test_env_ollama_host_on_a_public_address_is_blocked(tmp_path: Path):
@@ -450,9 +570,10 @@ def test_probe_models_reports_locality(tmp_path: Path):
     assert unspecified["locality"] == "local"
     assert unspecified["loopback"] is False
     assert unspecified["network"] is True
+    # *.localhost is resolved; the test resolver refuses, so it fails closed.
     named = service.probe_models("ollama", "http://foo.localhost:11434")
-    assert named["locality"] == "local"
-    assert named["loopback"] is True
+    assert named["locality"] == "cloud"
+    assert named["loopback"] is False
     failed = service.probe_models("network", "http://down.example:9")
     assert failed["ok"] is False
     assert failed["locality"] == "cloud"
