@@ -114,6 +114,11 @@ def test_names_take_the_most_remote_address():
     assert classify_host("down.example", resolver=broken) == "cloud"
     assert classify_host("empty.example", resolver=lambda host: []) == "cloud"
 
+    def odd(host: str) -> list[str]:
+        raise RuntimeError(host)
+
+    assert classify_host("odd.example", resolver=odd) == "cloud"
+
 
 def test_a_hung_resolver_is_cloud():
     def hang(host: str) -> list[str]:

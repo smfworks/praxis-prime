@@ -101,7 +101,7 @@ def classify_host(
     ``classify_address``. Any other name is resolved. The result is the most
     remote class: cloud beats lan, and lan beats local, so one public
     address makes the host cloud and a mix of loopback and lan is lan.
-    A timeout, ``OSError``, ``UnicodeError``, or no addresses is cloud.
+    A timeout, any resolver error, or no addresses is cloud.
     """
     text = host.strip().lower().rstrip(".")
     if text.startswith("[") and text.endswith("]") and len(text) >= 2:
@@ -119,7 +119,7 @@ def classify_host(
     lookup = resolve_host if resolver is None else resolver
     try:
         found = _invoke(lookup, text, timeout)
-    except (OSError, UnicodeError):
+    except Exception:  # any resolver failure fails closed
         return "cloud"
     if not found:
         return "cloud"
