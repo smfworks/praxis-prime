@@ -58,6 +58,7 @@ _EXACT = frozenset(
         ("GET", "/v1/onboarding/status"),
         ("POST", "/v1/onboarding/detect"),
         ("POST", "/v1/onboarding/probe"),
+        ("POST", "/v1/onboarding/providers"),
         ("POST", "/v1/onboarding/test"),
         ("POST", "/v1/onboarding/save"),
         ("POST", "/v1/onboarding/owner"),
@@ -87,6 +88,7 @@ _FRAME_TYPES = frozenset(
         "onboarding.status",
         "onboarding.detect",
         "onboarding.probe",
+        "onboarding.providers",
         "onboarding.test",
         "onboarding.save",
     }

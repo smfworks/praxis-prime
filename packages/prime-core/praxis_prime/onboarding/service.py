@@ -13,7 +13,12 @@ from urllib.parse import urlsplit
 from praxis_prime.channels.secrets import secret_file, write_secret
 from praxis_prime.onboarding.configio import backup_config, load_document, write_document
 from praxis_prime.onboarding.detect import detect as detect_local
-from praxis_prime.onboarding.messages import BLOCK_CONTEXT, WARN_CONTEXT, cloud_warning
+from praxis_prime.onboarding.messages import (
+    BLOCK_CONTEXT,
+    REGULATED_DIALS,
+    WARN_CONTEXT,
+    cloud_warning,
+)
 from praxis_prime.onboarding.probe import (
     TEST_LIMIT,
     FetchResult,
@@ -24,28 +29,37 @@ from praxis_prime.onboarding.probe import (
     fetch as default_fetch,
 )
 from praxis_prime.onboarding.record import inference_ready, read_record, write_record
+from praxis_prime.onboarding.registry import (
+    CLOUD_BASES,
+    CLOUD_PROVIDERS,
+    KEY_NAMES,
+    LOCAL_PROVIDERS,
+    PROVIDERS,
+)
+from praxis_prime.onboarding.registry import (
+    REQUIRED_KEY as _REQUIRED_KEY,
+)
+from praxis_prime.onboarding.registry import (
+    by_id as registry_by_id,
+)
+from praxis_prime.onboarding.registry import (
+    lane_for as registry_lane_for,
+)
+from praxis_prime.onboarding.registry import (
+    models_path as registry_models_path,
+)
+from praxis_prime.onboarding.registry import (
+    public_provider as registry_public_provider,
+)
+from praxis_prime.onboarding.registry import (
+    resolve_auth as registry_resolve_auth,
+)
+from praxis_prime.onboarding.registry import (
+    storage_id as registry_storage_id,
+)
 from praxis_prime.policy.dials import dial_ids
 from praxis_prime.router.settings import load_settings
 from praxis_prime.router.types import canonical_spec, parse_model_spec
-
-CLOUD_PROVIDERS = ("openai", "anthropic", "xai", "openai-compatible")
-LOCAL_PROVIDERS = ("ollama", "llamacpp", "vllm", "lmstudio", "openai-compatible")
-KEY_NAMES = {
-    "openai": "PRAXIS_PRIME_OPENAI_API_KEY",
-    "anthropic": "PRAXIS_PRIME_ANTHROPIC_API_KEY",
-    "xai": "PRAXIS_PRIME_XAI_API_KEY",
-    "openai-compatible": "PRAXIS_PRIME_OPENAI_COMPATIBLE_API_KEY",
-    "llamacpp": "PRAXIS_PRIME_OPENAI_COMPATIBLE_API_KEY",
-    "vllm": "PRAXIS_PRIME_OPENAI_COMPATIBLE_API_KEY",
-    "lmstudio": "PRAXIS_PRIME_OPENAI_COMPATIBLE_API_KEY",
-    "ollama": "PRAXIS_PRIME_OLLAMA_API_KEY",
-}
-CLOUD_BASES = {
-    "openai": "https://api.openai.com/v1",
-    "anthropic": "https://api.anthropic.com",
-    "xai": "https://api.x.ai/v1",
-}
-_REQUIRED_KEY = {"openai", "anthropic", "xai"}
 
 Fetcher = Callable[..., FetchResult]
 AuditFn = Callable[[str, str, dict[str, object]], None]
@@ -55,6 +69,16 @@ class OnboardingError(Exception):
     def __init__(self, message: str, *, code: str = "error") -> None:
         self.code = code
         super().__init__(message)
+
+
+_OAUTH_MESSAGE = "Subscription sign-in is coming in a later release."
+
+
+def reject_oauth(auth_method: str) -> None:
+    """Refuse subscription sign-in. No token is stored and no step-up is spent."""
+    text = auth_method.strip().lower().replace("-", "_")
+    if text == "oauth":
+        raise OnboardingError(_OAUTH_MESSAGE, code="oauth_unavailable")
 
 
 @dataclass
@@ -70,6 +94,7 @@ class Selection:
     tls_fingerprint: str = ""
     replace: bool = False
     actor: str = ""
+    auth_method: str = ""
 
 
 @dataclass
@@ -146,6 +171,48 @@ class OnboardingService:
             "fingerprint": result.fingerprint,
         }
 
+    def providers_view(self) -> dict[str, object]:
+        """Registry plus detection. Env key names only; values are never copied."""
+        detection = self.detect()
+        settings = self._settings()
+        dials = settings.dials
+        regulated = any(str(dials.get(dial_id, "")) == "enforce" for dial_id in REGULATED_DIALS)
+        return {
+            "providers": [registry_public_provider(entry) for entry in PROVIDERS],
+            "detection": {
+                "servers": detection.get("servers", []),
+                "envKeys": detection.get("envKeys", []),
+                "hardware": detection.get("hardware", []),
+            },
+            "policy": {
+                "allowProviders": list(settings.allow_providers),
+                "regulatedEnforce": regulated,
+                "subscriptionOauthEnabled": False,
+                "cloudWarning": cloud_warning(dials),
+            },
+        }
+
+    def probe_models(
+        self,
+        provider: str,
+        base_url: str,
+        *,
+        pin: str = "",
+    ) -> dict[str, object]:
+        """Probe ``<normalized base><model path>`` and report network flags.
+
+        The flags let the page show a network note without parsing a scheme.
+        """
+        base = normalize_server_base(base_url)
+        path = registry_models_path(provider)
+        if not path.startswith("/"):
+            path = "/" + path
+        result = self.probe(base.rstrip("/") + path, pin=pin, capture_fingerprint=not pin)
+        result["baseUrl"] = base
+        result.update(_probe_flags(base))
+        result.setdefault("models", [])
+        return result
+
     def test(
         self,
         *,
@@ -203,33 +270,40 @@ class OnboardingService:
         }
 
     def save(self, selection: Selection) -> dict[str, object]:
-        lane = selection.lane.strip().lower()
-        if lane not in {"local", "lan", "cloud", "skip"}:
+        reject_oauth(selection.auth_method)
+        raw_lane = selection.lane.strip().lower()
+        if raw_lane not in {"", "local", "lan", "cloud", "skip"}:
             raise OnboardingError("lane must be local, lan, cloud, or skip", code="usage")
-        if lane == "skip":
+        prepared = self._prepared_selection(selection)
+        if prepared is None:
+            raise OnboardingError("lane must be local, lan, cloud, or skip", code="usage")
+        if prepared.lane == "skip":
             return self._skip(selection)
-        provider = selection.provider.strip().lower()
-        model = selection.model.strip()
-        self._check_allowlist(provider)
+        wizard = selection.provider.strip().lower()
+        provider = prepared.provider
+        model = prepared.model.strip()
+        lane = prepared.lane
+        shown = wizard or provider
+        self._check_allowlist(wizard or provider)
         if lane == "cloud" and provider not in CLOUD_PROVIDERS:
-            raise OnboardingError(f"{provider} is not a cloud preset", code="usage")
+            raise OnboardingError(f"{shown} is not a cloud preset", code="usage")
         if lane in {"local", "lan"} and provider not in LOCAL_PROVIDERS:
-            raise OnboardingError(f"{provider} is not a local provider", code="usage")
+            raise OnboardingError(f"{shown} is not a local provider", code="usage")
         if not model:
             raise OnboardingError("a primary model is required", code="usage")
         spec = f"{provider}:{model}"
-        self._refuse_clobber(selection)
-        base = _base_url(provider, selection.base_url, lane)
+        self._refuse_clobber(prepared)
+        base = _base_url(provider, prepared.base_url, lane)
         tested = self.test(
             provider=provider,
             model=model,
             base_url=base,
             lane=lane,
-            api_key=selection.api_key,
-            pin=selection.tls_fingerprint,
+            api_key=prepared.api_key,
+            pin=prepared.tls_fingerprint,
         )
-        roles = self._optional_roles(selection, base, lane, tested["warnings"])
-        self._persist(selection, provider, model, base, lane, tested, roles)
+        roles = self._optional_roles(prepared, base, lane, tested["warnings"])
+        self._persist(prepared, provider, model, base, lane, tested, roles)
         self._audit(
             "provider.configured",
             "provider configured",
@@ -240,7 +314,7 @@ class OnboardingService:
                 "lane": lane,
                 "host": _host_of(base),
                 "tested_at": _now(),
-                "actor": selection.actor,
+                "actor": prepared.actor,
             },
         )
         return {"ok": True, "inferenceReady": True, "spec": spec, "warnings": tested["warnings"]}
@@ -295,24 +369,69 @@ class OnboardingService:
         self._audit("provider.configured", "provider skipped", {"lane": "skip", "ready": False})
         return {"ok": True, "inferenceReady": False, "skipped": True}
 
+    def _prepared_selection(self, selection: Selection) -> Selection | None:
+        """Fold wizard ids and fill a missing lane. Invalid lanes return None.
+
+        ``network`` and ``openai-compatible-cloud`` become the shared
+        ``openai-compatible`` adapter before the spec is compared or saved.
+        The lane is derived from the wizard id, before that fold.
+        """
+        reject_oauth(selection.auth_method)
+        lane = selection.lane.strip().lower()
+        provider_text = selection.provider.strip().lower()
+        if lane == "skip" or provider_text == "skip":
+            return Selection(
+                lane="skip",
+                provider=provider_text,
+                replace=selection.replace,
+                actor=selection.actor,
+            )
+        if lane and lane not in {"local", "lan", "cloud"}:
+            return None
+        entry = registry_by_id(provider_text)
+        wizard = entry.id if entry is not None else provider_text
+        stored = registry_storage_id(wizard) if wizard else ""
+        if not lane:
+            lane = registry_lane_for(wizard or stored, selection.base_url)
+        auth = ""
+        if wizard:
+            auth = registry_resolve_auth(wizard, selection.auth_method, lane)
+        return Selection(
+            lane=lane,
+            provider=stored,
+            model=selection.model,
+            utility_model=selection.utility_model,
+            vision_model=selection.vision_model,
+            judge_model=selection.judge_model,
+            base_url=selection.base_url,
+            api_key=selection.api_key,
+            tls_fingerprint=selection.tls_fingerprint,
+            replace=selection.replace,
+            actor=selection.actor,
+            auth_method=auth,
+        )
+
     def requires_replace(self, selection: Selection) -> bool:
         """True when this save would change a configured provider, endpoint, or key.
 
         The same spec at a new base URL counts. A model-only change counts
         too. The caller still decides whether a step-up is required.
         """
-        lane = selection.lane.strip().lower()
+        reject_oauth(selection.auth_method)
+        prepared = self._prepared_selection(selection)
+        if prepared is None:
+            return False
         current = self._settings().model_spec.strip()
-        if lane == "skip":
+        if prepared.lane == "skip":
             return bool(current)
-        provider = selection.provider.strip().lower()
-        model = selection.model.strip()
+        provider = prepared.provider
+        model = prepared.model.strip()
         if not provider or not model:
             return False
         spec = f"{provider}:{model}"
         changing = bool(current) and not _same_model_spec(current, spec)
-        return changing or self._replacing_key(provider, selection) or self._endpoint_changed(
-            selection
+        return (
+            changing or self._replacing_key(provider, prepared) or self._endpoint_changed(prepared)
         )
 
     def needs_step_up(self, selection: Selection) -> bool:
@@ -321,19 +440,22 @@ class OnboardingService:
         A model-only change does not. Changing the provider, its base URL,
         or a stored key does. The CLI does not call this.
         """
-        lane = selection.lane.strip().lower()
-        provider = selection.provider.strip().lower()
+        reject_oauth(selection.auth_method)
+        prepared = self._prepared_selection(selection)
+        if prepared is None:
+            return False
+        provider = prepared.provider
         current = self._settings().model_spec.strip()
-        if lane == "skip":
+        if prepared.lane == "skip":
             return bool(current)
-        if self._replacing_key(provider, selection):
+        if self._replacing_key(provider, prepared):
             return True
         if not current:
             return False
         current_provider = current.split(":", 1)[0]
         if provider and _canonical_provider(provider) != _canonical_provider(current_provider):
             return True
-        return self._endpoint_changed(selection)
+        return self._endpoint_changed(prepared)
 
     def _replacing_key(self, provider: str, selection: Selection) -> bool:
         if not selection.api_key:
@@ -438,31 +560,31 @@ class OnboardingService:
         backup_config(path)
         write_document(path, document, previous=previous)
         locality = _locality(lane, base)
-        write_record(
-            self.config_dir,
-            {
-                "ready": True,
-                "spec": _ready_spec(provider, model),
-                "provider": provider,
-                "model": model,
-                "lane": lane,
-                "locality": locality,
-                "base_url": base,
-                "tested_at": _now(),
-                "context_length": tested.get("contextLength"),
-                "tool_call": True,
-                "warnings": list(tested.get("warnings") or []),
-                "roles": {
-                    "primary": {
-                        "spec": _ready_spec(provider, model),
-                        "tested_at": _now(),
-                        "passed": True,
-                    },
-                    **roles,
+        record: dict[str, object] = {
+            "ready": True,
+            "spec": _ready_spec(provider, model),
+            "provider": provider,
+            "model": model,
+            "lane": lane,
+            "locality": locality,
+            "base_url": base,
+            "tested_at": _now(),
+            "context_length": tested.get("contextLength"),
+            "tool_call": True,
+            "warnings": list(tested.get("warnings") or []),
+            "roles": {
+                "primary": {
+                    "spec": _ready_spec(provider, model),
+                    "tested_at": _now(),
+                    "passed": True,
                 },
-                "fallbacks": [],
+                **roles,
             },
-        )
+            "fallbacks": [],
+        }
+        if selection.auth_method:
+            record["auth_method"] = selection.auth_method
+        write_record(self.config_dir, record)
 
     def _optional_roles(
         self,
@@ -503,11 +625,15 @@ class OnboardingService:
 
     def _check_allowlist(self, provider: str) -> None:
         allowed = self._settings().allow_providers
-        if allowed and provider not in allowed:
-            raise OnboardingError(
-                f"{provider} is not on the admin provider allowlist",
-                code="allowlist",
-            )
+        if not allowed:
+            return
+        stored = registry_storage_id(provider)
+        if provider in allowed or stored in allowed:
+            return
+        raise OnboardingError(
+            f"{provider} is not on the admin provider allowlist",
+            code="allowlist",
+        )
 
     def _settings(self):
         return load_settings(self.env, config_path=self.config_dir / "config.toml")
@@ -680,9 +806,7 @@ class OnboardingService:
         if self.audit is None:
             return
         safe = {
-            key: value
-            for key, value in payload.items()
-            if "key" not in key and "secret" not in key
+            key: value for key, value in payload.items() if "key" not in key and "secret" not in key
         }
         if self.actor and "actor" not in safe:
             safe["actor"] = self.actor
@@ -734,23 +858,74 @@ def _canonical_provider(provider: str) -> str:
         return text.split(":", 1)[0]
 
 
-def _base_url(provider: str, base_url: str, lane: str) -> str:
+def normalize_server_base(base_url: str) -> str:
+    """Turn ``host:port`` or a server URL into a base with no trailing ``/v1``.
+
+    Plain http is allowed. Public hosts are not refused here; the probe keeps
+    its own address rules. The result is idempotent.
+    """
+    text = base_url.strip()
+    if not text:
+        raise OnboardingError("Enter a host and port, or a base URL.", code="usage")
+    if "://" not in text:
+        text = "http://" + text
+    parts = urlsplit(text)
+    scheme = parts.scheme.lower()
+    if scheme not in {"http", "https"}:
+        raise OnboardingError("Only http and https URLs are allowed.", code="usage")
+    if parts.username or parts.password or "@" in parts.netloc:
+        raise OnboardingError("Credentials in the URL are not allowed.", code="usage")
+    if parts.query or parts.fragment:
+        raise OnboardingError("The URL cannot include a query or a fragment.", code="usage")
+    host = parts.hostname or ""
+    if not host:
+        raise OnboardingError("The URL needs a host.", code="usage")
+    try:
+        port = parts.port
+    except ValueError as exc:
+        raise OnboardingError("The port must be between 1 and 65535.", code="usage") from exc
+    if port is not None and not 1 <= port <= 65535:
+        raise OnboardingError("The port must be between 1 and 65535.", code="usage")
+    path = parts.path.rstrip("/")
+    if path.endswith("/v1"):
+        path = path[: -len("/v1")].rstrip("/")
+    if ":" in host:
+        host = f"[{host}]"
+    netloc = host if port is None else f"{host}:{port}"
+    return f"{scheme}://{netloc}{path}"
+
+
+def _legacy_user_base(base_url: str) -> str:
+    """User override for a fixed cloud preset. A trailing ``/v1`` stays."""
     text = base_url.strip().rstrip("/")
+    if "://" not in text:
+        text = "http://" + text
+    return text
+
+
+def _base_url(provider: str, base_url: str, lane: str) -> str:
+    text = base_url.strip()
+    provider_id = provider.strip().lower()
     if text:
-        if "://" not in text:
-            text = "http://" + text
-        return text
-    if provider in CLOUD_BASES and lane in {"cloud", ""}:
-        return CLOUD_BASES[provider]
-    defaults = {
-        "ollama": "http://127.0.0.1:11434",
-        "llamacpp": "http://127.0.0.1:8080",
-        "vllm": "http://127.0.0.1:8000",
-        "lmstudio": "http://127.0.0.1:1234",
-    }
-    if provider in defaults:
-        return defaults[provider]
+        if provider_id in CLOUD_BASES:
+            return _legacy_user_base(text)
+        return normalize_server_base(text)
+    if provider_id in CLOUD_BASES and lane in {"cloud", ""}:
+        return CLOUD_BASES[provider_id]
+    entry = registry_by_id(provider_id)
+    if entry is not None and entry.default_base_url:
+        return entry.default_base_url
     raise OnboardingError("a base URL is required for this provider", code="usage")
+
+
+def _probe_flags(base: str) -> dict[str, bool]:
+    host = _host_of(base)
+    loopback = host in {"127.0.0.1", "localhost", "::1"} or host.startswith("127.")
+    return {
+        "network": bool(host) and not loopback,
+        "loopback": loopback,
+        "https": base.lower().startswith("https://"),
+    }
 
 
 def _normalize_base(url: str) -> str:
