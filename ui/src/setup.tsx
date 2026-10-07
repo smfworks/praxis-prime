@@ -137,6 +137,12 @@ function readProvider(item: Record<string, unknown>): ProviderInfo {
   };
 }
 
+function localityOf(body: Record<string, unknown>): string {
+  const value = body.locality;
+  if (value === "local" || value === "lan" || value === "cloud") return value;
+  return "";
+}
+
 function stringsOf(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   return value.filter((item): item is string => typeof item === "string");
@@ -173,6 +179,7 @@ export function SetupWizard({
   const [probed, setProbed] = useState<string[] | null>(null);
   const [probeNetwork, setProbeNetwork] = useState(false);
   const [probeHttps, setProbeHttps] = useState(false);
+  const [probeLocality, setProbeLocality] = useState("");
   const [typed, setTyped] = useState(false);
   const [utility, setUtility] = useState("");
   const [vision, setVision] = useState("");
@@ -282,6 +289,7 @@ export function SetupWizard({
         setProbed(names);
         setProbeNetwork(body.network === true);
         setProbeHttps(body.https === true);
+        setProbeLocality(localityOf(body));
         if (names.length === 1) setModel((current) => current || names[0]);
       } catch {
         if (live) setProbed([]);
@@ -359,6 +367,7 @@ export function SetupWizard({
     setTls("");
     setProbeNetwork(false);
     setProbeHttps(false);
+    setProbeLocality("");
     setKeySource(envNameFor(next, catalogRef.current.envKeys) ? "env" : "paste");
     setReviewSaved(false);
   }
@@ -385,6 +394,7 @@ export function SetupWizard({
       setProbed(names);
       setProbeNetwork(body.network === true);
       setProbeHttps(body.https === true);
+      setProbeLocality(localityOf(body));
       if (body.ok === false) {
         setNotice(textOf(body.error) || "The server did not return a model list.");
         return;
@@ -519,6 +529,16 @@ export function SetupWizard({
 
   const models = probed ?? (entry?.section === "cloud" ? entry.curated : []);
   const root = mode === "first" ? "welcome" : "provider";
+  const addressWarning =
+    entry && entry.section !== "cloud" && probeLocality === "cloud" ? CLOUD_WARNING : "";
+
+  function changeBaseUrl(value: string) {
+    setBaseUrl(value);
+    setProbed(null);
+    setProbeNetwork(false);
+    setProbeHttps(false);
+    setProbeLocality("");
+  }
 
   return (
     <div className="mx-auto max-w-xl px-4 py-10">
@@ -642,7 +662,8 @@ export function SetupWizard({
           keySource={keySource}
           network={probeNetwork}
           https={probeHttps}
-          onBaseUrl={setBaseUrl}
+          cloudWarning={addressWarning}
+          onBaseUrl={changeBaseUrl}
           onApiKey={setApiKey}
           onAuth={setAuth}
           onTls={setTls}
@@ -667,6 +688,7 @@ export function SetupWizard({
         <ModelStep
           models={models}
           curated={entry?.section === "cloud" && (entry?.curated.length ?? 0) > 0}
+          cloudWarning={addressWarning}
           model={model}
           utility={utility}
           vision={vision}

@@ -14,6 +14,7 @@ export function ConnectStep({
   keySource,
   network,
   https,
+  cloudWarning,
   onBaseUrl,
   onApiKey,
   onAuth,
@@ -32,6 +33,7 @@ export function ConnectStep({
   keySource: "env" | "paste";
   network: boolean;
   https: boolean;
+  cloudWarning: string;
   onBaseUrl: (value: string) => void;
   onApiKey: (value: string) => void;
   onAuth: (value: string) => void;
@@ -49,6 +51,7 @@ export function ConnectStep({
     <section className="grid gap-3">
       <h1 className="text-2xl font-semibold">Connect</h1>
       <p>{entry.description}</p>
+      {cloudWarning ? <span className="mt-1 block text-sm">{cloudWarning}</span> : null}
       {entry.id === "xai" ? (
         <div className="grid gap-2">
           <button type="button" className="rounded-md border border-line p-3 text-left" disabled>

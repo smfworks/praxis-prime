@@ -59,6 +59,7 @@ class Settings:
     utility_spec: str = ""
     vision_spec: str = ""
     judge_spec: str = ""
+    trusted_inference_hosts: tuple[str, ...] = ()
 
     def __repr__(self) -> str:
         return (
@@ -168,10 +169,21 @@ def load_settings(
     xai_url = normalize_base(
         _first(environ.get("PRAXIS_PRIME_XAI_BASE_URL"), "https://api.x.ai/v1")
     )
+    # Addendum §2 egress policy: a lan host is on-prem for compliance only
+    # when it is listed here. A public address is never local via this list.
+    trusted_inference_hosts = _trusted_hosts(models.get("trusted_inference_hosts"))
     provider_flags = {
-        "ollama": flags_from_config("ollama", ollama_cfg, base_url=ollama_host),
+        "ollama": flags_from_config(
+            "ollama",
+            ollama_cfg,
+            base_url=ollama_host,
+            trusted_hosts=trusted_inference_hosts,
+        ),
         "openai-compatible": flags_from_config(
-            "openai-compatible", compat_cfg, base_url=compat_url
+            "openai-compatible",
+            compat_cfg,
+            base_url=compat_url,
+            trusted_hosts=trusted_inference_hosts,
         ),
         "openai": flags_from_config("openai", _table(providers.get("openai")), base_url=openai_url),
         "anthropic": flags_from_config(
@@ -231,6 +243,7 @@ def load_settings(
         utility_spec=_str(models.get("utility")).strip(),
         vision_spec=_str(models.get("vision")).strip(),
         judge_spec=_judge_spec(file_data),
+        trusted_inference_hosts=trusted_inference_hosts,
     )
 
 
@@ -299,6 +312,29 @@ def _judge_spec(file_data: Mapping[str, object]) -> str:
     decide = _table(file_data.get("decide"))
     models = _table(decide.get("models"))
     return _str(models.get("tier2")).strip()
+
+
+def _trusted_hosts(value: object) -> tuple[str, ...]:
+    """Hostnames from ``[models] trusted_inference_hosts``.
+
+    Non-strings and blanks are dropped. Comparison is case-insensitive.
+    Brackets around an IPv6 literal are removed.
+    """
+    if not isinstance(value, list):
+        return ()
+    found: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            continue
+        text = item.strip().lower().rstrip(".")
+        if text.startswith("[") and text.endswith("]") and len(text) >= 2:
+            text = text[1:-1].strip()
+        if "%" in text:
+            text = text.split("%", 1)[0]
+        if not text or text in found:
+            continue
+        found.append(text)
+    return tuple(found)
 
 
 def _table(value: object) -> dict[str, object]:

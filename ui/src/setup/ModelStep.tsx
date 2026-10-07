@@ -3,6 +3,7 @@ import type { FormEvent } from "react";
 export function ModelStep({
   models,
   curated,
+  cloudWarning,
   model,
   utility,
   vision,
@@ -26,6 +27,7 @@ export function ModelStep({
 }: {
   models: string[];
   curated: boolean;
+  cloudWarning: string;
   model: string;
   utility: string;
   vision: string;
@@ -51,6 +53,7 @@ export function ModelStep({
   return (
     <form className="grid gap-3" onSubmit={onSubmit}>
       <h1 className="text-2xl font-semibold">Model</h1>
+      {cloudWarning ? <span className="mt-1 block text-sm">{cloudWarning}</span> : null}
       {curated ? <p>Suggested models</p> : null}
       {models.length === 0 ? (
         <p>The server did not return a model list. Type a model id.</p>

@@ -113,16 +113,19 @@ def constrain_chain(
     if kept:
         return RouteResult(tuple(kept), "")
     classes = ", ".join(verdict.data_classes) or "protected data"
-    needed = " and ".join(
-        "(" + " or ".join(group) + ")" for group in verdict.route_groups
-    )
+    needed = " and ".join("(" + " or ".join(group) + ")" for group in verdict.route_groups)
     message = (
         f"Blocked by compliance enforce: {classes} detected. "
         f"No provider in the chain is flagged {needed}. "
         "Cloud egress stays denied until the owner config flags an allowed provider "
         "(local, baa, eu_region, or zero_retention). "
-        "This is a starter policy, not legal advice."
     )
+    if any("local" in group for group in verdict.route_groups):
+        message += (
+            "A model server on a private network counts as local only when its host "
+            "is listed in [models] trusted_inference_hosts. "
+        )
+    message += "This is a starter policy, not legal advice."
     return RouteResult((), message)
 
 

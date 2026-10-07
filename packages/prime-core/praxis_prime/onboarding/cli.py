@@ -11,8 +11,10 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from praxis_prime.accounts.db import AccountError, AccountStore
+from praxis_prime.locality import host_of
 from praxis_prime.onboarding.messages import cloud_warning
-from praxis_prime.onboarding.registry import NO_GPU_NOTE, NO_MATCH, PROVIDERS, ProviderEntry
+from praxis_prime.onboarding.registry import NO_GPU_NOTE, NO_MATCH, PROVIDERS, ProviderEntry, by_id
+from praxis_prime.onboarding.registry import flow_lane_for as _flow_lane_for
 from praxis_prime.onboarding.registry import lane_for as _lane_for
 from praxis_prime.onboarding.service import (
     OnboardingError,
@@ -144,7 +146,10 @@ def _scripted(args, service: OnboardingService, stdin, stdout, env: Mapping[str,
     key = _scripted_key(args, stdin, stdout, env)
     if key is None:
         return 2
-    lane = args.lane or _lane_for(provider, args.base_url)
+    derived = _lane_for(provider, args.base_url)
+    lane = args.lane or derived
+    if not args.lane:
+        lane = _validation_lane(provider, args.base_url, derived)
     result = service.save(
         Selection(
             lane=lane,
@@ -163,6 +168,7 @@ def _scripted(args, service: OnboardingService, stdin, stdout, env: Mapping[str,
     stdout.write(f"Inference ready ({result.get('spec', '')}).\n")
     for warning in result.get("warnings") or []:
         stdout.write(f"warning: {warning}\n")
+    _note_public_local(stdout, provider, args.base_url, result)
     return 0
 
 
@@ -583,7 +589,7 @@ def _save_interactive(
     auth: str,
     replace: bool,
 ) -> None:
-    service.save(
+    result = service.save(
         Selection(
             lane="",
             provider=entry.id,
@@ -596,6 +602,37 @@ def _save_interactive(
             replace=replace,
             auth_method=auth,
         )
+    )
+    _note_public_local(stdout, entry.id, base, result)
+
+
+def _validation_lane(provider: str, base_url: str, derived: str) -> str:
+    """Flow lane for a save when the user did not pass ``--lane``.
+
+    ``lane_for`` is address-based, so a public Local-section host is cloud.
+    Validation still uses the wizard lane, or the save would demand a cloud key.
+    """
+    if derived != "cloud":
+        return derived
+    entry = by_id(provider)
+    if entry is not None and entry.section == "cloud":
+        return derived
+    if provider.strip().lower() in {"openai", "anthropic", "xai"}:
+        return derived
+    return _flow_lane_for(provider, base_url)
+
+
+def _note_public_local(stdout, provider: str, base_url: str, result: Mapping[str, object]) -> None:
+    """One line when a Local-section save points at a public host."""
+    if result.get("locality") != "cloud":
+        return
+    entry = by_id(provider)
+    if entry is not None and entry.section == "cloud":
+        return
+    host = host_of(base_url) or "that host"
+    stdout.write(
+        f"warning: {host} is not on this machine or a private network; "
+        "prompts will leave this network.\n"
     )
 
 

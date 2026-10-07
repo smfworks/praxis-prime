@@ -3,7 +3,7 @@ import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { SetupWizard } from "../setup";
+import { CLOUD_WARNING, SetupWizard } from "../setup";
 import { NO_GPU_NOTE } from "./types";
 
 const { api } = vi.hoisted(() => ({ api: vi.fn() }));
@@ -259,5 +259,56 @@ describe("provider picker", () => {
       "/v1/onboarding/probe",
       expect.objectContaining({ provider: "ollama", baseUrl: "192.168.1.50:8000" }),
     );
+  });
+
+  it("warns when a network server probes a public host and stays quiet for a LAN host", async () => {
+    api.mockImplementation(async (methodName: string, path: string, body?: Record<string, unknown>) => {
+      if (path === "/v1/onboarding/status") return { provider: "", dials: {}, missing: [] };
+      if (path === "/v1/onboarding/providers") return CATALOG;
+      if (path === "/v1/onboarding/probe") {
+        const base = String(body?.baseUrl ?? "");
+        if (base.includes("203.0.113")) {
+          return {
+            ok: false,
+            error: "down",
+            models: [],
+            network: true,
+            https: false,
+            loopback: false,
+            locality: "cloud",
+          };
+        }
+        return {
+          ok: true,
+          models: GLM,
+          network: true,
+          https: false,
+          loopback: false,
+          locality: "lan",
+        };
+      }
+      return {};
+    });
+    const user = userEvent.setup();
+    renderWizard();
+    await user.click(
+      await screen.findByRole("option", { name: "Network server (OpenAI-compatible)" }),
+    );
+    const base = screen.getByLabelText("Base URL");
+    await user.type(base, "http://192.168.1.50:8000");
+    await user.click(screen.getByRole("button", { name: "Check connection" }));
+    expect(await screen.findByText("Connected.")).toBeInTheDocument();
+    expect(screen.queryByText(CLOUD_WARNING)).not.toBeInTheDocument();
+
+    await user.clear(base);
+    await user.type(base, "http://203.0.113.10:8000");
+    expect(screen.queryByText(CLOUD_WARNING)).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Check connection" }));
+    expect(await screen.findByText(CLOUD_WARNING)).toBeInTheDocument();
+    expect(screen.getByText(/down/)).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    expect(await screen.findByRole("heading", { name: "Model" })).toBeInTheDocument();
+    expect(screen.getByText(CLOUD_WARNING)).toBeInTheDocument();
   });
 });

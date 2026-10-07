@@ -13,6 +13,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Literal
 
+from praxis_prime.locality import host_of, locality
+
 AuthId = Literal["none", "api_key", "oauth"]
 Section = Literal["local", "cloud"]
 Parser = Literal["openai", "ollama"]
@@ -486,26 +488,52 @@ def key_env_names() -> tuple[str, ...]:
 
 
 def lane_for(provider: str, base_url: str) -> str:
-    """Lane derived from the provider section and the base host.
+    """Recorded lane from the provider section and the resolved address.
 
-    Cloud-section entries are ``cloud``. Any other host outside loopback is
-    ``lan``. An empty host stays ``local``. This matches the pre-picker
-    ``_lane_for`` results for every provider id that existed then.
+    Cloud-section entries, and ``openai`` / ``anthropic`` / ``xai``, are
+    ``cloud`` and are not resolved. Any other blank base uses the entry's
+    default URL. Still blank stays ``local``. Otherwise the lane is
+    ``locality`` of that URL: a public host is ``cloud``, RFC1918, CGNAT,
+    and IPv6 ULA are ``lan``, and loopback (including ``[::1]``) is ``local``.
     """
     entry = by_id(provider)
     if entry is not None and entry.section == "cloud":
         return "cloud"
     if provider in {"openai", "anthropic", "xai"}:
         return "cloud"
-    host = _lane_host(base_url)
+    text = base_url.strip()
+    if not text and entry is not None:
+        text = entry.default_base_url
+    if not text:
+        return "local"
+    return locality(text)
+
+
+def flow_lane_for(provider: str, base_url: str) -> str:
+    """Wizard lane used to validate a save. Not the recorded locality.
+
+    Cloud-section entries are ``cloud``. Any other non-loopback host is
+    ``lan``. An empty host stays ``local``. A public Local-section host
+    stays on this lane so saving it does not grow a cloud key requirement.
+    The record then stores ``lane_for`` instead.
+    """
+    entry = by_id(provider)
+    if entry is not None and entry.section == "cloud":
+        return "cloud"
+    if provider.strip().lower() in {"openai", "anthropic", "xai"}:
+        return "cloud"
+    text = base_url.strip()
+    if not text and entry is not None:
+        text = entry.default_base_url
+    host = host_of(text)
     if host and host not in _LOOPBACK:
         return "lan"
     return "local"
 
 
 def _lane_host(base_url: str) -> str:
-    """Host split used by the historical lane helper."""
-    return base_url.split("://", 1)[-1].split("/", 1)[0].split(":")[0].lower()
+    """Host of a base URL. Bracketed IPv6 stays intact (``[::1]`` is ``::1``)."""
+    return host_of(base_url)
 
 
 def curated_models(provider: str) -> tuple[str, ...]:
