@@ -124,6 +124,18 @@ Probes and the live test use short timeouts, a size cap, and no redirects. Useri
 
 API keys are written to the secrets file (mode 0600) under names such as `PRAXIS_PRIME_OPENAI_API_KEY`. They are not written to `config.toml`, not returned by the API, and not put in audit payloads. Provider keys that the router already inherits stay available to workers, which is the existing design. OS keychain storage and age encryption are not in this milestone. `secrets.env` is the store.
 
+## Provider locality
+
+A provider base URL is classified as `local`, `lan`, or `cloud`.
+
+Loopback (`127.0.0.0/8`, `::1`) and the unspecified addresses (`0.0.0.0`, `::`) are `local`. A connect to an unspecified address is delivered to this host, which is how a bind string such as `OLLAMA_HOST=0.0.0.0:11434` is used. RFC 1918 (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`), carrier-grade NAT (`100.64.0.0/10`), and IPv6 unique local addresses (`fc00::/7`) are `lan`. Link-local (`169.254.0.0/16`, `fe80::/10`, including the metadata address `169.254.169.254`), 6to4 (`2002::/16`), NAT64 (`64:ff9b::/96`), IPv4-compatible IPv6, and every other address are `cloud`. The probe already refuses link-local targets.
+
+A hostname is resolved to every A and AAAA address. The host takes the most remote class, so one public address makes it `cloud`, and a mix of loopback and LAN is `lan`. `localhost` and names ending in `.localhost` are `local` and are not resolved. An empty host, a timeout, a resolver error, or no addresses is `cloud`.
+
+That class is stored on the setup record, returned by the model probe (the setup page warns when a Local-section server is `cloud`), and used as the default for the compliance `local` flag. Ollama and the other local-section adapters are local by default only on loopback, including an unspecified bind address. A LAN server counts as on-prem for an enforce dial when its host is listed in `[models] trusted_inference_hosts`. The match is the host, compared case-insensitively. A listed host that classifies as `cloud` stays non-local. `local = true` under `[models.providers.<name>]` is an owner override and wins.
+
+Classification runs when settings load (daemon start, and again when settings reload after a save) and again on each request that an enforce dial pins to `local`, when that flag came from the address and the base URL is a name. An IP literal is not looked up again. DNS can still change between that check and the socket the HTTP client opens. A strict deployment should use an IP-literal base URL, or list a static name in `trusted_inference_hosts` and pin that name outside the public resolver. Results are not cached.
+
 ## Passkeys and TOTP
 
 Sign-in factors are local. Nothing in this path calls a hosted WebAuthn service or an identity provider.

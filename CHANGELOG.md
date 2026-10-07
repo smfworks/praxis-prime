@@ -12,6 +12,10 @@ bodies) and from the tree. Dates are omitted because nothing has been released.
 
 What is on `main`.
 
+### Security
+
+- Provider locality follows the address ([#92](https://github.com/smfworks/praxis-prime/issues/92)). A public Ollama or OpenAI-compatible host is recorded as `cloud` and is not `local` for an enforce dial. Loopback stays local. A LAN host counts as on-prem when it is listed in `[models] trusted_inference_hosts`, or when the owner sets `local = true`.
+
 ### Added
 
 - Setup asks you to choose a provider from a Local and Cloud list, with Back and Skip, and can point at an OpenAI-compatible model server on your network.

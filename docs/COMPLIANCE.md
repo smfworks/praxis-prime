@@ -49,7 +49,7 @@ Bundled TOML lives in `packs/compliance` and is shipped inside the wheel. The sa
 
 Per-pack notes are in [docs/packs](packs/).
 
-Provider flags are `local`, `baa`, `eu_region`, and `zero_retention`, under `[models.providers.<name>]`. Ollama is local. An OpenAI-compatible base URL on `127.0.0.1`, `localhost`, or `::1` is local. Other providers are not, until the owner sets a flag. Flags are claims the owner records. The pack does not verify a BAA or a region.
+Provider flags are `local`, `baa`, `eu_region`, and `zero_retention`, under `[models.providers.<name>]`. Ollama is local without a flag when its host is loopback. An OpenAI-compatible base URL is local on loopback, and on a LAN host only when that host is listed in `[models] trusted_inference_hosts`. Other providers are not local until the owner sets a flag. An explicit `local = true` overrides the address check. Flags are claims the owner records. The pack does not verify a BAA or a region.
 
 If enforce needs a flagged provider and none is in the chain, the model call is blocked and the reason names the data class and the missing flags.
 

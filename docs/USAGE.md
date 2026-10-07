@@ -466,7 +466,7 @@ praxis-prime breach list
 
 `monitor` writes an audit warning and does not block. `enforce` may block, ask, redact, or send a protected prompt only to a provider you flagged `local`, `baa`, or `eu_region`. If none of those providers is configured, the model call stops with an explanation. A skill, hook, MCP server, or Decision Engine answer cannot turn enforce off.
 
-Provider flags live under `[models.providers.<name>]` as `local`, `baa`, `eu_region`, and `zero_retention`. Ollama is local without a flag.
+Provider flags live under `[models.providers.<name>]` as `local`, `baa`, `eu_region`, and `zero_retention`. Ollama is local without a flag when its base URL is loopback. A server on a private network is on-prem for an enforce dial only when its host is listed in `[models] trusted_inference_hosts`. Set `local = true` on that provider to override the address check. A public host stays non-local unless you set that flag.
 
 ## Memory
 
