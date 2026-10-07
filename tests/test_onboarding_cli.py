@@ -74,6 +74,9 @@ def _args(tmp_path: Path, **overrides: object) -> Namespace:
         "owner_password_stdin": False,
         "replace": False,
         "skip_test": False,
+        "auth": "",
+        "list_providers": False,
+        "as_json": False,
         "config_dir": str(tmp_path / "config" / "praxis-prime"),
         "data_dir": str(tmp_path / "data" / "praxis-prime"),
     }
@@ -238,18 +241,14 @@ def test_interactive_wizard_shows_current_values_and_creates_an_owner(tmp_path: 
         [
             "ada",
             "correct-horse",
-            "1",
-            "llamacpp",
-            "local-model",
+            "3",
             "http://127.0.0.1:9",
             "",
             "",
-            "",
-            "",
+            "n",
             "",
             "n",
             "n",
-            "",
         ]
     )
     prompts: list[str] = []
@@ -265,3 +264,195 @@ def test_interactive_wizard_shows_current_values_and_creates_an_owner(tmp_path: 
     assert read_first_run_token(config) == ""
     settings = load_settings({}, config_path=config / "config.toml")
     assert settings.model_spec == "llamacpp:local-model"
+
+
+def test_picker_back_and_skip_leave_inference_unset(tmp_path: Path):
+    env = _env(tmp_path)
+    code, text = _run(
+        tmp_path,
+        _args(tmp_path, section="models"),
+        "b\n",
+        env,
+        tty=True,
+    )
+    assert code == 0, text
+    assert "Choose where Praxis thinks" in text
+    assert "Left the current provider in place." in text
+    assert "Network server (OpenAI-compatible)" in text
+    skipped, message = _run(
+        tmp_path,
+        _args(tmp_path, section="models"),
+        "0\n",
+        env,
+        tty=True,
+    )
+    assert skipped == 0, message
+    assert "Inference not configured" in message
+    record = read_record(tmp_path / "config" / "praxis-prime")
+    assert record.get("ready") is False
+    assert record.get("lane") == "skip"
+
+
+def test_xai_sign_in_is_listed_and_not_selectable(tmp_path: Path):
+    env = _env(tmp_path)
+    code, text = _run(
+        tmp_path,
+        _args(tmp_path, section="models"),
+        "7\nb\nb\n",
+        env,
+        tty=True,
+    )
+    assert code == 0, text
+    assert "Sign in with Grok (SuperGrok / X Premium subscription) [coming soon]" in text
+    assert "API key (billed to your xAI API account)" in text
+    assert "does not include API credits" in text
+    assert "Left the current provider in place." in text
+
+
+def test_auth_oauth_is_refused(tmp_path: Path):
+    env = _env(tmp_path)
+    code, text = _run(
+        tmp_path,
+        _args(
+            tmp_path,
+            non_interactive=True,
+            auth="oauth",
+            provider="xai",
+            model="grok-4.7",
+        ),
+        "",
+        env,
+    )
+    assert code == 2
+    assert "later release" in text
+    assert not (tmp_path / "config" / "praxis-prime" / "config.toml").exists()
+
+
+def test_list_providers_json_includes_network_and_hides_secrets(tmp_path: Path):
+    env = _env(tmp_path)
+    env["XAI_API_KEY"] = "sk-list-secret"
+    code, text = _run(
+        tmp_path,
+        _args(tmp_path, list_providers=True, as_json=True),
+        "",
+        env,
+    )
+    assert code == 0, text
+    payload = json.loads(text)
+    ids = [item["id"] for item in payload["providers"]]
+    assert "network" in ids
+    assert "openai-compatible" in ids
+    assert payload["policy"]["subscriptionOauthEnabled"] is False
+    assert "sk-list-secret" not in text
+    assert "XAI_API_KEY" in payload["detection"]["envKeys"]
+
+
+def test_scripted_auth_none_is_recorded(tmp_path: Path):
+    env = _env(tmp_path)
+    code, text = _run(
+        tmp_path,
+        _args(
+            tmp_path,
+            non_interactive=True,
+            provider="llamacpp",
+            model="local-model",
+            base_url="http://127.0.0.1:9",
+            auth="none",
+        ),
+        "",
+        env,
+    )
+    assert code == 0, text
+    record = read_record(tmp_path / "config" / "praxis-prime")
+    assert record["auth_method"] == "none"
+    assert record["provider"] == "llamacpp"
+
+
+def _glm_fetch(method: str, url: str, **kwargs: object) -> FetchResult:
+    del method
+    if url.endswith("/v1/models"):
+        body = {
+            "object": "list",
+            "data": [
+                {"id": "zai-org/GLM-4.6", "object": "model"},
+                {"id": "glm-4.5-air", "object": "model"},
+            ],
+        }
+        return FetchResult(200, json.dumps(body).encode("utf-8"))
+    raw = kwargs.get("body") or b"{}"
+    payload = json.loads(raw if isinstance(raw, (bytes, str)) else b"{}")
+    tools = isinstance(payload, dict) and "tools" in payload
+    message: dict[str, object]
+    if tools:
+        message = {"role": "assistant", "content": "", "tool_calls": [{"id": "c1"}]}
+    else:
+        message = {"role": "assistant", "content": "ready"}
+    return FetchResult(200, json.dumps({"choices": [{"message": message}]}).encode())
+
+
+def test_network_picker_lists_glm_models_and_saves_lan(tmp_path: Path):
+    env = _env(tmp_path)
+    script = "\n".join(["6", "192.168.1.50:8000", "", "1", "n"])
+    source = _Tty(script)
+    out = io.StringIO()
+    prompts: list[str] = []
+
+    def fake_getpass(prompt: str = "", stream: io.TextIOBase | None = None) -> str:
+        prompts.append(prompt)
+        if stream is not None:
+            stream.write(prompt)
+        line = source.readline()
+        return line.rstrip("\n")
+
+    with mock.patch("getpass.getpass", fake_getpass):
+        code = setup_command(
+            _args(tmp_path, section="models"),
+            stdin=source,
+            stdout=out,
+            env=env,
+            fetcher=_glm_fetch,
+        )
+    text = out.getvalue()
+    assert code == 0, text
+    assert "zai-org/GLM-4.6" in text
+    assert "glm-4.5-air" in text
+    assert "API key (blank to keep the stored key): " in prompts
+    record = read_record(tmp_path / "config" / "praxis-prime")
+    assert record["lane"] == "lan"
+    assert record["provider"] == "openai-compatible"
+    assert record["spec"] == "openai-compatible:zai-org/GLM-4.6"
+    settings = load_settings({}, config_path=tmp_path / "config" / "praxis-prime" / "config.toml")
+    assert settings.model_spec == "openai-compatible:zai-org/GLM-4.6"
+
+
+def test_network_model_prompt_types_when_the_list_is_empty(tmp_path: Path):
+    env = _env(tmp_path)
+
+    def fetch(method: str, url: str, **kwargs: object) -> FetchResult:
+        if url.endswith("/v1/models") or url.endswith("/api/tags"):
+            return FetchResult(500, b"{}")
+        return _glm_fetch(method, url, **kwargs)
+
+    script = "\n".join(["6", "10.0.0.5:30000", "", "glm-4.6", "n"])
+    source = _Tty(script)
+    out = io.StringIO()
+
+    def fake_getpass(prompt: str = "", stream: io.TextIOBase | None = None) -> str:
+        if stream is not None:
+            stream.write(prompt)
+        return source.readline().rstrip("\n")
+
+    with mock.patch("getpass.getpass", fake_getpass):
+        code = setup_command(
+            _args(tmp_path, section="models"),
+            stdin=source,
+            stdout=out,
+            env=env,
+            fetcher=fetch,
+        )
+    text = out.getvalue()
+    assert code == 0, text
+    assert "Type a model id" in text
+    record = read_record(tmp_path / "config" / "praxis-prime")
+    assert record["spec"] == "openai-compatible:glm-4.6"
+    assert record["lane"] == "lan"
