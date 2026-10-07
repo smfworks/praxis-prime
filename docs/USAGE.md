@@ -250,7 +250,31 @@ praxis-prime setup --non-interactive --provider skip
 
 The key is read from stdin or from the named environment variable. It is not a command argument. Exit 0 means the choice was saved. An explicit `--provider skip` exits 0 and leaves inference not ready. Exit 1 means the live test failed. Exit 2 means the command was used wrong, the terminal was missing, or an existing provider would have been replaced. `--replace` is required to change an existing provider or key. `--skip-test` is refused and cannot mark a provider ready.
 
-The lanes are "On this computer" (a detected server or a URL you type), "On my network" (a base URL, an optional key, and a TLS fingerprint for a self-signed certificate), "Cloud provider" (`openai`, `anthropic`, `xai`, or `openai-compatible`), and "Skip for now". The primary model is required. Utility, vision, and the Decision Engine judge are optional. The test is one completion and one tool call against only the provider you named, plus a context-length check when the server reports one. Below 32768 tokens is a warning. Below 16384, agent mode stays off and the provider is not marked ready.
+```bash
+praxis-prime setup --list-providers
+praxis-prime setup --list-providers --json
+praxis-prime setup --non-interactive --provider llamacpp --model local-model \
+  --base-url http://127.0.0.1:8080 --auth none
+```
+
+`--list-providers` prints the Local and Cloud catalog. `--json` prints the same payload as `POST /v1/onboarding/providers`: display names, aliases, and environment variable names, never key values. `--auth api-key` or `--auth none` records how the provider authenticates. `--auth oauth` exits 2. Subscription sign-in is not available yet.
+
+The web wizard and the interactive CLI show one list, Local then Cloud. Nothing is preselected, including when exactly one server is detected on this computer. Local entries are Ollama, LM Studio, llama.cpp server, vLLM, Other OpenAI-compatible server, and Network server (OpenAI-compatible). Cloud entries are xAI (Grok), OpenAI, Anthropic, and Other OpenAI-compatible cloud. Sign in with Grok is listed and stays unavailable. An xAI API key is the path that works today. Search matches the display name and aliases. Back returns to the previous step. On the CLI, `b` does that and `0` skips. Going back past Connect clears a key you typed. Skip for now on the provider step saves no provider. The dials step and the done step then say "Inference not configured". The browser Back button follows the same hash history (`#/setup/provider`, `#/setup/connect/<id>`, `#/setup/model`, and the later steps).
+
+The primary model is required. Utility, vision, and the Decision Engine judge are optional. The test is one completion and one tool call against only the provider you named, plus a context-length check when the server reports one. Below 32768 tokens is a warning. Below 16384, agent mode stays off and the provider is not marked ready.
+
+### A model server on your network
+
+A GLM, vLLM, or SGLang process on another machine is the Local entry "Network server (OpenAI-compatible)". Praxis does not scan the network. Type `host:port` or a base URL, for example `192.168.1.50:8000` or `http://192.168.1.50:8000/v1`. The daemon adds `http://` when you omit the scheme, strips a trailing slash, and strips one trailing `/v1` so the probe calls `/v1/models` once. Check connection lists those model ids. If the list is empty or the server cannot be reached, type a model id. An optional API key stays bound to that base URL. A host that is not this computer shows "This server is on your network". An `https` server that is not loopback can take a TLS fingerprint. The saved config uses the `openai-compatible` adapter and the `lan` lane when the host is not loopback.
+
+```bash
+praxis-prime setup --non-interactive \
+  --provider network \
+  --base-url 192.168.1.50:8000 \
+  --model glm-4.6
+```
+
+`--provider openai-compatible` with the same flags is the other local OpenAI-compatible entry and saves the same adapter.
 
 When HIPAA, FERPA, COPPA, GDPR, or PCI is `monitor` or `enforce`, a cloud choice shows "Requires a BAA/DPA with the provider; PHI will leave this machine". The dials step shows the current positions. The default is all off, and a blank answer leaves them as they are. `models.allow_providers` is an org allowlist. An empty list allows every provider. A non-empty list refuses a save outside it.
 
