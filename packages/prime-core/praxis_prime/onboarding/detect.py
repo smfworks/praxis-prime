@@ -10,25 +10,11 @@ from pathlib import Path
 
 from praxis_prime.onboarding.probe import FetchResult, ProbeError
 from praxis_prime.onboarding.probe import fetch as default_fetch
+from praxis_prime.onboarding.registry import key_env_names, local_servers
 
-# (provider id, base URL, models path, optional props path)
-LOCAL_SERVERS: tuple[tuple[str, str, str, str], ...] = (
-    ("ollama", "http://127.0.0.1:11434", "/api/tags", ""),
-    ("llamacpp", "http://127.0.0.1:8080", "/v1/models", "/props"),
-    ("vllm", "http://127.0.0.1:8000", "/v1/models", ""),
-    ("lmstudio", "http://127.0.0.1:1234", "/v1/models", ""),
-)
-
-KEY_ENV_NAMES: tuple[str, ...] = (
-    "OPENAI_API_KEY",
-    "PRAXIS_PRIME_OPENAI_API_KEY",
-    "ANTHROPIC_API_KEY",
-    "PRAXIS_PRIME_ANTHROPIC_API_KEY",
-    "XAI_API_KEY",
-    "PRAXIS_PRIME_XAI_API_KEY",
-    "PRAXIS_PRIME_OPENAI_COMPATIBLE_API_KEY",
-    "PRAXIS_PRIME_OLLAMA_API_KEY",
-)
+# Derived from the provider registry. The tuples stay equal to the historical ones.
+LOCAL_SERVERS: tuple[tuple[str, str, str, str], ...] = local_servers()
+KEY_ENV_NAMES: tuple[str, ...] = key_env_names()
 
 Fetcher = Callable[..., FetchResult]
 Runner = Callable[[Sequence[str]], str]

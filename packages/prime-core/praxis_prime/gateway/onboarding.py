@@ -19,7 +19,12 @@ from praxis_prime.channels.secrets import secret_file, write_secret
 from praxis_prime.channels.telegram import PairingStore
 from praxis_prime.gateway.authz import Denial, authenticate_http
 from praxis_prime.onboarding.record import inference_ready
-from praxis_prime.onboarding.service import OnboardingError, OnboardingService, Selection
+from praxis_prime.onboarding.service import (
+    OnboardingError,
+    OnboardingService,
+    Selection,
+    reject_oauth,
+)
 from praxis_prime.onboarding.token import HEADER_NAME, invalidate_first_run_token, token_matches
 from praxis_prime.paths import state_dir
 
@@ -112,9 +117,9 @@ def onboarding_payload(
     if kind == "onboarding.detect":
         return service.detect()
     if kind == "onboarding.probe":
-        url = str(payload.get("url", ""))
-        pin = str(payload.get("tlsFingerprint", "") or "")
-        return service.probe(url, pin=pin, capture_fingerprint=not pin)
+        return _probe_payload(service, payload)
+    if kind == "onboarding.providers":
+        return service.providers_view()
     if kind == "onboarding.test":
         return service.test(
             provider=str(payload.get("provider", "")),
@@ -233,11 +238,9 @@ def _dispatch(
         if route == "/v1/onboarding/detect":
             return 200, service.detect()
         if route == "/v1/onboarding/probe":
-            return 200, service.probe(
-                str(payload.get("url", "")),
-                pin=str(payload.get("tlsFingerprint", "") or ""),
-                capture_fingerprint=not str(payload.get("tlsFingerprint", "") or ""),
-            )
+            return 200, _probe_payload(service, payload)
+        if route == "/v1/onboarding/providers":
+            return 200, service.providers_view()
         if route == "/v1/onboarding/test":
             return 200, service.test(
                 provider=str(payload.get("provider", "")),
@@ -261,9 +264,14 @@ def _dispatch(
         if route == "/v1/onboarding/telegram":
             return _telegram(server)
     except OnboardingError as exc:
-        status = {"usage": 400, "replace": 409, "allowlist": 403, "context": 422, "test": 422}.get(
-            exc.code, 400
-        )
+        status = {
+            "usage": 400,
+            "replace": 409,
+            "allowlist": 403,
+            "context": 422,
+            "test": 422,
+            "oauth_unavailable": 400,
+        }.get(exc.code, 400)
         return status, _error(exc.code, str(exc))
     return 404, _error("not_found", "no such setup route")
 
@@ -803,6 +811,7 @@ def _prepare_save(
     actor = "" if principal is None else str(getattr(principal, "account_id", "") or "")
     service = _service(server, actor)
     selection = _selection(payload, actor)
+    reject_oauth(selection.auth_method)
     if service.requires_replace(selection) and not selection.replace:
         raise OnboardingError(
             "a provider is already configured; pass --replace to change it",
@@ -874,7 +883,20 @@ def _selection(payload: dict[str, object], actor: str) -> Selection:
         tls_fingerprint=str(payload.get("tlsFingerprint", "") or ""),
         replace=payload.get("replace") is True,
         actor=actor,
+        auth_method=str(payload.get("authMethod", "") or ""),
     )
+
+
+def _probe_payload(service: OnboardingService, payload: dict[str, object]) -> dict[str, object]:
+    pin = str(payload.get("tlsFingerprint", "") or "")
+    base = str(payload.get("baseUrl", "") or "").strip()
+    if base:
+        return service.probe_models(
+            str(payload.get("provider", "") or ""),
+            base,
+            pin=pin,
+        )
+    return service.probe(str(payload.get("url", "")), pin=pin, capture_fingerprint=not pin)
 
 
 def _service(server: Any, actor: str) -> OnboardingService:

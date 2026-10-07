@@ -14,6 +14,8 @@ What is on `main`.
 
 ### Added
 
+- Setup asks you to choose a provider from a Local and Cloud list, with Back and Skip, and can point at an OpenAI-compatible model server on your network.
+
 **Core agent loop, router, and terminal chat** ([#2](https://github.com/smfworks/praxis-prime/pull/2))
 
 - Plan, check, act turn with a stable system prompt, approval gating, and fenced tool output.
