@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, within } from "@testing-library/react";
+import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -224,5 +224,40 @@ describe("provider picker", () => {
     expect(screen.getByRole("button", { name: "glm-4.5-air" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Type a model id instead" })).toBeInTheDocument();
     expect(screen.getByLabelText("Primary model")).toBeInTheDocument();
+  });
+
+  it("resets provider state when the hash or history moves between providers", async () => {
+    const user = userEvent.setup();
+    renderWizard();
+    await user.click(
+      await screen.findByRole("option", { name: "Network server (OpenAI-compatible)" }),
+    );
+    await user.type(screen.getByLabelText("API key"), "sk-provider-a");
+    await user.type(screen.getByLabelText("Base URL"), "192.168.1.50:8000");
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await user.click(await screen.findByRole("button", { name: "zai-org/GLM-4.6" }));
+
+    function navigate(hash: string) {
+      act(() => {
+        window.location.hash = hash;
+        window.dispatchEvent(new HashChangeEvent("hashchange"));
+      });
+    }
+
+    navigate("#/setup/connect/ollama");
+    expect(await screen.findByLabelText("API key")).toHaveValue("");
+    expect(screen.getByLabelText("Base URL")).not.toHaveValue("192.168.1.50:8000");
+    expect(screen.queryByDisplayValue("sk-provider-a")).not.toBeInTheDocument();
+
+    navigate("#/setup/model");
+    expect(await screen.findByLabelText("Primary model")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "zai-org/GLM-4.6" })).not.toBeInTheDocument();
+    expect(screen.queryByDisplayValue("zai-org/GLM-4.6")).not.toBeInTheDocument();
+    expect(screen.queryByDisplayValue("192.168.1.50:8000")).not.toBeInTheDocument();
+    expect(api).not.toHaveBeenCalledWith(
+      "POST",
+      "/v1/onboarding/probe",
+      expect.objectContaining({ provider: "ollama", baseUrl: "192.168.1.50:8000" }),
+    );
   });
 });

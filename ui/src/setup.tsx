@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 
 import { api, clearSetupToken, rowsOf, setCsrf, textOf } from "./api";
 import { asPublicKey, credentialJson, requestOptions } from "./webauthn";
@@ -197,6 +197,11 @@ export function SetupWizard({
   const [accountPassword, setAccountPassword] = useState("");
   const [totpCode, setTotpCode] = useState("");
   const [passkeyToken, setPasskeyToken] = useState("");
+  // Refs let the hash listener see the current provider and catalog without
+  // re-binding, so every provider change goes through resetForProvider.
+  const providerRef = useRef(providerId);
+  const catalogRef = useRef(catalog);
+  catalogRef.current = catalog;
 
   const warning = textOf(status.data?.cloudWarning);
   const missing = missingItems(status.data);
@@ -244,7 +249,7 @@ export function SetupWizard({
         if (next === "provider" || next === "connect") setReviewSaved(false);
         return next;
       });
-      if (id) setProviderId(id);
+      if (id && id !== providerRef.current) resetForProvider(id);
     }
     window.addEventListener("hashchange", onHash);
     window.addEventListener("popstate", onHash);
@@ -333,20 +338,33 @@ export function SetupWizard({
     });
   }
 
-  function chooseProvider(id: string) {
-    const next = catalog.providers.find((item) => item.id === id);
+  /**
+   * Clear everything tied to the previous provider: key, base URL, TLS pin,
+   * models, and the probed list. A picker click and a hash or history change
+   * both come through here, so one provider's key never reaches another.
+   */
+  function resetForProvider(id: string) {
+    const next = catalogRef.current.providers.find((item) => item.id === id);
+    providerRef.current = id;
     setProviderId(id);
     setBaseUrl(next?.defaultBaseUrl ?? "");
     setApiKey("");
     setAuth("");
     setModel("");
+    setUtility("");
+    setVision("");
+    setJudge("");
     setProbed(null);
     setTyped(false);
     setTls("");
     setProbeNetwork(false);
     setProbeHttps(false);
-    setKeySource(envNameFor(next, catalog.envKeys) ? "env" : "paste");
+    setKeySource(envNameFor(next, catalogRef.current.envKeys) ? "env" : "paste");
     setReviewSaved(false);
+  }
+
+  function chooseProvider(id: string) {
+    resetForProvider(id);
     go("connect", id);
   }
 
