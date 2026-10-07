@@ -176,3 +176,18 @@ def isolate_user_dirs(
             monkeypatch.delenv(name, raising=False)
 
     return root
+
+
+@pytest.fixture(autouse=True)
+def stub_locality_resolver(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep provider-locality lookups off the network.
+
+    A name classifies as cloud when the resolver raises. A test that needs
+    addresses monkeypatches ``praxis_prime.locality.resolve_host`` again,
+    or passes ``resolver=`` into the helper.
+    """
+
+    def _refuse(host: str) -> list[str]:
+        raise OSError(f"DNS is disabled in tests ({host})")
+
+    monkeypatch.setattr("praxis_prime.locality.resolve_host", _refuse)

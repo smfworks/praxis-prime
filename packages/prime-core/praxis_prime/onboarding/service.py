@@ -11,6 +11,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from praxis_prime.channels.secrets import secret_file, write_secret
+from praxis_prime.locality import host_of, locality
 from praxis_prime.onboarding.configio import backup_config, load_document, write_document
 from praxis_prime.onboarding.detect import detect as detect_local
 from praxis_prime.onboarding.messages import (
@@ -43,7 +44,7 @@ from praxis_prime.onboarding.registry import (
     by_id as registry_by_id,
 )
 from praxis_prime.onboarding.registry import (
-    lane_for as registry_lane_for,
+    flow_lane_for as registry_flow_lane_for,
 )
 from praxis_prime.onboarding.registry import (
     models_path as registry_models_path,
@@ -303,7 +304,21 @@ class OnboardingService:
             pin=prepared.tls_fingerprint,
         )
         roles = self._optional_roles(prepared, base, lane, tested["warnings"])
-        self._persist(prepared, provider, model, base, lane, tested, roles)
+        # `lane` is the wizard flow (section, or the old loopback/other split).
+        # It is what validation, the default base, auth, and the cloud key
+        # check already used. The record stores the address class, so a
+        # public Local-section host is cloud even when the caller said lan.
+        recorded_lane, recorded_locality = _recorded_place(wizard or provider, base)
+        self._persist(
+            prepared,
+            provider,
+            model,
+            base,
+            recorded_lane,
+            tested,
+            roles,
+            recorded_locality,
+        )
         self._audit(
             "provider.configured",
             "provider configured",
@@ -311,13 +326,19 @@ class OnboardingService:
                 "spec": spec,
                 "provider": provider,
                 "model": model,
-                "lane": lane,
+                "lane": recorded_lane,
                 "host": _host_of(base),
                 "tested_at": _now(),
                 "actor": prepared.actor,
             },
         )
-        return {"ok": True, "inferenceReady": True, "spec": spec, "warnings": tested["warnings"]}
+        return {
+            "ok": True,
+            "inferenceReady": True,
+            "spec": spec,
+            "warnings": tested["warnings"],
+            "locality": recorded_locality,
+        }
 
     def set_dials(self, positions: Mapping[str, str], *, actor: str = "") -> dict[str, str]:
         known = set(dial_ids())
@@ -392,7 +413,7 @@ class OnboardingService:
         wizard = entry.id if entry is not None else provider_text
         stored = registry_storage_id(wizard) if wizard else ""
         if not lane:
-            lane = registry_lane_for(wizard or stored, selection.base_url)
+            lane = registry_flow_lane_for(wizard or stored, selection.base_url)
         auth = ""
         if wizard:
             auth = registry_resolve_auth(wizard, selection.auth_method, lane)
@@ -510,6 +531,7 @@ class OnboardingService:
         lane: str,
         tested: dict[str, object],
         roles: dict[str, dict[str, object]],
+        locality_value: str,
     ) -> None:
         if selection.api_key:
             key_name = KEY_NAMES.get(provider)
@@ -559,14 +581,13 @@ class OnboardingService:
             document["decide"] = decide
         backup_config(path)
         write_document(path, document, previous=previous)
-        locality = _locality(lane, base)
         record: dict[str, object] = {
             "ready": True,
             "spec": _ready_spec(provider, model),
             "provider": provider,
             "model": model,
             "lane": lane,
-            "locality": locality,
+            "locality": locality_value,
             "base_url": base,
             "tested_at": _now(),
             "context_length": tested.get("contextLength"),
@@ -918,13 +939,20 @@ def _base_url(provider: str, base_url: str, lane: str) -> str:
     raise OnboardingError("a base URL is required for this provider", code="usage")
 
 
-def _probe_flags(base: str) -> dict[str, bool]:
-    host = _host_of(base)
-    loopback = host in {"127.0.0.1", "localhost", "::1"} or host.startswith("127.")
+def _probe_flags(base: str) -> dict[str, object]:
+    """Network notes for the setup page, including the address class.
+
+    Loopback follows the locality helper, except an unspecified address
+    (``0.0.0.0``, ``::``), which is local for routing but is not loopback.
+    """
+    kind = locality(base)
+    host = host_of(base)
+    loopback = kind == "local" and host not in {"0.0.0.0", "::"}
     return {
         "network": bool(host) and not loopback,
         "loopback": loopback,
         "https": base.lower().startswith("https://"),
+        "locality": kind,
     }
 
 
@@ -959,13 +987,25 @@ def _host_of(url: str) -> str:
 
 
 def _locality(lane: str, base: str) -> str:
+    """Cloud flow is cloud. Anything else is the address class of ``base``."""
     if lane == "cloud":
         return "cloud"
-    host = base.split("://", 1)[-1].split("/", 1)[0].split("@")[-1]
-    host = host.split(":")[0].strip("[]").lower()
-    if host in {"127.0.0.1", "localhost", "::1"}:
-        return "local"
-    return "lan"
+    return locality(base)
+
+
+def _recorded_place(provider: str, base: str) -> tuple[str, str]:
+    """Lane and locality written to provider-ready.json.
+
+    Cloud-section providers stay cloud and are not resolved. A Local-section
+    provider records the address class of the saved base.
+    """
+    entry = registry_by_id(provider)
+    if entry is not None and entry.section == "cloud":
+        return "cloud", "cloud"
+    if provider.strip().lower() in {"openai", "anthropic", "xai"}:
+        return "cloud", "cloud"
+    kind = locality(base)
+    return kind, kind
 
 
 def _headers(provider: str, key: str) -> dict[str, str]:

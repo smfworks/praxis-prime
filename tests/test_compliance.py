@@ -13,7 +13,7 @@ from praxis_prime.compliance.breach import list_breaches, record_breach
 from praxis_prime.compliance.detectors import luhn_ok, npi_ok, ssn_parts_ok
 from praxis_prime.compliance.evaluate import feed_tier0
 from praxis_prime.compliance.packs import bundled_packs, load_packs
-from praxis_prime.compliance.providers import ProviderFlags
+from praxis_prime.compliance.providers import ProviderFlags, flags_from_config
 from praxis_prime.compliance.report import render_report
 from praxis_prime.compliance.subject import erase_subject, export_subject
 from praxis_prime.config import write_default_config
@@ -105,10 +105,7 @@ def test_detectors_accept_valid_identifiers_and_reject_lookalikes():
     bare = {hit.data_class for hit in detect("mail ada@example.com", nc.detectors)}
     assert "NC_PII" in named
     assert "NC_PII" not in bare
-    assert "PCI" in {
-        hit.data_class
-        for hit in detect(f"card {PAN}", packs["pci"].detectors)
-    }
+    assert "PCI" in {hit.data_class for hit in detect(f"card {PAN}", packs["pci"].detectors)}
     invalid = detect("card 4111111111111112", packs["pci"].detectors)
     assert not any(hit.data_class == "PCI" for hit in invalid)
 
@@ -147,9 +144,12 @@ def test_monitor_warns_and_enforce_blocks_without_a_local_provider(tmp_path: Pat
     assert watched.decision == "allow"
     assert watched.warnings
     assert watched.route_groups == ()
-    assert "123-45-6789" not in audit.db.conn.execute(
-        "SELECT payload_json FROM audit_events"
-    ).fetchone()["payload_json"]
+    assert (
+        "123-45-6789"
+        not in audit.db.conn.execute("SELECT payload_json FROM audit_events").fetchone()[
+            "payload_json"
+        ]
+    )
 
     enforce, _audit = _engine(tmp_path / "enf", hipaa="enforce")
     verdict = enforce.evaluate(
@@ -162,6 +162,10 @@ def test_monitor_warns_and_enforce_blocks_without_a_local_provider(tmp_path: Pat
     assert blocked == []
     assert "PHI" in message
     assert "not legal advice" in message.lower()
+    # No base URL is not local. This ollama stands in for the loopback default.
+    enforce.provider_flags = {
+        "ollama": flags_from_config("ollama", base_url="http://127.0.0.1:11434"),
+    }
     kept, clear = enforce.constrain_chain(
         [ModelRef("openai", "gpt"), ModelRef("ollama", "qwen")],
         verdict,
@@ -448,7 +452,12 @@ def test_loop_blocks_when_no_allowed_provider_and_uses_local(tmp_path: Path):
             {"openai": cloud, "ollama": local},
         ),
         registry=ToolRegistry(),
-        policy=PolicyEngine(_positions(hipaa="enforce")),
+        policy=PolicyEngine(
+            _positions(hipaa="enforce"),
+            provider_flags={
+                "ollama": flags_from_config("ollama", base_url="http://127.0.0.1:11434"),
+            },
+        ),
         gate=ApprovalGate(None),
         cwd=tmp_path,
     )
@@ -504,9 +513,7 @@ legal_references = ["override"]
     assert quiet is None
     classes = [
         item[0]
-        for item in feed_tier0(
-            "Patient MRN AB12345", _positions(hipaa="enforce"), bundled_packs()
-        )
+        for item in feed_tier0("Patient MRN AB12345", _positions(hipaa="enforce"), bundled_packs())
     ]
     assert "PHI" in classes
 
@@ -540,19 +547,22 @@ def test_cli_compliance_gdpr_and_breach(tmp_path: Path, capsys):
     assert "memory=1" in capsys.readouterr().out
     assert main(["gdpr", "export", "--subject", "ada@example.com", *base]) == 0
     assert '"memory": []' in capsys.readouterr().out
-    assert main(
-        [
-            "breach",
-            "record",
-            "--pack",
-            "state_nc",
-            "--summary",
-            "lost drive",
-            "--affected",
-            "2",
-            *base,
-        ]
-    ) == 0
+    assert (
+        main(
+            [
+                "breach",
+                "record",
+                "--pack",
+                "state_nc",
+                "--summary",
+                "lost drive",
+                "--affected",
+                "2",
+                *base,
+            ]
+        )
+        == 0
+    )
     recorded = capsys.readouterr().out
     assert recorded.startswith("br_")
     assert "Attorney General" in recorded

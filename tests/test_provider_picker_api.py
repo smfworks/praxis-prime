@@ -159,6 +159,8 @@ def test_save_derives_lane_for_an_owner_and_refuses_oauth(tmp_path: Path):
     )
     assert status == 200, body
     moved = read_record(config)
-    assert moved["lane"] == "lan"
+    # 192.0.2.0/24 is documentation space, so the recorded lane is cloud.
+    assert moved["lane"] == "cloud"
+    assert moved["locality"] == "cloud"
     assert moved["provider"] == "vllm"
     store.close()

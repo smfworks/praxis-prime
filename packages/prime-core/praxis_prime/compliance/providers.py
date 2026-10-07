@@ -6,13 +6,28 @@ vendor has signed a BAA or hosts data in the EU.
 
 from __future__ import annotations
 
+import ipaddress
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
-from urllib.parse import urlparse
+
+from praxis_prime.locality import host_of, locality
 
 if TYPE_CHECKING:
     from praxis_prime.router.types import ModelRef
+
+# Local-section adapter ids. Every other provider stays non-local and must
+# not resolve DNS from this module.
+_ADDRESS_LOCAL = frozenset(
+    {
+        "ollama",
+        "openai-compatible",
+        "llamacpp",
+        "vllm",
+        "lmstudio",
+        "network",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -21,6 +36,11 @@ class ProviderFlags:
     baa: bool = False
     eu_region: bool = False
     zero_retention: bool = False
+    # Metadata for the request-time re-check. Not part of equality or repr,
+    # and not part of ``as_dict``.
+    base_url: str = field(default="", compare=False, repr=False)
+    trusted_hosts: tuple[str, ...] = field(default=(), compare=False, repr=False)
+    local_explicit: bool = field(default=False, compare=False, repr=False)
 
     def allows(self, required: Sequence[str]) -> bool:
         """True when no flag is required, or any required flag is set."""
@@ -48,17 +68,34 @@ def flags_from_config(
     table: Mapping[str, object] | None = None,
     *,
     base_url: str = "",
+    trusted_hosts: Sequence[str] = (),
 ) -> ProviderFlags:
-    """Defaults: Ollama is local. A loopback OpenAI-compatible URL is local."""
+    """Owner flags, with a locality default for local-section adapters.
+
+    An explicit boolean ``local`` in the owner's table wins. Otherwise
+    ``ollama``, ``openai-compatible``, and the other local-section adapter
+    ids are local only when the base URL is loopback (or unspecified), or
+    when it is lan and its host is in ``trusted_hosts``. A trusted host
+    that classifies as cloud is still not local. An empty base URL is not
+    local. Every other provider defaults to not local and is not resolved.
+    """
     raw = table or {}
-    local_default = name == "ollama" or (
-        name == "openai-compatible" and _loopback(base_url)
-    )
+    explicit = isinstance(raw.get("local"), bool)
+    hosts = _normalize_trusted(trusted_hosts)
+    if explicit:
+        local = bool(raw.get("local"))
+    elif name in _ADDRESS_LOCAL:
+        local = _address_is_local(base_url, hosts)
+    else:
+        local = False
     return ProviderFlags(
-        local=_bool(raw.get("local"), local_default),
+        local=local,
         baa=_bool(raw.get("baa"), False),
         eu_region=_bool(raw.get("eu_region"), False),
         zero_retention=_bool(raw.get("zero_retention"), False),
+        base_url=base_url,
+        trusted_hosts=hosts,
+        local_explicit=explicit,
     )
 
 
@@ -76,12 +113,23 @@ def filter_chain(
     groups: Sequence[Sequence[str]],
     configured: Mapping[str, ProviderFlags] | None,
 ) -> list[ModelRef]:
-    """Keep providers that satisfy every flag group. A group is OR."""
+    """Keep providers that satisfy every flag group. A group is OR.
+
+    When a group requires ``local`` and that flag came from the address
+    default (not an explicit boolean), a hostname is classified again.
+    An IP literal is not looked up. DNS can still change between this
+    check and the socket the HTTP client opens. A strict deployment should
+    use an IP-literal base URL, or list a static name in
+    ``trusted_inference_hosts`` and pin that name outside the public resolver.
+    """
     if not groups:
         return list(chain)
+    needs_local = any("local" in group for group in groups)
     kept: list[ModelRef] = []
     for ref in chain:
         meta = resolve_flags(ref.provider, configured)
+        if needs_local:
+            meta = _recheck_local(meta)
         if all(meta.allows(group) for group in groups):
             kept.append(ref)
     return kept
@@ -93,8 +141,49 @@ def _bool(value: object, default: bool) -> bool:
     return default
 
 
-def _loopback(url: str) -> bool:
-    if not url.strip():
+def _address_is_local(base_url: str, trusted: tuple[str, ...]) -> bool:
+    """True when the base is loopback, or lan and listed as trusted."""
+    if not base_url.strip():
         return False
-    host = (urlparse(url).hostname or "").lower()
-    return host in {"127.0.0.1", "localhost", "::1"}
+    kind = locality(base_url)
+    if kind == "local":
+        return True
+    if kind != "lan":
+        return False
+    return host_of(base_url) in trusted
+
+
+def _recheck_local(meta: ProviderFlags) -> ProviderFlags:
+    """Drop a stale local default when a hostname no longer qualifies."""
+    if not meta.local or meta.local_explicit:
+        return meta
+    host = host_of(meta.base_url)
+    if not host or _is_ip_literal(host):
+        return meta
+    if _address_is_local(meta.base_url, meta.trusted_hosts):
+        return meta
+    return replace(meta, local=False)
+
+
+def _is_ip_literal(host: str) -> bool:
+    try:
+        ipaddress.ip_address(host.split("%", 1)[0])
+    except ValueError:
+        return False
+    return True
+
+
+def _normalize_trusted(hosts: Sequence[str]) -> tuple[str, ...]:
+    found: list[str] = []
+    for item in hosts:
+        if not isinstance(item, str):
+            continue
+        text = item.strip().lower().rstrip(".")
+        if text.startswith("[") and text.endswith("]") and len(text) >= 2:
+            text = text[1:-1].strip()
+        if "%" in text:
+            text = text.split("%", 1)[0]
+        if not text or text in found:
+            continue
+        found.append(text)
+    return tuple(found)
