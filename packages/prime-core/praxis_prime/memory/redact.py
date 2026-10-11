@@ -15,9 +15,16 @@ _SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(
         r"(?i)\b(?:api[_-]?key|token|secret|password|authorization)\b\s*[:=]\s*\S+"
     ),
-    re.compile(r"\bsk-[A-Za-z0-9_\-]{8,}\b"),
+    re.compile(r"(?<![A-Za-z0-9])sk-[A-Za-z0-9_\-]{8,}\b"),
     re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b"),
+    re.compile(r"\bgithub_pat_[A-Za-z0-9_]{82}\b"),
+    re.compile(r"\bxai-[A-Za-z0-9]{80}\b"),
     re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
+    re.compile(
+        r"(?<![A-Za-z0-9_-])"
+        r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"
+        r"={0,2}(?![A-Za-z0-9_=])"
+    ),
     re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._\-]{8,}"),
     re.compile(
         r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----"
