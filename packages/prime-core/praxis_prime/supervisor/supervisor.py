@@ -57,6 +57,8 @@ _DROPPED_ENV = frozenset(
         "PRAXIS_PRIME_WORKER_MASTER",
         "PRAXIS_PRIME_TELEGRAM_BOT_TOKEN",
         "PRAXIS_PRIME_SECRETS_FILE",
+        "PRAXIS_PRIME_PROVIDER_AUTH_DIR",
+        "PRAXIS_PRIME_PROVIDER_AUTH_KEY",
     }
 )
 _OIDC_SECRET_PREFIX = "PRAXIS_PRIME_OIDC_SECRET_"
@@ -65,6 +67,10 @@ _OIDC_SECRET_PREFIX = "PRAXIS_PRIME_OIDC_SECRET_"
 def _worker_env_dropped(key: str) -> bool:
     """True for supervisor secrets that must not reach a profile worker."""
     return key in _DROPPED_ENV or key.startswith(_OIDC_SECRET_PREFIX)
+
+
+def _points_at_provider_auth(value: str) -> bool:
+    return "provider-auth" in value.replace("\\", "/")
 
 
 class WorkerUnavailable(RuntimeError):
@@ -430,7 +436,25 @@ class Supervisor:
         env["PRAXIS_PRIME_SUPERVISOR_START"] = self._supervisor_start
         env["PRAXIS_PRIME_SUPERVISOR_TOKEN"] = self._supervisor_token
         env.pop("PRAXIS_PRIME_WORKER_MASTER", None)
-        return env
+        return {key: value for key, value in env.items() if not _points_at_provider_auth(value)}
+
+    def _provider_credential(self, message: Mapping[str, object]) -> dict[str, object]:
+        """Access token for this daemon's xAI grant. Never a refresh token."""
+        if str(message.get("provider") or "xai") != "xai":
+            return {"error": "unsupported"}
+        config = self.config_path
+        if config is None:
+            return {"error": "unavailable"}
+        from praxis_prime.providers_auth.broker import ProviderAuthBroker
+        from praxis_prime.providers_auth.xai_oauth import XaiOAuthError
+
+        try:
+            granted = ProviderAuthBroker(config.parent).credential_for_worker()
+        except (XaiOAuthError, OSError, ValueError):
+            return {"error": "needs_reauth"}
+        if "refresh_token" in granted or "refreshToken" in granted:
+            return {"error": "needs_reauth"}
+        return granted
 
     def _secret_strings(self) -> list[str]:
         values = [self._master.hex()]
@@ -737,6 +761,8 @@ class Supervisor:
         if method == "grant.check":
             account = str(message.get("account", ""))
             return {"allowed": self.account_allowed(profile, account)}
+        if method == "provider.credential":
+            return self._provider_credential(message)
         claimed = str(message.get("profile", "") or profile)
         if claimed != profile:
             return {"accepted": False, "error": "profile mismatch"}

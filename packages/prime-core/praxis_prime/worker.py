@@ -208,8 +208,10 @@ class WorkerApp:
         self._lock_fd = _lock_profile(data_root / "profiles" / profile)
         self._data_token = bind_data_root(data_root)
         self._profile_token = bind_profile(profile)
+        from praxis_prime.providers_auth.broker import install_worker_token
         from praxis_prime.runtime import build_runtime
 
+        install_worker_token(self._ask_provider_token)
         self.runtime = build_runtime(
             env=os.environ,
             config_path=config_path,
@@ -597,6 +599,41 @@ class WorkerApp:
             sock.close()
         result = reply.get("result")
         return isinstance(result, dict) and bool(result.get("allowed"))
+
+    def _ask_provider_token(self) -> str:
+        """Ask the supervisor for an access token. The refresh token stays there."""
+        try:
+            sock = _connect_supervisor(self.supervisor_socket, 2)
+        except (IpcError, OSError):
+            return ""
+        try:
+            send_message(
+                sock,
+                {
+                    "id": "auth",
+                    "method": "auth",
+                    "profile": self.profile,
+                    "generation": self.generation,
+                    "token": self.credential,
+                },
+            )
+            auth = recv_message(sock)
+            if not auth.get("ok"):
+                return ""
+            send_message(
+                sock,
+                {"id": "cred", "method": "provider.credential", "provider": "xai"},
+            )
+            reply = recv_message(sock)
+        except (IpcError, OSError):
+            return ""
+        finally:
+            sock.close()
+        result = reply.get("result")
+        if not isinstance(result, dict):
+            return ""
+        token = result.get("accessToken")
+        return token if isinstance(token, str) else ""
 
     def _run_routine(self, routine: object, trigger: str, inner: object) -> RoutineRun:
         routine_id = str(getattr(routine, "id", ""))

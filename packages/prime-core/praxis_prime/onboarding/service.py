@@ -59,6 +59,13 @@ from praxis_prime.onboarding.registry import (
     storage_id as registry_storage_id,
 )
 from praxis_prime.policy.dials import dial_ids
+from praxis_prime.providers_auth.broker import (
+    ProviderAuthBroker,
+    oauth_sign_in_allowed,
+    scrub_audit_payload,
+    subscription_oauth_enabled,
+)
+from praxis_prime.providers_auth.xai_oauth import ISSUER, pinned_https
 from praxis_prime.router.settings import load_settings
 from praxis_prime.router.types import canonical_spec, parse_model_spec
 
@@ -80,6 +87,15 @@ def reject_oauth(auth_method: str) -> None:
     text = auth_method.strip().lower().replace("-", "_")
     if text == "oauth":
         raise OnboardingError(_OAUTH_MESSAGE, code="oauth_unavailable")
+
+
+def block_oauth(config_dir: Path, auth_method: str, dials: Mapping[str, str] | None = None) -> None:
+    """Flag off keeps today's refuse. Flag on does not spend a step-up here."""
+    text = auth_method.strip().lower().replace("-", "_")
+    if text != "oauth":
+        return
+    if not oauth_sign_in_allowed(config_dir, dials):
+        reject_oauth(text)
 
 
 @dataclass
@@ -135,6 +151,7 @@ class OnboardingService:
             "dials": dict(settings.dials),
             "cloudWarning": cloud_warning(settings.dials),
             "allowProviders": list(settings.allow_providers),
+            "auth": self._auth_status(),
         }
 
     def detect(self) -> dict[str, object]:
@@ -178,8 +195,20 @@ class OnboardingService:
         settings = self._settings()
         dials = settings.dials
         regulated = any(str(dials.get(dial_id, "")) == "enforce" for dial_id in REGULATED_DIALS)
+        providers = [registry_public_provider(entry) for entry in PROVIDERS]
+        allowed = oauth_sign_in_allowed(self.config_dir, dials)
+        if allowed:
+            for item in providers:
+                if item.get("id") != "xai":
+                    continue
+                methods = item.get("authMethods")
+                if not isinstance(methods, list):
+                    continue
+                for method in methods:
+                    if isinstance(method, dict) and method.get("id") == "oauth":
+                        method["available"] = True
         return {
-            "providers": [registry_public_provider(entry) for entry in PROVIDERS],
+            "providers": providers,
             "detection": {
                 "servers": detection.get("servers", []),
                 "envKeys": detection.get("envKeys", []),
@@ -188,7 +217,7 @@ class OnboardingService:
             "policy": {
                 "allowProviders": list(settings.allow_providers),
                 "regulatedEnforce": regulated,
-                "subscriptionOauthEnabled": False,
+                "subscriptionOauthEnabled": subscription_oauth_enabled(self.config_dir),
                 "cloudWarning": cloud_warning(dials),
             },
         }
@@ -223,14 +252,22 @@ class OnboardingService:
         lane: str = "",
         api_key: str = "",
         pin: str = "",
+        auth_method: str = "",
     ) -> dict[str, object]:
         provider_id = provider.strip().lower()
         model_name = model.strip()
         if not provider_id or not model_name:
             raise OnboardingError("a provider and a model are required", code="usage")
         url = _base_url(provider_id, base_url, lane)
-        key = self._key_for(provider_id, url, api_key)
-        if provider_id in _REQUIRED_KEY and not key:
+        folded = auth_method.strip().lower().replace("-", "_")
+        if folded == "oauth":
+            block_oauth(self.config_dir, folded, self._settings().dials)
+            if provider_id != "xai" or not pinned_https(url, inference=True):
+                raise OnboardingError("oauth bearer is not sent to that host", code="usage")
+            key = self._oauth_access_token()
+        else:
+            key = self._key_for(provider_id, url, api_key)
+        if provider_id in _REQUIRED_KEY and not key and folded != "oauth":
             raise OnboardingError(
                 f"{provider_id} needs an API key in the secrets file or --api-key-env",
                 code="usage",
@@ -271,7 +308,7 @@ class OnboardingService:
         }
 
     def save(self, selection: Selection) -> dict[str, object]:
-        reject_oauth(selection.auth_method)
+        block_oauth(self.config_dir, selection.auth_method, self._settings().dials)
         raw_lane = selection.lane.strip().lower()
         if raw_lane not in {"", "local", "lan", "cloud", "skip"}:
             raise OnboardingError("lane must be local, lan, cloud, or skip", code="usage")
@@ -302,6 +339,7 @@ class OnboardingService:
             lane=lane,
             api_key=prepared.api_key,
             pin=prepared.tls_fingerprint,
+            auth_method=prepared.auth_method,
         )
         roles = self._optional_roles(prepared, base, lane, tested["warnings"])
         # `lane` is the wizard flow (section, or the old loopback/other split).
@@ -330,6 +368,7 @@ class OnboardingService:
                 "host": _host_of(base),
                 "tested_at": _now(),
                 "actor": prepared.actor,
+                "auth_method": prepared.auth_method or "api_key",
             },
         )
         return {
@@ -397,7 +436,7 @@ class OnboardingService:
         ``openai-compatible`` adapter before the spec is compared or saved.
         The lane is derived from the wizard id, before that fold.
         """
-        reject_oauth(selection.auth_method)
+        block_oauth(self.config_dir, selection.auth_method, self._settings().dials)
         lane = selection.lane.strip().lower()
         provider_text = selection.provider.strip().lower()
         if lane == "skip" or provider_text == "skip":
@@ -438,7 +477,7 @@ class OnboardingService:
         The same spec at a new base URL counts. A model-only change counts
         too. The caller still decides whether a step-up is required.
         """
-        reject_oauth(selection.auth_method)
+        block_oauth(self.config_dir, selection.auth_method, self._settings().dials)
         prepared = self._prepared_selection(selection)
         if prepared is None:
             return False
@@ -453,6 +492,7 @@ class OnboardingService:
         changing = bool(current) and not _same_model_spec(current, spec)
         return (
             changing or self._replacing_key(provider, prepared) or self._endpoint_changed(prepared)
+            or self._switching_to_oauth(prepared)
         )
 
     def needs_step_up(self, selection: Selection) -> bool:
@@ -461,7 +501,7 @@ class OnboardingService:
         A model-only change does not. Changing the provider, its base URL,
         or a stored key does. The CLI does not call this.
         """
-        reject_oauth(selection.auth_method)
+        block_oauth(self.config_dir, selection.auth_method, self._settings().dials)
         prepared = self._prepared_selection(selection)
         if prepared is None:
             return False
@@ -476,7 +516,40 @@ class OnboardingService:
         current_provider = current.split(":", 1)[0]
         if provider and _canonical_provider(provider) != _canonical_provider(current_provider):
             return True
+        if self._switching_to_oauth(prepared):
+            return True
         return self._endpoint_changed(prepared)
+
+    def _switching_to_oauth(self, selection: Selection) -> bool:
+        if selection.auth_method != "oauth":
+            return False
+        record = read_record(self.config_dir)
+        if str(record.get("auth_method") or "") == "oauth":
+            return False
+        return bool(self._settings().model_spec.strip())
+
+    def _oauth_access_token(self) -> str:
+        broker = ProviderAuthBroker(self.config_dir, self.fetcher)
+        if not broker.has_tokens():
+            raise OnboardingError("sign in before saving", code="oauth_missing")
+        return broker.access_token()
+
+    def _oauth_account_public(self) -> dict[str, str]:
+        broker = ProviderAuthBroker(self.config_dir, self.fetcher)
+        status = broker.public_status()
+        account = status.get("account")
+        if not isinstance(account, dict):
+            return {}
+        digest = account.get("sub_hash")
+        if not isinstance(digest, str) or not digest:
+            return {}
+        return {"issuer": ISSUER, "sub_hash": digest}
+
+    def _auth_status(self) -> dict[str, object]:
+        settings = self._settings()
+        if settings.xai_auth != "oauth":
+            return {"provider": "xai", "method": "api_key", "state": "ok"}
+        return ProviderAuthBroker(self.config_dir, self.fetcher).public_status()
 
     def _replacing_key(self, provider: str, selection: Selection) -> bool:
         if not selection.api_key:
@@ -567,6 +640,12 @@ class OnboardingService:
             if selection.tls_fingerprint:
                 compat["tls_fingerprint"] = selection.tls_fingerprint
             providers["openai_compatible"] = compat
+        if provider == "xai" and selection.auth_method == "oauth":
+            xai = providers.get("xai")
+            if not isinstance(xai, dict):
+                xai = {}
+            xai["auth"] = "oauth"
+            providers["xai"] = xai
         models["providers"] = providers
         document["models"] = models
         if selection.judge_model and "judge" in roles:
@@ -605,6 +684,10 @@ class OnboardingService:
         }
         if selection.auth_method:
             record["auth_method"] = selection.auth_method
+        if selection.auth_method == "oauth":
+            account = self._oauth_account_public()
+            if account:
+                record["account"] = account
         write_record(self.config_dir, record)
 
     def _optional_roles(
@@ -632,6 +715,7 @@ class OnboardingService:
                     lane=lane,
                     api_key=selection.api_key,
                     pin=selection.tls_fingerprint,
+                    auth_method=selection.auth_method,
                 )
             except OnboardingError:
                 if isinstance(warnings, list):
@@ -826,9 +910,13 @@ class OnboardingService:
     def _audit(self, kind: str, summary: str, payload: dict[str, object]) -> None:
         if self.audit is None:
             return
-        safe = {
-            key: value for key, value in payload.items() if "key" not in key and "secret" not in key
-        }
+        safe = scrub_audit_payload(
+            {
+                key: value
+                for key, value in payload.items()
+                if "key" not in key and "secret" not in key
+            }
+        )
         if self.actor and "actor" not in safe:
             safe["actor"] = self.actor
         try:

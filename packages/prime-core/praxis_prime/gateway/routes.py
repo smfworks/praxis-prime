@@ -65,6 +65,10 @@ _EXACT = frozenset(
         ("POST", "/v1/onboarding/dials"),
         ("POST", "/v1/onboarding/oidc"),
         ("POST", "/v1/onboarding/telegram"),
+        ("POST", "/v1/onboarding/oauth/start"),
+        ("POST", "/v1/onboarding/oauth/poll"),
+        ("POST", "/v1/onboarding/oauth/cancel"),
+        ("POST", "/v1/onboarding/oauth/signout"),
         ("GET", "/v1/themes"),
         ("GET", "/v1/themes/active"),
         ("POST", "/v1/themes/preview"),
@@ -91,6 +95,10 @@ _FRAME_TYPES = frozenset(
         "onboarding.providers",
         "onboarding.test",
         "onboarding.save",
+        "onboarding.oauth.start",
+        "onboarding.oauth.poll",
+        "onboarding.oauth.cancel",
+        "onboarding.oauth.signout",
     }
 )
 
