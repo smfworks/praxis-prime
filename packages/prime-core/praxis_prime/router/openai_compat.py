@@ -8,8 +8,9 @@ with an error that names the environment variable to set.
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 
+from praxis_prime.providers_auth.xai_oauth import pinned_https
 from praxis_prime.router.http import normalize_base, open_lines
 from praxis_prime.router.types import (
     ChatRequest,
@@ -95,6 +96,8 @@ class OpenAICompatibleProvider:
         key_hint: str,
         timeout: float = 90,
         require_key: bool = False,
+        credential: Callable[[], str] | None = None,
+        pin_hosts: tuple[str, ...] = (),
     ) -> None:
         self.name = name
         self.base_url = normalize_base(base_url)
@@ -102,13 +105,35 @@ class OpenAICompatibleProvider:
         self.key_hint = key_hint
         self.timeout = timeout
         self.require_key = require_key
+        self.credential = credential
+        self.pin_hosts = pin_hosts
+
+    def _bearer(self, url: str) -> str:
+        """OAuth bearer only when the URL is pinned. A bad host never calls the callback."""
+        if self.credential is None:
+            return self.api_key
+        if self.pin_hosts and not pinned_https(url, inference=True):
+            raise ProviderUnreachable(
+                self.name,
+                "oauth bearer is not sent to that host",
+            )
+        if self.pin_hosts:
+            from urllib.parse import urlsplit
+
+            host = (urlsplit(url).hostname or "").lower()
+            if host not in self.pin_hosts:
+                raise ProviderUnreachable(
+                    self.name,
+                    "oauth bearer is not sent to that host",
+                )
+        return self.credential()
 
     async def stream(self, request: ChatRequest) -> AsyncIterator[StreamEvent]:
         for event in self.iter_stream(request):
             yield event
 
     def iter_stream(self, request: ChatRequest) -> Iterator[StreamEvent]:
-        if self.require_key and not self.api_key:
+        if self.require_key and not self.api_key and self.credential is None:
             raise ProviderUnreachable(
                 self.name,
                 f"{self.name} API key is not set. Export {self.key_hint}. "
@@ -121,16 +146,17 @@ class OpenAICompatibleProvider:
                 "Set PRAXIS_PRIME_OPENAI_COMPATIBLE_BASE_URL for llama.cpp or vLLM.",
             )
         url = completions_url(self.base_url)
+        token = self._bearer(url)
         headers = {"Content-Type": "application/json"}
-        if self.api_key:
-            headers["Authorization"] = f"Bearer {self.api_key}"
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
         body = json.dumps(completions_body(request)).encode("utf-8")
         lines = open_lines(
             url,
             body,
             headers,
             timeout=self.timeout,
-            secrets=[self.api_key],
+            secrets=[token or self.api_key],
             provider=self.name,
         )
         assembler = StreamAssembler()

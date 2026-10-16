@@ -110,6 +110,24 @@ _XAI_BILLING = (
     "A SuperGrok or X Premium subscription does not include API credits. "
     "API-key usage is billed separately by xAI, even if you also subscribe."
 )
+# Public shared client id named in docs/specs/provider-picker.md. Not copied from another tree.
+_XAI_OAUTH = OAuthSpec(
+    issuer="https://auth.x.ai",
+    client_id="b1a00492-073a-47ea-816f-4c329264a828",
+    scopes=(
+        "openid",
+        "profile",
+        "email",
+        "offline_access",
+        "grok-cli:access",
+        "api:access",
+    ),
+    flows=("device",),
+    referrer="praxis-prime",
+    allowed_hosts=(".x.ai",),
+    inference_base_url="https://api.x.ai/v1",
+    inference_hosts=("api.x.ai",),
+)
 
 PROVIDERS: tuple[ProviderEntry, ...] = (
     ProviderEntry(
@@ -237,6 +255,9 @@ PROVIDERS: tuple[ProviderEntry, ...] = (
                 id="oauth",
                 label="Sign in with Grok (SuperGrok / X Premium subscription)",
                 note="Coming soon",
+                oauth=_XAI_OAUTH,
+                experimental=True,
+                regulated_ok=False,
                 available=False,
             ),
         ),
@@ -617,9 +638,9 @@ def env_badge(entry: ProviderEntry, present: set[str]) -> str:
 
 
 def resolve_auth(provider: str, requested: str, lane: str) -> str:
-    """``none`` or ``api_key``. OAuth is refused by the caller before this."""
+    """``none``, ``api_key``, or ``oauth``. The caller refuses oauth when the flag is off."""
     text = requested.strip().lower().replace("-", "_")
-    if text in {"api_key", "none"}:
+    if text in {"api_key", "none", "oauth"}:
         return text
     entry = by_id(provider)
     if entry is not None and entry.section == "cloud":

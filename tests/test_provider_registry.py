@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 from praxis_prime.onboarding.detect import KEY_ENV_NAMES, LOCAL_SERVERS
 from praxis_prime.onboarding.registry import (
     CLOUD_BASES,
@@ -11,6 +13,7 @@ from praxis_prime.onboarding.registry import (
     PROVIDERS,
     REQUIRED_KEY,
     lane_for,
+    public_provider,
     resolve_alias,
 )
 from praxis_prime.router.factory import default_providers
@@ -62,6 +65,11 @@ def test_ids_are_unique_and_adapters_parse():
         assert parsed.provider == entry.adapter
         assert entry.adapter in known
         for method in entry.auth_methods:
+            if entry.id == "xai" and method.id == "oauth":
+                assert method.oauth is not None
+                assert method.oauth.inference_hosts == ("api.x.ai",)
+                assert "client_id" not in json.dumps(public_provider(entry))
+                continue
             assert method.oauth is None
 
 

@@ -25,7 +25,7 @@ def load_document(path: Path) -> dict[str, object]:
 
 
 def backup_config(path: Path) -> Path | None:
-    """Copy config.toml to a timestamped mode-0600 file. Missing files are skipped."""
+    """Copy config.toml only. ``provider-auth/`` is not a backup (rotating grants)."""
     if not path.is_file():
         return None
     stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())

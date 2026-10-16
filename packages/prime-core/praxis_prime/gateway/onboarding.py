@@ -23,7 +23,7 @@ from praxis_prime.onboarding.service import (
     OnboardingError,
     OnboardingService,
     Selection,
-    reject_oauth,
+    block_oauth,
 )
 from praxis_prime.onboarding.token import HEADER_NAME, invalidate_first_run_token, token_matches
 from praxis_prime.paths import state_dir
@@ -85,6 +85,9 @@ def handle_onboarding(
     if accounts.has_accounts() and _creation_active(server):
         return _await_peer_owner(server)
     owner_exists = accounts.has_accounts()
+    if route.startswith("/v1/onboarding/oauth/"):
+        if not owner_exists:
+            return 401, _error("unauthorized", "sign-in requires an owner session")
     if owner_exists and server.config_dir is not None and not _creation_active(server):
         invalidate_first_run_token(server.config_dir)
     if method == "GET" and route == "/v1/onboarding/status":
@@ -132,6 +135,8 @@ def onboarding_payload(
     if kind == "onboarding.save":
         prepared, selection = _prepare_save(server, principal, payload)
         return _finish_save(server, prepared.save(selection))
+    if kind.startswith("onboarding.oauth."):
+        return _oauth_body(server, "/v1/" + kind.replace(".", "/"), payload, principal)
     raise OnboardingError("unknown setup request", code="not_found")
 
 
@@ -263,6 +268,8 @@ def _dispatch(
             return _oidc(server, payload)
         if route == "/v1/onboarding/telegram":
             return _telegram(server)
+        if route.startswith("/v1/onboarding/oauth/"):
+            return 200, _oauth_body(server, route, payload, principal)
     except OnboardingError as exc:
         status = {
             "usage": 400,
@@ -271,6 +278,9 @@ def _dispatch(
             "context": 422,
             "test": 422,
             "oauth_unavailable": 400,
+            "oauth_missing": 400,
+            "forbidden": 403,
+            "not_found": 404,
         }.get(exc.code, 400)
         return status, _error(exc.code, str(exc))
     return 404, _error("not_found", "no such setup route")
@@ -811,7 +821,7 @@ def _prepare_save(
     actor = "" if principal is None else str(getattr(principal, "account_id", "") or "")
     service = _service(server, actor)
     selection = _selection(payload, actor)
-    reject_oauth(selection.auth_method)
+    block_oauth(server.config_dir, selection.auth_method, service._settings().dials)
     if service.requires_replace(selection) and not selection.replace:
         raise OnboardingError(
             "a provider is already configured; pass --replace to change it",
@@ -859,6 +869,69 @@ def _oidc(server: Any, payload: dict[str, object]) -> tuple[int, dict[str, objec
     except OidcError as exc:
         return 400, _error("bad_request", str(exc))
     return 200, {"ok": True, "providerId": provider_id, "secretKey": name}
+
+
+def _oauth_body(
+    server: Any,
+    route: str,
+    payload: dict[str, object],
+    principal: Any,
+) -> dict[str, object]:
+    from praxis_prime.providers_auth import http as oauth_http
+
+    action = route.rsplit("/", 1)[-1]
+    if action == "start":
+        body = oauth_http.start(server, principal, payload)
+        _audit_oauth(
+            server,
+            principal,
+            "provider.oauth.started",
+            {"provider": "xai", "flow": "device"},
+        )
+        return body
+    if action == "poll":
+        body = oauth_http.poll(server, principal, payload)
+        status = str(body.get("status") or "")
+        if status == "approved":
+            _audit_oauth(server, principal, "provider.oauth.connected", {"provider": "xai"})
+        elif status in {"denied", "expired", "ineligible", "failed"}:
+            _audit_oauth(
+                server,
+                principal,
+                "provider.oauth.failed",
+                {"provider": "xai", "reason": status},
+            )
+        return body
+    if action == "cancel":
+        return oauth_http.cancel(server, principal, payload)
+    if action == "signout":
+        body = oauth_http.sign_out(server, principal, payload)
+        _audit_oauth(
+            server,
+            principal,
+            "provider.oauth.signed_out",
+            {"revoked": body.get("revoked") is True},
+        )
+        return body
+    raise OnboardingError("no such setup route", code="not_found")
+
+
+def _audit_oauth(server: Any, principal: Any, kind: str, payload: dict[str, object]) -> None:
+    if getattr(server, "audit", None) is None:
+        return
+    from praxis_prime.providers_auth.broker import scrub_audit_payload
+
+    actor = "" if principal is None else str(getattr(principal, "account_id", "") or "")
+    try:
+        server.audit.append(
+            session_id=None,
+            kind=kind,
+            summary=kind,
+            payload=scrub_audit_payload(payload),
+            actor_account=actor,
+        )
+    except (OSError, RuntimeError, ValueError, TypeError):
+        return
 
 
 def _telegram(server: Any) -> tuple[int, dict[str, object]]:

@@ -60,6 +60,7 @@ class Settings:
     vision_spec: str = ""
     judge_spec: str = ""
     trusted_inference_hosts: tuple[str, ...] = ()
+    xai_auth: str = "api_key"
 
     def __repr__(self) -> str:
         return (
@@ -169,6 +170,10 @@ def load_settings(
     xai_url = normalize_base(
         _first(environ.get("PRAXIS_PRIME_XAI_BASE_URL"), "https://api.x.ai/v1")
     )
+    xai_cfg = _table(providers.get("xai"))
+    xai_auth = _str(xai_cfg.get("auth")).strip().lower().replace("-", "_")
+    if xai_auth not in {"api_key", "oauth"}:
+        xai_auth = "api_key"
     # Addendum §2 egress policy: a lan host is on-prem for compliance only
     # when it is listed here. A public address is never local via this list.
     trusted_inference_hosts = _trusted_hosts(models.get("trusted_inference_hosts"))
@@ -189,7 +194,7 @@ def load_settings(
         "anthropic": flags_from_config(
             "anthropic", _table(providers.get("anthropic")), base_url=anthropic_url
         ),
-        "xai": flags_from_config("xai", _table(providers.get("xai")), base_url=xai_url),
+        "xai": flags_from_config("xai", xai_cfg, base_url=xai_url),
     }
     secrets = _provider_secrets(environ, path)
     allow_raw = models.get("allow_providers") or []
@@ -244,6 +249,7 @@ def load_settings(
         vision_spec=_str(models.get("vision")).strip(),
         judge_spec=_judge_spec(file_data),
         trusted_inference_hosts=trusted_inference_hosts,
+        xai_auth=xai_auth,
     )
 
 

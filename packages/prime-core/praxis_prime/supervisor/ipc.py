@@ -82,7 +82,7 @@ def _read_exact(sock: socket.socket, count: int) -> bytes:
 
 
 # Methods a worker may call on the supervisor. Anything else is refused.
-WORKER_METHODS = frozenset({"grant.check", "event"})
+WORKER_METHODS = frozenset({"grant.check", "event", "provider.credential"})
 
 # Methods the supervisor may call on a worker.
 SUPERVISOR_METHODS = frozenset(

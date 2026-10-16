@@ -189,7 +189,7 @@ def reload_serving_router(
     def apply() -> None:
         fresh = load_settings(env, config_path=config_path)
         fresh = replace(fresh, dials=dict(runtime.settings.dials))
-        router = build_router(fresh)
+        router = build_router(fresh, config_dir=config_path.parent)
         router.require_verified = True
         router.verified_specs = set(fresh.verified_specs)
         runtime.settings = fresh
@@ -236,7 +236,11 @@ def build_runtime(
         source = os.environ if env is None else env
         stub_map = providers_from_env(source)
         chosen = stub_map
-    router = build_router(settings, chosen)
+    router = build_router(
+        settings,
+        chosen,
+        config_dir=None if config_path is None else config_path.parent,
+    )
     router.require_verified = providers is None and stub_map is None
     router.verified_specs = set(settings.verified_specs)
     if model:

@@ -24,6 +24,7 @@ from praxis_prime.onboarding.service import (
 )
 from praxis_prime.onboarding.token import ensure_first_run_token, invalidate_first_run_token
 from praxis_prime.paths import config_dir, data_dir, runtime_dir
+from praxis_prime.providers_auth.broker import ProviderAuthBroker, oauth_sign_in_allowed
 
 _SECTIONS = ("models", "owner", "dials", "oidc", "telegram")
 
@@ -47,8 +48,11 @@ def add_setup_parser(commands: argparse._SubParsersAction) -> None:
     setup.add_argument(
         "--auth",
         default="",
-        help="api-key or none. Subscription sign-in is not available yet.",
+        help="api-key, none, or oauth. oauth needs the experimental flag.",
     )
+    setup.add_argument("--oauth-timeout", type=float, default=900)
+    setup.add_argument("--provider-status", action="store_true")
+    setup.add_argument("--sign-out", default="", help="Provider id to sign out. xai only.")
     setup.add_argument(
         "--list-providers",
         action="store_true",
@@ -80,15 +84,29 @@ def setup_command(
     stdin = sys.stdin if stdin is None else stdin
     stdout = sys.stdout if stdout is None else stdout
     environ = os.environ if env is None else env
+    if fetcher is None:
+        from praxis_prime.onboarding.probe import fetch as probe_fetch
+
+        fetcher = probe_fetch
     if args.skip_test:
         stdout.write("praxis-prime setup: --skip-test cannot mark the provider ready.\n")
         return 2
+    config = _config(args, environ)
+    if getattr(args, "provider_status", False):
+        return _provider_status(config, stdout, bool(getattr(args, "as_json", False)))
+    sign_out = str(getattr(args, "sign_out", "") or "").strip().lower()
+    if sign_out:
+        return _sign_out(config, sign_out, bool(args.replace), stdout, fetcher)
     auth = getattr(args, "auth", "") or ""
-    folded_auth = auth.strip().lower()
+    folded_auth = auth.strip().lower().replace("-", "_")
     if folded_auth == "oauth":
-        stdout.write("praxis-prime setup: Subscription sign-in is coming in a later release.\n")
-        return 2
-    if folded_auth and folded_auth not in {"api-key", "api_key", "none"}:
+        from praxis_prime.router.settings import load_settings
+
+        dials = load_settings({}, config_path=config / "config.toml").dials
+        if not oauth_sign_in_allowed(config, dials):
+            stdout.write("praxis-prime setup: Subscription sign-in is coming in a later release.\n")
+            return 2
+    if folded_auth and folded_auth not in {"api-key", "api_key", "none", "oauth"}:
         stdout.write("praxis-prime setup: --auth must be api-key or none.\n")
         return 2
     if args.web:
@@ -111,7 +129,7 @@ def setup_command(
     try:
         if interactive:
             return _interactive(args, service, stdin, stdout, environ)
-        return _scripted(args, service, stdin, stdout, environ)
+        return _scripted(args, service, stdin, stdout, environ, fetcher)
     except OnboardingError as exc:
         stdout.write(f"praxis-prime setup: {exc}\n")
         if exc.code in {"usage", "replace", "allowlist"}:
@@ -119,7 +137,14 @@ def setup_command(
         return 1
 
 
-def _scripted(args, service: OnboardingService, stdin, stdout, env: Mapping[str, str]) -> int:
+def _scripted(
+    args,
+    service: OnboardingService,
+    stdin,
+    stdout,
+    env: Mapping[str, str],
+    fetcher=None,
+) -> int:
     section = args.section or ""
     if section in {"", "owner"} and args.owner:
         code = _create_scripted_owner(args, stdin, stdout, env)
@@ -143,9 +168,22 @@ def _scripted(args, service: OnboardingService, stdin, stdout, env: Mapping[str,
         result = service.save(Selection(lane="skip", replace=args.replace))
         stdout.write("Inference is not configured. Chat will say so until you choose a provider.\n")
         return 0 if result.get("ok") else 1
-    key = _scripted_key(args, stdin, stdout, env)
-    if key is None:
-        return 2
+    auth_method = _auth_value(args)
+    if auth_method == "oauth":
+        if provider != "xai":
+            stdout.write("praxis-prime setup: subscription sign-in is only for xai.\n")
+            return 2
+        timeout = float(getattr(args, "oauth_timeout", 900) or 900)
+        try:
+            _device_sign_in(service, stdout, timeout, fetcher)
+        except OnboardingError as exc:
+            stdout.write(f"praxis-prime setup: {exc}\n")
+            return 2
+        key = ""
+    else:
+        key = _scripted_key(args, stdin, stdout, env)
+        if key is None:
+            return 2
     derived = _lane_for(provider, args.base_url)
     lane = args.lane or derived
     if not args.lane:
@@ -162,7 +200,7 @@ def _scripted(args, service: OnboardingService, stdin, stdout, env: Mapping[str,
             api_key=key,
             tls_fingerprint=args.tls_fingerprint,
             replace=args.replace,
-            auth_method=_auth_value(args),
+            auth_method=auth_method,
         )
     )
     stdout.write(f"Inference ready ({result.get('spec', '')}).\n")
@@ -278,10 +316,21 @@ def _interactive_models(service, stdin, stdout, status: dict[str, object]) -> No
             state = "picker"
             continue
         if state == "auth":
-            _print_xai_auth(stdout)
+            allowed = oauth_sign_in_allowed(service.config_dir, service._settings().dials)
+            _print_xai_auth(stdout, allowed=allowed)
             answer = _ask(stdin, stdout, "Choice (nothing is preselected): ").strip()
             if answer == "b":
                 state = "picker"
+                continue
+            if allowed and answer == "2":
+                try:
+                    _device_sign_in(service, stdout, 900, service.fetcher)
+                except OnboardingError as exc:
+                    stdout.write(f"{exc}\n")
+                    continue
+                auth = "oauth"
+                base = entry.default_base_url
+                state = "model"
                 continue
             if answer != "1":
                 stdout.write("Subscription sign-in is coming in a later release.\n")
@@ -324,7 +373,7 @@ def _interactive_models(service, stdin, stdout, status: dict[str, object]) -> No
             probed = _model_choices(service, stdout, entry, base)
             chosen = _ask_model(stdin, stdout, entry, probed)
             if chosen is None:
-                state = "key"
+                state = "auth" if auth == "oauth" else "key"
                 continue
             if not chosen:
                 stdout.write("A primary model is required.\n")
@@ -410,8 +459,63 @@ def _list_providers(service: OnboardingService, stdout, as_json: bool) -> int:
 
 
 def _auth_value(args) -> str:
-    raw = (getattr(args, "auth", "") or "").strip().lower()
-    return {"api-key": "api_key", "api_key": "api_key", "none": "none"}.get(raw, "")
+    raw = (getattr(args, "auth", "") or "").strip().lower().replace("-", "_")
+    names = {"api-key": "api_key", "api_key": "api_key", "none": "none", "oauth": "oauth"}
+    return names.get(raw, "")
+
+
+def _device_sign_in(service: OnboardingService, stdout, timeout: float, fetcher) -> None:
+    import time
+
+    broker = ProviderAuthBroker(service.config_dir, fetcher or service.fetcher)
+    started = broker.start_device(session_id="cli", account_id="owner")
+    stdout.write(f"{started['verificationUriComplete']}\n")
+    stdout.write(f"Code: {started['userCode']}\n")
+    deadline = time.time() + max(timeout, 1)
+    interval = max(int(started.get("interval") or 0), 0)
+    while time.time() < deadline:
+        state = broker.poll(str(started["flowId"]), "cli")
+        status = str(state.get("status") or "")
+        if status == "approved":
+            stdout.write("Signed in.\n")
+            return
+        if status in {"denied", "expired", "ineligible", "failed"}:
+            raise OnboardingError(f"sign-in {status}", code="oauth_unavailable")
+        if interval:
+            time.sleep(min(interval, 1))
+        else:
+            break
+    raise OnboardingError("sign-in expired", code="oauth_unavailable")
+
+
+def _provider_status(config, stdout, as_json: bool) -> int:
+    import json
+
+    broker = ProviderAuthBroker(config)
+    body = broker.public_status()
+    if as_json:
+        stdout.write(json.dumps(body) + "\n")
+    else:
+        stdout.write(f"xAI auth: {body.get('state')}\n")
+    return 0
+
+
+def _sign_out(config, provider: str, replace: bool, stdout, fetcher) -> int:
+    if provider != "xai":
+        stdout.write("praxis-prime setup: --sign-out only supports xai.\n")
+        return 2
+    if not oauth_sign_in_allowed(config):
+        stdout.write("praxis-prime setup: Subscription sign-in is coming in a later release.\n")
+        return 2
+    from praxis_prime.router.settings import load_settings
+
+    settings = load_settings({}, config_path=config / "config.toml")
+    if settings.xai_auth == "oauth" and settings.model_spec.startswith("xai:") and not replace:
+        stdout.write("praxis-prime setup: --sign-out xai needs --replace when it is the primary.\n")
+        return 2
+    revoked = ProviderAuthBroker(config, fetcher).sign_out()
+    stdout.write("Signed out.\n" if revoked else "Signed out locally.\n")
+    return 0
 
 
 def _print_picker(stdout, detection: dict[str, object], search: str, warning: str) -> bool:
@@ -496,9 +600,12 @@ def _env_badge(entry: ProviderEntry, present: set[str]) -> str:
     return ""
 
 
-def _print_xai_auth(stdout) -> None:
+def _print_xai_auth(stdout, *, allowed: bool = False) -> None:
     stdout.write("How do you want to connect to Grok?\n")
-    stdout.write("  Sign in with Grok (SuperGrok / X Premium subscription) [coming soon]\n")
+    if allowed:
+        stdout.write("  2 Sign in with Grok (SuperGrok / X Premium subscription)\n")
+    else:
+        stdout.write("  Sign in with Grok (SuperGrok / X Premium subscription) [coming soon]\n")
     stdout.write("  1 API key (billed to your xAI API account)\n")
     stdout.write(
         "A SuperGrok or X Premium subscription does not include API credits. "
