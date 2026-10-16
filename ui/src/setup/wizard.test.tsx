@@ -1,8 +1,9 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, render, screen, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import { ApiError } from "../api";
 import { CLOUD_WARNING, SetupWizard } from "../setup";
 import { NO_GPU_NOTE } from "./types";
 
@@ -89,6 +90,36 @@ const CATALOG = {
     hardware: [],
   },
   policy: { allowProviders: [], cloudWarning: "" },
+};
+
+function flagOnCatalog(regulatedEnforce = false) {
+  return {
+    ...CATALOG,
+    providers: CATALOG.providers.map((item) => {
+      if (item.id !== "xai") return item;
+      return {
+        ...item,
+        authMethods: item.authMethods.map((method) =>
+          method.id === "oauth" ? { ...method, available: true, note: "" } : method,
+        ),
+      };
+    }),
+    policy: {
+      allowProviders: [],
+      cloudWarning: "",
+      subscriptionOauthEnabled: true,
+      regulatedEnforce,
+    },
+  };
+}
+
+const DEVICE = {
+  flowId: "flow-1",
+  userCode: "WDJB-MJHT",
+  verificationUri: "https://accounts.x.ai/device",
+  verificationUriComplete: "https://accounts.x.ai/device?user_code=WDJB-MJHT",
+  expiresAt: 1_800_000_000,
+  interval: 0,
 };
 
 function renderWizard() {
@@ -310,5 +341,119 @@ describe("provider picker", () => {
     await user.click(screen.getByRole("button", { name: "Continue" }));
     expect(await screen.findByRole("heading", { name: "Model" })).toBeInTheDocument();
     expect(screen.getByText(CLOUD_WARNING)).toBeInTheDocument();
+  });
+
+  it("flag-on catalog enables the button and Continue does not show coming in a later release", async () => {
+    api.mockImplementation(async (_method: string, path: string) => {
+      if (path === "/v1/onboarding/status") return { provider: "", dials: {}, missing: [] };
+      if (path === "/v1/onboarding/providers") return flagOnCatalog();
+      if (path === "/v1/onboarding/oauth/start") return { ...DEVICE, interval: 30 };
+      if (path === "/v1/onboarding/oauth/poll") return { status: "pending" };
+      if (path === "/v1/onboarding/oauth/cancel") return { ok: true };
+      return {};
+    });
+    const user = userEvent.setup();
+    renderWizard();
+    await user.click(await screen.findByRole("option", { name: "xAI (Grok)" }));
+    const signIn = screen.getByRole("button", { name: /Sign in with Grok/ });
+    expect(signIn).toBeEnabled();
+    expect(signIn).not.toHaveTextContent("Coming soon");
+    await user.click(signIn);
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    expect(screen.queryByText(/coming in a later release/i)).not.toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Sign in with Grok" })).toBeInTheDocument();
+  });
+
+  it("flag-off catalog never calls oauth/start", async () => {
+    const user = userEvent.setup();
+    renderWizard();
+    await user.click(await screen.findByRole("option", { name: "xAI (Grok)" }));
+    expect(screen.getByRole("button", { name: /Sign in with Grok/ })).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    expect(await screen.findByText(/coming in a later release/i)).toBeInTheDocument();
+    expect(api).not.toHaveBeenCalledWith("POST", "/v1/onboarding/oauth/start", expect.anything());
+  });
+
+  it("keeps sign-in disabled and shows the enforce sentence when a regulated dial is at enforce", async () => {
+    api.mockImplementation(async (_method: string, path: string) => {
+      if (path === "/v1/onboarding/status") return { provider: "", dials: {}, missing: [] };
+      if (path === "/v1/onboarding/providers") return flagOnCatalog(true);
+      return {};
+    });
+    const user = userEvent.setup();
+    renderWizard();
+    await user.click(await screen.findByRole("option", { name: "xAI (Grok)" }));
+    expect(screen.getByRole("button", { name: /Sign in with Grok/ })).toBeDisabled();
+    expect(screen.getByText(/can't be covered by a BAA\/DPA/)).toBeInTheDocument();
+    expect(api).not.toHaveBeenCalledWith("POST", "/v1/onboarding/oauth/start", expect.anything());
+  });
+
+  it("save posts authMethod oauth and does not post an API key", async () => {
+    api.mockImplementation(async (_method: string, path: string) => {
+      if (path === "/v1/onboarding/status") return { provider: "", dials: {}, missing: [] };
+      if (path === "/v1/onboarding/providers") return flagOnCatalog();
+      if (path === "/v1/onboarding/oauth/start") return DEVICE;
+      if (path === "/v1/onboarding/oauth/poll") {
+        return { status: "approved", account: { name: "Ada", email: "ada@x.ai" } };
+      }
+      if (path === "/v1/onboarding/oauth/cancel") return { ok: true };
+      if (path === "/v1/onboarding/save") return { inferenceReady: true, spec: "xai:grok-4.7" };
+      return {};
+    });
+    const user = userEvent.setup();
+    renderWizard();
+    await user.click(await screen.findByRole("option", { name: "xAI (Grok)" }));
+    await user.click(screen.getByRole("button", { name: /Sign in with Grok/ }));
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    expect(await screen.findByText("Signed in as ada@x.ai")).toBeInTheDocument();
+    expect(screen.getByText("Ada")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    expect(await screen.findByLabelText("Primary model")).toHaveValue("grok-4.7");
+    await user.click(screen.getByRole("button", { name: "Test and save" }));
+    await waitFor(() => {
+      expect(api).toHaveBeenCalledWith(
+        "POST",
+        "/v1/onboarding/save",
+        expect.objectContaining({ authMethod: "oauth", provider: "xai", model: "grok-4.7" }),
+      );
+    });
+    const save = api.mock.calls.find((call) => call[1] === "/v1/onboarding/save");
+    expect(save?.[2]).not.toHaveProperty("apiKey");
+  });
+
+  it("a 409 replace uses the existing step-up path and retries start once with stepUpToken", async () => {
+    const starts: Record<string, unknown>[] = [];
+    api.mockImplementation(async (_method: string, path: string, body?: Record<string, unknown>) => {
+      if (path === "/v1/onboarding/status") return { provider: "", dials: {}, missing: [] };
+      if (path === "/v1/onboarding/providers") return flagOnCatalog();
+      if (path === "/v1/onboarding/oauth/start") {
+        starts.push(body ?? {});
+        if (!body?.stepUpToken) throw new ApiError(409, "replace", "needs a step-up");
+        return { ...DEVICE, interval: 30 };
+      }
+      if (path === "/v1/auth/step-up") return { stepUpToken: "step-up-1" };
+      if (path === "/v1/onboarding/oauth/poll") return { status: "pending" };
+      if (path === "/v1/onboarding/oauth/cancel") return { ok: true };
+      return {};
+    });
+    const user = userEvent.setup();
+    renderWizard();
+    await user.click(await screen.findByRole("option", { name: "xAI (Grok)" }));
+    await user.click(screen.getByRole("button", { name: /Sign in with Grok/ }));
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    expect(await screen.findByLabelText("Account password")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Use a passkey" })).toBeInTheDocument();
+    await user.click(screen.getByRole("checkbox", { name: "Replace the current provider" }));
+    await user.type(screen.getByLabelText("Account password"), "correct horse");
+    await user.click(screen.getByRole("button", { name: "Confirm this change" }));
+    await waitFor(() => expect(starts).toHaveLength(2));
+    expect(starts[0]).toEqual({ provider: "xai", flow: "device" });
+    expect(starts[1]).toEqual({ provider: "xai", flow: "device", stepUpToken: "step-up-1" });
+    expect(starts[1]).not.toHaveProperty("replace");
+    expect(api).toHaveBeenCalledWith(
+      "POST",
+      "/v1/auth/step-up",
+      expect.objectContaining({ password: "correct horse" }),
+    );
   });
 });

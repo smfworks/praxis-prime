@@ -36,7 +36,19 @@ export type Catalog = {
   hardware: unknown[];
   allowProviders: string[];
   cloudWarning: string;
+  subscriptionOauthEnabled: boolean;
+  regulatedEnforce: boolean;
 };
+
+export function xaiOauthReady(
+  entry: ProviderInfo,
+  subscriptionOauthEnabled: boolean,
+  regulatedEnforce: boolean,
+): boolean {
+  if (entry.id !== "xai" || regulatedEnforce || !subscriptionOauthEnabled) return false;
+  const method = entry.authMethods.find((item) => item.id === "oauth");
+  return method?.available === true;
+}
 
 export const NO_GPU_NOTE =
   "No GPU detected. Local models will run on the CPU and may be slow. A small model, a server on your network, or a cloud provider may work better.";
