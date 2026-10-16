@@ -84,6 +84,10 @@ def setup_command(
     stdin = sys.stdin if stdin is None else stdin
     stdout = sys.stdout if stdout is None else stdout
     environ = os.environ if env is None else env
+    if fetcher is None:
+        from praxis_prime.onboarding.probe import fetch as probe_fetch
+
+        fetcher = probe_fetch
     if args.skip_test:
         stdout.write("praxis-prime setup: --skip-test cannot mark the provider ready.\n")
         return 2
@@ -95,9 +99,13 @@ def setup_command(
         return _sign_out(config, sign_out, bool(args.replace), stdout, fetcher)
     auth = getattr(args, "auth", "") or ""
     folded_auth = auth.strip().lower().replace("-", "_")
-    if folded_auth == "oauth" and not oauth_sign_in_allowed(config):
-        stdout.write("praxis-prime setup: Subscription sign-in is coming in a later release.\n")
-        return 2
+    if folded_auth == "oauth":
+        from praxis_prime.router.settings import load_settings
+
+        dials = load_settings({}, config_path=config / "config.toml").dials
+        if not oauth_sign_in_allowed(config, dials):
+            stdout.write("praxis-prime setup: Subscription sign-in is coming in a later release.\n")
+            return 2
     if folded_auth and folded_auth not in {"api-key", "api_key", "none", "oauth"}:
         stdout.write("praxis-prime setup: --auth must be api-key or none.\n")
         return 2

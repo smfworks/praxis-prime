@@ -445,11 +445,11 @@ class Supervisor:
         config = self.config_path
         if config is None:
             return {"error": "unavailable"}
-        from praxis_prime.providers_auth.broker import ProviderAuthBroker
+        from praxis_prime.providers_auth.broker import process_broker
         from praxis_prime.providers_auth.xai_oauth import XaiOAuthError
 
         try:
-            granted = ProviderAuthBroker(config.parent).credential_for_worker()
+            granted = process_broker(config.parent).credential_for_worker()
         except (XaiOAuthError, OSError, ValueError):
             return {"error": "needs_reauth"}
         if "refresh_token" in granted or "refreshToken" in granted:

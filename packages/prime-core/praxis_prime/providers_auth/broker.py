@@ -434,6 +434,30 @@ class ProviderAuthBroker:
         }
 
 
+_process_brokers: dict[str, ProviderAuthBroker] = {}
+_process_brokers_lock = threading.Lock()
+
+
+def process_broker(config_dir: Path, fetcher: Fetcher | None = None) -> ProviderAuthBroker:
+    """One broker per config directory for this process.
+
+    A directory that already has a broker keeps that instance, including its fetcher.
+    """
+    key = str(Path(config_dir).resolve())
+    with _process_brokers_lock:
+        held = _process_brokers.get(key)
+        if held is not None:
+            return held
+        if fetcher is None:
+            # Late import: onboarding.service imports this module.
+            from praxis_prime.onboarding.probe import fetch as probe_fetch
+
+            fetcher = probe_fetch
+        created = ProviderAuthBroker(config_dir, fetcher)
+        _process_brokers[key] = created
+        return created
+
+
 def _missing_fetcher(*_args: object, **_kwargs: object) -> object:
     raise XaiOAuthError("no auth fetcher is configured", code="network")
 

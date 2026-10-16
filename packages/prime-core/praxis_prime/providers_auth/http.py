@@ -6,7 +6,11 @@ from typing import Any
 
 from praxis_prime.accounts.factors import Factors
 from praxis_prime.onboarding.service import OnboardingError
-from praxis_prime.providers_auth.broker import ProviderAuthBroker, oauth_sign_in_allowed
+from praxis_prime.providers_auth.broker import (
+    ProviderAuthBroker,
+    oauth_sign_in_allowed,
+    process_broker,
+)
 from praxis_prime.providers_auth.xai_oauth import XaiOAuthError
 from praxis_prime.router.settings import load_settings
 
@@ -18,7 +22,7 @@ def broker_for(server: Any) -> ProviderAuthBroker:
     if isinstance(held, ProviderAuthBroker):
         return held
     fetcher = getattr(server, "onboarding_fetcher", None)
-    broker = ProviderAuthBroker(server.config_dir, fetcher)
+    broker = process_broker(server.config_dir, fetcher)
     server._xai_broker = broker
     return broker
 

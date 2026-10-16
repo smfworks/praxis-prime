@@ -82,10 +82,10 @@ def _oauth_credential(config_dir: Path | None):
 
     def _daemon() -> str:
         from praxis_prime.paths import config_dir as default_config
-        from praxis_prime.providers_auth.broker import ProviderAuthBroker
+        from praxis_prime.providers_auth.broker import process_broker
 
         directory = config_dir if config_dir is not None else default_config()
-        return ProviderAuthBroker(directory).access_token()
+        return process_broker(directory).access_token()
 
     return _daemon
 

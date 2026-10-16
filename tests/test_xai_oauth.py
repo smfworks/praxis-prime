@@ -16,8 +16,14 @@ from praxis_prime.accounts.factors import Factors
 from praxis_prime.onboarding.cli import setup_command
 from praxis_prime.onboarding.configio import backup_config
 from praxis_prime.onboarding.probe import FetchResult
+from praxis_prime.onboarding.probe import fetch as probe_fetch
 from praxis_prime.onboarding.service import OnboardingError, OnboardingService, Selection
-from praxis_prime.providers_auth.broker import ProviderAuthBroker, classify_xai_error
+from praxis_prime.providers_auth.broker import (
+    ProviderAuthBroker,
+    classify_xai_error,
+    process_broker,
+)
+from praxis_prime.providers_auth.http import broker_for
 from praxis_prime.providers_auth.xai_oauth import CLIENT_ID, ISSUER, XaiOAuthClient, pinned_https
 from praxis_prime.router.factory import default_providers
 from praxis_prime.router.openai_compat import OpenAICompatibleProvider
@@ -555,3 +561,137 @@ def test_scripted_oauth_when_flag_on(tmp_path: Path) -> None:
     assert "Signed in." in text
     secrets = config / "secrets.env"
     assert not secrets.exists() or _ACCESS not in secrets.read_text(encoding="utf-8")
+
+
+def test_scripted_oauth_blocks_regulated_dial_before_sign_in(tmp_path: Path) -> None:
+    env = _env(tmp_path)
+    config = tmp_path / "config" / "praxis-prime"
+    _flag(config)
+    path = config / "config.toml"
+    path.write_text(
+        path.read_text(encoding="utf-8") + '\n[dials]\nhipaa = "enforce"\n',
+        encoding="utf-8",
+    )
+    fake = _Fake()
+    import io
+
+    out = io.StringIO()
+    code = setup_command(
+        _args(
+            tmp_path,
+            non_interactive=True,
+            auth="oauth",
+            provider="xai",
+            model="grok-4.7",
+        ),
+        stdin=io.StringIO(""),
+        stdout=out,
+        env=env,
+        fetcher=fake,
+    )
+    text = out.getvalue()
+    assert code == 2, text
+    assert "later release" in text
+    assert fake.calls == []
+
+
+def test_held_broker_does_not_replay_a_used_refresh_token(tmp_path: Path) -> None:
+    config = tmp_path / "config"
+    config.mkdir()
+    fake = _Fake()
+    fake.token_status = 200
+    fake.token_error = ""
+    broker = process_broker(config, fake)
+    broker.save_pair(
+        access_token=_ACCESS,
+        refresh_token=_REFRESH,
+        expires_in=10,
+        account={"sub": "subject-1"},
+        scope="openid",
+        token_endpoint="https://auth.x.ai/oauth2/token",
+    )
+    broker.store.fail_next_write = True
+    (config / "config.toml").write_text(
+        '[models]\nprimary = "xai:grok-4.7"\n\n[models.providers.xai]\nauth = "oauth"\n',
+        encoding="utf-8",
+    )
+    settings = load_settings({}, config_path=config / "config.toml")
+    token = default_providers(settings, config_dir=config)["xai"].credential()
+    supervisor = Supervisor(
+        data_root=tmp_path / "data",
+        runtime_dir=tmp_path / "run",
+        state_dir=tmp_path / "state",
+        env={"HOME": str(tmp_path)},
+        config_path=config / "config.toml",
+    )
+    granted = supervisor._provider_credential({"provider": "xai"})
+    assert token == "access-2"
+    assert fake.refresh_posts == 1
+    assert granted["accessToken"] == "access-2"
+    assert "error" not in granted
+    assert _REFRESH not in json.dumps(granted)
+
+
+def test_production_callers_share_one_broker_and_default_the_fetcher(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from types import SimpleNamespace
+
+    broker = process_broker(tmp_path)
+    assert broker.client.fetcher is probe_fetch
+    server = SimpleNamespace(config_dir=tmp_path)
+    assert broker_for(server) is broker
+    assert broker_for(server) is broker
+
+    marker = "held-broker-marker"
+
+    def marker_token() -> str:
+        return marker
+
+    broker.access_token = marker_token  # type: ignore[method-assign]
+    (tmp_path / "config.toml").write_text(
+        '[models]\nprimary = "xai:grok-4.7"\n\n[models.providers.xai]\nauth = "oauth"\n',
+        encoding="utf-8",
+    )
+    settings = load_settings({}, config_path=tmp_path / "config.toml")
+    assert default_providers(settings, config_dir=tmp_path)["xai"].credential() == marker
+    supervisor = Supervisor(
+        data_root=tmp_path / "sup-data",
+        runtime_dir=tmp_path / "sup-run",
+        state_dir=tmp_path / "sup-state",
+        env={"HOME": str(tmp_path)},
+        config_path=tmp_path / "config.toml",
+    )
+    granted = supervisor._provider_credential({"provider": "xai"})
+    assert granted["accessToken"] == marker
+
+    seen: list[object] = []
+
+    class _Stub:
+        def __init__(self, config_dir: object, fetcher: object = None, **_kwargs: object) -> None:
+            seen.append(fetcher)
+
+        def start_device(self, **_kwargs: object) -> dict[str, object]:
+            raise OnboardingError("stopped", code="oauth_unavailable")
+
+    monkeypatch.setattr("praxis_prime.onboarding.cli.ProviderAuthBroker", _Stub)
+    env = _env(tmp_path)
+    config = tmp_path / "config" / "praxis-prime"
+    _flag(config)
+    import io
+
+    out = io.StringIO()
+    setup_command(
+        _args(
+            tmp_path,
+            non_interactive=True,
+            auth="oauth",
+            provider="xai",
+            model="grok-4.7",
+        ),
+        stdin=io.StringIO(""),
+        stdout=out,
+        env=env,
+    )
+    assert seen == [probe_fetch]
