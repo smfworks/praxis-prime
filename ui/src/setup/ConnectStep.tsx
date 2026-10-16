@@ -1,5 +1,5 @@
 import { hostOf, isLoopbackHost, schemeOf } from "./baseUrl";
-import type { ProviderInfo } from "./types";
+import { xaiOauthReady, type ProviderInfo } from "./types";
 
 const XAI_BILLING =
   "A SuperGrok or X Premium subscription does not include API credits. API-key usage is billed separately by xAI, even if you also subscribe.";
@@ -23,6 +23,8 @@ export function ConnectStep({
   onCheck,
   onContinue,
   busy,
+  subscriptionOauthEnabled,
+  regulatedEnforce,
 }: {
   entry: ProviderInfo;
   baseUrl: string;
@@ -42,11 +44,14 @@ export function ConnectStep({
   onCheck: () => void;
   onContinue: () => void;
   busy: boolean;
+  subscriptionOauthEnabled: boolean;
+  regulatedEnforce: boolean;
 }) {
   const host = hostOf(baseUrl);
   const remote = network || (host !== "" && !isLoopbackHost(host));
   const secure = https || schemeOf(baseUrl) === "https";
   const showPin = secure && remote;
+  const oauthReady = xaiOauthReady(entry, subscriptionOauthEnabled, regulatedEnforce);
   return (
     <section className="grid gap-3">
       <h1 className="text-2xl font-semibold">Connect</h1>
@@ -54,10 +59,24 @@ export function ConnectStep({
       {cloudWarning ? <span className="mt-1 block text-sm">{cloudWarning}</span> : null}
       {entry.id === "xai" ? (
         <div className="grid gap-2">
-          <button type="button" className="rounded-md border border-line p-3 text-left" disabled>
+          <button
+            type="button"
+            className="rounded-md border border-line p-3 text-left"
+            disabled={!oauthReady}
+            aria-pressed={oauthReady ? auth === "oauth" : undefined}
+            onClick={() => {
+              if (oauthReady) onAuth("oauth");
+            }}
+          >
             Sign in with Grok (SuperGrok / X Premium subscription)
-            <span className="ml-2 text-sm">Coming soon</span>
+            {!oauthReady && !regulatedEnforce ? <span className="ml-2 text-sm">Coming soon</span> : null}
           </button>
+          {regulatedEnforce ? (
+            <p>
+              Subscription sign-in runs under xAI's consumer terms and can't be covered by a BAA/DPA. Use an
+              API key under an agreement with xAI, or a local model.
+            </p>
+          ) : null}
           <button
             type="button"
             className="rounded-md border border-line p-3 text-left"

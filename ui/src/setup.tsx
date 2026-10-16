@@ -5,9 +5,10 @@ import { api, clearSetupToken, rowsOf, setCsrf, textOf } from "./api";
 import { asPublicKey, credentialJson, requestOptions } from "./webauthn";
 import { validateBase } from "./setup/baseUrl";
 import { ConnectStep } from "./setup/ConnectStep";
+import { GrokSignIn } from "./setup/GrokSignIn";
 import { ConfirmChange, ModelStep } from "./setup/ModelStep";
 import { ProviderPicker } from "./setup/ProviderPicker";
-import type { Catalog, ProviderInfo } from "./setup/types";
+import { xaiOauthReady, type Catalog, type ProviderInfo } from "./setup/types";
 
 export const CLOUD_WARNING = "Requires a BAA/DPA with the provider; PHI will leave this machine";
 
@@ -17,6 +18,7 @@ type Step =
   | "factors"
   | "provider"
   | "connect"
+  | "signin"
   | "model"
   | "dials"
   | "extras"
@@ -28,6 +30,7 @@ const STEPS: Step[] = [
   "factors",
   "provider",
   "connect",
+  "signin",
   "model",
   "dials",
   "extras",
@@ -43,6 +46,8 @@ const EMPTY_CATALOG: Catalog = {
   hardware: [],
   allowProviders: [],
   cloudWarning: "",
+  subscriptionOauthEnabled: false,
+  regulatedEnforce: false,
 };
 
 export function missingItems(body: Record<string, unknown> | undefined): MissingItem[] {
@@ -103,6 +108,8 @@ function readCatalog(body: Record<string, unknown>): Catalog {
     hardware: Array.isArray(detect.hardware) ? detect.hardware : [],
     allowProviders: stringsOf(rules.allowProviders),
     cloudWarning: textOf(rules.cloudWarning),
+    subscriptionOauthEnabled: rules.subscriptionOauthEnabled === true,
+    regulatedEnforce: rules.regulatedEnforce === true,
   };
 }
 
@@ -204,11 +211,28 @@ export function SetupWizard({
   const [accountPassword, setAccountPassword] = useState("");
   const [totpCode, setTotpCode] = useState("");
   const [passkeyToken, setPasskeyToken] = useState("");
+  const [signInStepUp, setSignInStepUp] = useState(false);
+  const [signInNote, setSignInNote] = useState("");
+  const [oauthStepUp, setOauthStepUp] = useState("");
   // Refs let the hash listener see the current provider and catalog without
   // re-binding, so every provider change goes through resetForProvider.
   const providerRef = useRef(providerId);
   const catalogRef = useRef(catalog);
+  const stepRef = useRef(step);
+  const flowRef = useRef("");
   catalogRef.current = catalog;
+  stepRef.current = step;
+  const cancelActiveRef = useRef<() => Promise<void>>(async () => undefined);
+  cancelActiveRef.current = async () => {
+    const id = flowRef.current;
+    flowRef.current = "";
+    if (!id) return;
+    try {
+      await api("POST", "/v1/onboarding/oauth/cancel", { flowId: id });
+    } catch {
+      // A cancel that fails still leaves. It does not retry start.
+    }
+  };
 
   const warning = textOf(status.data?.cloudWarning);
   const missing = missingItems(status.data);
@@ -250,6 +274,9 @@ export function SetupWizard({
       const next = stepFromHash(window.location.hash, mode);
       if (!next) return;
       const id = providerFromHash(window.location.hash);
+      if (stepRef.current === "signin" && next !== "signin") {
+        void cancelActiveRef.current();
+      }
       setStep((prev) => {
         if (prev === "connect" && next === "provider") setApiKey("");
         if (prev === "dials" && next === "model" && savedSpec) setReviewSaved(true);
@@ -312,6 +339,7 @@ export function SetupWizard({
   }
 
   function back() {
+    if (stepRef.current === "signin") void cancelActiveRef.current();
     window.history.back();
   }
 
@@ -370,6 +398,9 @@ export function SetupWizard({
     setProbeLocality("");
     setKeySource(envNameFor(next, catalogRef.current.envKeys) ? "env" : "paste");
     setReviewSaved(false);
+    setOauthStepUp("");
+    setSignInStepUp(false);
+    setSignInNote("");
   }
 
   function chooseProvider(id: string) {
@@ -406,6 +437,18 @@ export function SetupWizard({
 
   function continueConnect() {
     if (!entry) return;
+    if (entry.id === "xai" && auth === "oauth") {
+      if (!xaiOauthReady(entry, catalog.subscriptionOauthEnabled, catalog.regulatedEnforce)) {
+        setError("Subscription sign-in is coming in a later release.");
+        return;
+      }
+      setError("");
+      setOauthStepUp("");
+      setSignInStepUp(false);
+      setSignInNote("");
+      go("signin");
+      return;
+    }
     if (entry.id === "xai" && auth !== "api_key") {
       setError("Subscription sign-in is coming in a later release.");
       return;
@@ -421,17 +464,28 @@ export function SetupWizard({
     go("model");
   }
 
-  async function confirmChange(): Promise<Record<string, unknown>> {
-    if (!configured) return {};
+  async function confirmChange(kind: "save" | "sign-in" = "save"): Promise<Record<string, unknown>> {
+    if (kind === "save" && !configured) return {};
     if (!replace) throw new Error("Confirm replacement before saving a new provider.");
-    if (passkeyToken) return { replace: true, stepUpToken: passkeyToken };
+    if (passkeyToken) {
+      return kind === "save" ? { replace: true, stepUpToken: passkeyToken } : { stepUpToken: passkeyToken };
+    }
     const body = await api("POST", "/v1/auth/step-up", {
       password: accountPassword,
       code: totpCode,
     });
     const token = textOf(body.stepUpToken);
     if (!token) throw new Error("step-up did not return a token");
-    return { replace: true, stepUpToken: token };
+    return kind === "save" ? { replace: true, stepUpToken: token } : { stepUpToken: token };
+  }
+
+  async function confirmSignIn() {
+    await run(async () => {
+      const extra = await confirmChange("sign-in");
+      const token = textOf(extra.stepUpToken);
+      if (!token) throw new Error("step-up did not return a token");
+      setOauthStepUp(token);
+    });
   }
 
   async function usePasskey() {
@@ -469,19 +523,23 @@ export function SetupWizard({
     if (!entry) return;
     await run(async () => {
       const extra = await confirmChange();
-      const authMethod = entry.section === "cloud" ? "api_key" : "none";
-      const body = await api("POST", "/v1/onboarding/save", {
+      const authMethod =
+        auth === "oauth" ? "oauth" : entry.section === "cloud" ? "api_key" : "none";
+      const payload: Record<string, unknown> = {
         provider: entry.id,
         model,
         baseUrl,
-        apiKey: keySource === "env" ? "" : apiKey,
         authMethod,
         tlsFingerprint: tls,
         ...(utility ? { utilityModel: utility } : {}),
         ...(vision ? { visionModel: vision } : {}),
         ...(judge ? { judgeModel: judge } : {}),
         ...extra,
-      });
+      };
+      if (authMethod !== "oauth") {
+        payload.apiKey = keySource === "env" ? "" : apiKey;
+      }
+      const body = await api("POST", "/v1/onboarding/save", payload);
       setApiKey("");
       setAccountPassword("");
       setTotpCode("");
@@ -671,7 +729,56 @@ export function SetupWizard({
           onCheck={() => void checkConnection()}
           onContinue={continueConnect}
           busy={busy}
+          subscriptionOauthEnabled={catalog.subscriptionOauthEnabled}
+          regulatedEnforce={catalog.regulatedEnforce}
         />
+      ) : null}
+
+      {step === "signin" ? (
+        <div className="grid gap-3">
+          {signInStepUp && !oauthStepUp ? (
+            <div className="grid gap-2">
+              {signInNote ? <p>{signInNote}</p> : null}
+              <ConfirmChange
+                replace={replace}
+                accountPassword={accountPassword}
+                totpCode={totpCode}
+                busy={busy}
+                onReplace={setReplace}
+                onAccountPassword={setAccountPassword}
+                onTotpCode={setTotpCode}
+                onPasskey={() => void usePasskey()}
+              />
+              <button className="btn w-fit" type="button" disabled={busy} onClick={() => void confirmSignIn()}>
+                Confirm this change
+              </button>
+            </div>
+          ) : null}
+          <GrokSignIn
+            stepUpToken={oauthStepUp}
+            onNeedStepUp={(message) => {
+              setSignInNote(message);
+              setOauthStepUp("");
+              setSignInStepUp(true);
+            }}
+            onApproved={() => setAuth("oauth")}
+            onContinue={() => go("model")}
+            onBack={() => {
+              setOauthStepUp("");
+              setSignInStepUp(false);
+              go("connect", providerId || "xai");
+            }}
+            onUseApiKey={() => {
+              setAuth("api_key");
+              setOauthStepUp("");
+              setSignInStepUp(false);
+              go("connect", providerId || "xai");
+            }}
+            onFlow={(id) => {
+              flowRef.current = id;
+            }}
+          />
+        </div>
       ) : null}
 
       {step === "model" && reviewSaved && savedSpec ? (
