@@ -504,9 +504,6 @@ def _sign_out(config, provider: str, replace: bool, stdout, fetcher) -> int:
     if provider != "xai":
         stdout.write("praxis-prime setup: --sign-out only supports xai.\n")
         return 2
-    if not oauth_sign_in_allowed(config):
-        stdout.write("praxis-prime setup: Subscription sign-in is coming in a later release.\n")
-        return 2
     from praxis_prime.router.settings import load_settings
 
     settings = load_settings({}, config_path=config / "config.toml")

@@ -1,4 +1,8 @@
-"""Gateway oauth/start|poll|cancel|signout. Flag off spends nothing."""
+"""Gateway oauth/start|poll|cancel|signout.
+
+Flag off spends nothing on start, poll, and cancel. Sign-out still spends a
+step-up, then deletes the grant and attempts revoke.
+"""
 
 from __future__ import annotations
 
@@ -64,7 +68,6 @@ def cancel(server: Any, principal: Any, payload: dict[str, object]) -> dict[str,
 
 
 def sign_out(server: Any, principal: Any, payload: dict[str, object]) -> dict[str, object]:
-    refuse_if_off(server)
     _spend(server, principal, payload)
     revoked = broker_for(server).sign_out()
     return {"ok": True, "revoked": revoked, "inferenceReady": False}
