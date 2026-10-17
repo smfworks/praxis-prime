@@ -695,3 +695,97 @@ def test_production_callers_share_one_broker_and_default_the_fetcher(
         env=env,
     )
     assert seen == [probe_fetch]
+
+
+def test_sign_out_deletes_the_grant_when_the_flag_is_off(tmp_path: Path) -> None:
+    env = _env(tmp_path)
+    config = tmp_path / "config" / "praxis-prime"
+    config.mkdir(parents=True)
+    (config / "config.toml").write_text(
+        '[models]\nprimary = "ollama:local"\n',
+        encoding="utf-8",
+    )
+
+    def plant() -> ProviderAuthBroker:
+        broker = ProviderAuthBroker(config, clock=lambda: 10.0)
+        broker.save_pair(
+            access_token=_ACCESS,
+            refresh_token=_REFRESH,
+            expires_in=100,
+            account={"sub": "subject-1"},
+            scope="openid",
+            token_endpoint="https://auth.x.ai/oauth2/token",
+        )
+        assert broker.has_tokens()
+        return broker
+
+    plant()
+    fake = _Fake()
+    import io
+
+    out = io.StringIO()
+    code = setup_command(
+        _args(tmp_path, sign_out="xai"),
+        stdin=io.StringIO(""),
+        stdout=out,
+        env=env,
+        fetcher=fake,
+    )
+    text = out.getvalue()
+    assert code == 0, text
+    assert "Signed out.\n" in text
+    assert _ACCESS not in text
+    assert _REFRESH not in text
+    assert _DEVICE not in text
+    assert not ProviderAuthBroker(config).has_tokens()
+    assert sum(url.endswith("/revoke") for url in fake.calls) == 1
+
+    plant()
+    store = AccountStore(tmp_path / "accounts.db")
+    server = _gateway(tmp_path, store, config)
+    http_fake = _Fake()
+    server.onboarding_fetcher = http_fake  # type: ignore[attr-defined]
+    from praxis_prime.onboarding.token import ensure_first_run_token
+
+    token = ensure_first_run_token(config)
+    status, owner, extras = _call(
+        server, "POST", "/v1/onboarding/owner", _owner("ada"), token=token
+    )
+    assert status == 201, owner
+    cookie = _session(extras)
+    account_id = str(owner["account"]["id"])
+    session_id = store.session_from_token(cookie).id  # type: ignore[union-attr]
+    step = Factors(store).prove_password(account_id, _PASSWORD, "", session_id=session_id)
+    status, body, _extras = _call(
+        server,
+        "POST",
+        "/v1/onboarding/oauth/signout",
+        json.dumps({"stepUpToken": step}).encode(),
+        cookie=cookie,
+        csrf=str(owner["csrfToken"]),
+    )
+    assert status == 200, body
+    assert body == {"ok": True, "revoked": True, "inferenceReady": False}
+    assert not ProviderAuthBroker(config).has_tokens()
+    assert sum(url.endswith("/revoke") for url in http_fake.calls) == 1
+    dumped = json.dumps(body)
+    assert _ACCESS not in dumped
+    assert _REFRESH not in dumped
+    assert _DEVICE not in dumped
+
+    plant()
+    bare = _Fake()
+    server.onboarding_fetcher = bare  # type: ignore[attr-defined]
+    status, body, _extras = _call(
+        server,
+        "POST",
+        "/v1/onboarding/oauth/signout",
+        b"{}",
+        cookie=cookie,
+        csrf=str(owner["csrfToken"]),
+    )
+    assert status == 409, body
+    assert body["error"]["code"] == "replace"
+    assert ProviderAuthBroker(config).has_tokens()
+    assert not any(url.endswith("/revoke") for url in bare.calls)
+    store.close()
