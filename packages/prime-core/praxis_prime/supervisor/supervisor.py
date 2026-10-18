@@ -439,7 +439,7 @@ class Supervisor:
         return {key: value for key, value in env.items() if not _points_at_provider_auth(value)}
 
     def _provider_credential(self, message: Mapping[str, object]) -> dict[str, object]:
-        """Access token for this daemon's xAI grant. Never a refresh token."""
+        """Access token, or a chat-fault stop or needs_reauth. Never a refresh token."""
         if str(message.get("provider") or "xai") != "xai":
             return {"error": "unsupported"}
         config = self.config_path
@@ -448,6 +448,22 @@ class Supervisor:
         from praxis_prime.providers_auth.broker import process_broker
         from praxis_prime.providers_auth.xai_oauth import XaiOAuthError
 
+        if message.get("fault") is True:
+            status = message.get("status")
+            if isinstance(status, bool) or not isinstance(status, int):
+                return {"action": "stop"}
+            raw_body, raw_hash = message.get("body"), message.get("failedHash")
+            try:
+                reply = process_broker(config.parent).note_chat_fault(
+                    status=status,
+                    body=raw_body if isinstance(raw_body, str) else "",
+                    failed_hash=raw_hash if isinstance(raw_hash, str) else "",
+                )
+            except Exception:  # noqa: BLE001
+                reply = None
+            if not isinstance(reply, dict) or "refresh_token" in reply or "refreshToken" in reply:
+                return {"error": "needs_reauth"}
+            return reply
         try:
             granted = process_broker(config.parent).credential_for_worker()
         except (XaiOAuthError, OSError, ValueError):

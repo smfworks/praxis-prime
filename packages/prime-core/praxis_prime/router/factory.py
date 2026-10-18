@@ -75,19 +75,32 @@ def default_providers(
     }
 
 
+class _DaemonCredential:
+    def __init__(self, config_dir: Path | None) -> None:
+        self._config_dir = config_dir
+
+    def _directory(self) -> Path:
+        from praxis_prime.paths import config_dir as default_config
+
+        return self._config_dir if self._config_dir is not None else default_config()
+
+    def _broker(self):
+        from praxis_prime.providers_auth.broker import process_broker
+
+        return process_broker(self._directory())
+
+    def __call__(self) -> str:
+        return self._broker().access_token()
+
+    def note_chat_fault(self, *, status: int, body: str, failed_hash: str) -> dict[str, object]:
+        return self._broker().note_chat_fault(status=status, body=body, failed_hash=failed_hash)
+
+
 def _oauth_credential(config_dir: Path | None):
     """Worker asks the supervisor. The daemon broker is the only refresher."""
     if os.environ.get("PRAXIS_PRIME_WORKER_PROFILE"):
         return _worker_bearer
-
-    def _daemon() -> str:
-        from praxis_prime.paths import config_dir as default_config
-        from praxis_prime.providers_auth.broker import process_broker
-
-        directory = config_dir if config_dir is not None else default_config()
-        return process_broker(directory).access_token()
-
-    return _daemon
+    return _DaemonCredential(config_dir)
 
 
 def _worker_bearer() -> str:

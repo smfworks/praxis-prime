@@ -92,8 +92,12 @@ class ProviderError(RuntimeError):
 
 
 class ProviderUnreachable(ProviderError):
-    def __init__(self, provider: str, message: str) -> None:
+    def __init__(
+        self, provider: str, message: str, *, status: int | None = None, body: str | None = None
+    ) -> None:
         super().__init__(provider, message, unreachable=True)
+        self.status = status
+        self.body = body
 
 
 INFERENCE_NOT_CONFIGURED = (

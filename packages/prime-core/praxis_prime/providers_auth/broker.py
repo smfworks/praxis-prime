@@ -154,7 +154,8 @@ class ProviderAuthBroker:
     def has_tokens(self) -> bool:
         record = self._current()
         refresh = str(record.get("refresh_token") or "") if record else ""
-        return bool(record and refresh and record.get("state") == "ok")
+        state = str(record.get("state") or "") if record else ""
+        return bool(refresh and state in {"ok", "quota", "ineligible"})
 
     def public_status(self) -> dict[str, object]:
         record = self._current()
@@ -433,6 +434,39 @@ class ProviderAuthBroker:
             "expiresAt": int(expires) if isinstance(expires, int) else 0,
         }
 
+    def note_chat_fault(self, *, status: int, body: str, failed_hash: str) -> dict[str, object]:
+        with self._lock:
+            with self.store.locked():
+                loaded = self._read_locked()
+                record = loaded or {}
+                kind = classify_xai_error(status, body)
+                if kind == "entitlement":
+                    low = body.lower()
+                    markers = ("credit", "spending limit", "spending-limit", "run out")
+                    state = "quota" if any(part in low for part in markers) else "ineligible"
+                    if loaded is not None:
+                        updated = dict(record)
+                        updated["state"] = state
+                        self._persist_locked(updated)
+                        state = str((self._read_locked() or updated).get("state") or state)
+                    reply: dict[str, object] = {"action": "stop", "state": state}
+                elif kind != "stale_token":
+                    reply = {"action": "stop"}
+                else:
+                    stored = str(record.get("access_token") or "")
+                    digest = hashlib.sha256(stored.encode("utf-8")).hexdigest() if stored else ""
+                    rotated = bool(failed_hash and stored and digest != failed_hash)
+                    updated = record if rotated else self._refresh_locked(record)
+                    token = stored if rotated else str(updated.get("access_token") or "")
+                    fresh = bool(token) and updated.get("state") != "needs_reauth"
+                    if rotated or fresh:
+                        reply = _access_reply(token, updated.get("expires_at"))
+                    else:
+                        reply = {"error": "needs_reauth"}
+        if "refresh_token" in reply or "refreshToken" in reply:
+            return {"error": "needs_reauth"}
+        return reply
+
 
 _process_brokers: dict[str, ProviderAuthBroker] = {}
 _process_brokers_lock = threading.Lock()
@@ -458,6 +492,10 @@ def process_broker(config_dir: Path, fetcher: Fetcher | None = None) -> Provider
         return created
 
 
+def _access_reply(token: str, expires: object) -> dict[str, object]:
+    return {"accessToken": token, "expiresAt": int(expires) if isinstance(expires, int) else 0}
+
+
 def _missing_fetcher(*_args: object, **_kwargs: object) -> object:
     raise XaiOAuthError("no auth fetcher is configured", code="network")
 
@@ -479,3 +517,16 @@ def take_worker_token() -> str:
         return str(fn() or "")
     except (OSError, RuntimeError, ValueError):
         return ""
+
+
+_FaultFn = Callable[[int, str, str], dict[str, object]]
+_worker_fault_fn: _FaultFn | None = None
+
+
+def install_worker_fault(fn: _FaultFn | None) -> None:
+    global _worker_fault_fn
+    _worker_fault_fn = fn
+
+
+def take_worker_fault() -> _FaultFn | None:
+    return _worker_fault_fn

@@ -208,10 +208,11 @@ class WorkerApp:
         self._lock_fd = _lock_profile(data_root / "profiles" / profile)
         self._data_token = bind_data_root(data_root)
         self._profile_token = bind_profile(profile)
-        from praxis_prime.providers_auth.broker import install_worker_token
+        from praxis_prime.providers_auth.broker import install_worker_fault, install_worker_token
         from praxis_prime.runtime import build_runtime
 
         install_worker_token(self._ask_provider_token)
+        install_worker_fault(self._ask_provider_fault)
         self.runtime = build_runtime(
             env=os.environ,
             config_path=config_path,
@@ -600,12 +601,11 @@ class WorkerApp:
         result = reply.get("result")
         return isinstance(result, dict) and bool(result.get("allowed"))
 
-    def _ask_provider_token(self) -> str:
-        """Ask the supervisor for an access token. The refresh token stays there."""
+    def _credential_rpc(self, extra: dict[str, object]) -> dict[str, object] | None:
         try:
             sock = _connect_supervisor(self.supervisor_socket, 2)
         except (IpcError, OSError):
-            return ""
+            return None
         try:
             send_message(
                 sock,
@@ -619,21 +619,33 @@ class WorkerApp:
             )
             auth = recv_message(sock)
             if not auth.get("ok"):
-                return ""
-            send_message(
-                sock,
-                {"id": "cred", "method": "provider.credential", "provider": "xai"},
-            )
+                return None
+            payload = {"id": "cred", "method": "provider.credential", "provider": "xai"}
+            payload.update(extra)
+            send_message(sock, payload)
             reply = recv_message(sock)
         except (IpcError, OSError):
-            return ""
+            return None
         finally:
             sock.close()
         result = reply.get("result")
-        if not isinstance(result, dict):
+        return result if isinstance(result, dict) else None
+
+    def _ask_provider_token(self) -> str:
+        """Ask the supervisor for an access token. The refresh token stays there."""
+        result = self._credential_rpc({})
+        if not result:
             return ""
         token = result.get("accessToken")
         return token if isinstance(token, str) else ""
+
+    def _ask_provider_fault(self, status: int, body: str, failed_hash: str) -> dict[str, object]:
+        result = self._credential_rpc(
+            {"fault": True, "status": status, "body": body, "failedHash": failed_hash}
+        )
+        if not result or "refresh_token" in result or "refreshToken" in result:
+            return {"error": "needs_reauth"}
+        return result
 
     def _run_routine(self, routine: object, trigger: str, inner: object) -> RoutineRun:
         routine_id = str(getattr(routine, "id", ""))

@@ -7,7 +7,9 @@ with an error that names the environment variable to set.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 from collections.abc import AsyncIterator, Callable, Iterator
 
 from praxis_prime.providers_auth.xai_oauth import pinned_https
@@ -147,24 +149,73 @@ class OpenAICompatibleProvider:
             )
         url = completions_url(self.base_url)
         token = self._bearer(url)
+        raw = json.dumps(completions_body(request)).encode("utf-8")
+        try:
+            yield from self._read_chat(url, raw, token, [token or self.api_key])
+            return
+        except ProviderUnreachable as exc:
+            refreshed = self._oauth_retry_token(exc, token)
+            if not refreshed:
+                raise ProviderUnreachable(
+                    self.name, exc.message, status=exc.status, body=exc.body
+                ) from exc
+        secrets = [item for item in (refreshed, token, self.api_key) if item]
+        yield from self._read_chat(url, raw, refreshed, secrets)
+
+    def _read_chat(
+        self, url: str, raw: bytes, token: str, secrets: list[str]
+    ) -> Iterator[StreamEvent]:
         headers = {"Content-Type": "application/json"}
         if token:
             headers["Authorization"] = f"Bearer {token}"
-        body = json.dumps(completions_body(request)).encode("utf-8")
-        lines = open_lines(
-            url,
-            body,
-            headers,
-            timeout=self.timeout,
-            secrets=[token or self.api_key],
-            provider=self.name,
-        )
-        assembler = StreamAssembler()
         try:
+            lines = open_lines(
+                url, raw, headers, timeout=self.timeout, secrets=secrets, provider=self.name
+            )
+            assembler = StreamAssembler()
             for line in lines:
                 yield from parse_openai_sse_line(line, assembler)
         except ProviderUnreachable as exc:
-            raise ProviderUnreachable(self.name, exc.message) from exc
+            raise ProviderUnreachable(
+                self.name, exc.message, status=exc.status, body=exc.body
+            ) from exc
         except OSError as exc:
             raise ProviderUnreachable(self.name, f"stream failed ({exc})") from exc
         yield assembler.finish()
+
+    def _oauth_retry_token(self, exc: ProviderUnreachable, failed: str) -> str:
+        status, body = exc.status, exc.body or ""
+        if self.credential is None or status is None:
+            return ""
+        from praxis_prime.providers_auth.broker import classify_xai_error
+
+        kind = classify_xai_error(status, body)
+        if kind not in {"stale_token", "entitlement"}:
+            return ""
+        digest = hashlib.sha256(failed.encode("utf-8")).hexdigest()
+        closed = ProviderUnreachable(self.name, exc.message, status=status, body=exc.body)
+        try:
+            if os.environ.get("PRAXIS_PRIME_WORKER_PROFILE"):
+                from praxis_prime.providers_auth.broker import take_worker_fault
+
+                hook = take_worker_fault()
+                if hook is None:
+                    raise closed
+                reply = hook(status, body, digest)
+            else:
+                note = getattr(self.credential, "note_chat_fault", None)
+                if not callable(note):
+                    raise closed
+                reply = note(status=status, body=body, failed_hash=digest)
+        except ProviderUnreachable:
+            raise
+        except Exception as fault_exc:  # noqa: BLE001
+            raise closed from fault_exc
+        if kind != "stale_token" or not isinstance(reply, dict):
+            return ""
+        if "refresh_token" in reply or "refreshToken" in reply:
+            return ""
+        if reply.get("error") == "needs_reauth" or reply.get("action") == "stop":
+            return ""
+        token = reply.get("accessToken")
+        return token if isinstance(token, str) and token else ""

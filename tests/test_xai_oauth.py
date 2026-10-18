@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
+import io
 import json
 import stat
 import threading
 import time
 from pathlib import Path
+from urllib.error import HTTPError
 
 from joserfc import jwt
 from joserfc.jwk import ECKey
@@ -21,6 +24,7 @@ from praxis_prime.onboarding.service import OnboardingError, OnboardingService, 
 from praxis_prime.providers_auth.broker import (
     ProviderAuthBroker,
     classify_xai_error,
+    install_worker_token,
     process_broker,
 )
 from praxis_prime.providers_auth.http import broker_for
@@ -695,6 +699,183 @@ def test_production_callers_share_one_broker_and_default_the_fetcher(
         env=env,
     )
     assert seen == [probe_fetch]
+
+
+_OAUTH_TOML = '[models]\nprimary = "xai:grok-4.7"\n\n[models.providers.xai]\nauth = "oauth"\n'
+_RETRIED = b'data: {"choices":[{"delta":{"content":"retried"}}]}\n\ndata: [DONE]\n'
+
+
+class _Chunk:
+    def __init__(self, payload: bytes) -> None:
+        self._payload = payload
+
+    def read(self, _n: int = -1) -> bytes:
+        payload, self._payload = self._payload, b""
+        return payload
+
+    def close(self) -> None:
+        return None
+
+
+class _ChatOpener:
+    def __init__(self) -> None:
+        self.urls: list[str] = []
+        self.bearers: list[str] = []
+        self.steps: list[object] = []
+
+    def open(self, request: object, timeout: float = 30) -> object:
+        del timeout
+        url = str(getattr(request, "full_url", request))
+        self.urls.append(url)
+        getter = getattr(request, "get_header", None)
+        self.bearers.append(str(getter("Authorization") or "") if callable(getter) else "")
+        if not self.steps:
+            raise AssertionError("unexpected chat post")
+        step = self.steps.pop(0)
+        if isinstance(step, bytes):
+            return _Chunk(step)
+        code, payload = step
+        raise HTTPError(url, int(code), "error", None, io.BytesIO(payload))
+
+
+def test_oauth_chat_refreshes_once_on_401_and_does_not_refresh_on_entitlement(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.delenv("PRAXIS_PRIME_WORKER_PROFILE", raising=False)
+    opener = _ChatOpener()
+    monkeypatch.setattr("praxis_prime.router.http._OPENER", opener)
+    request = ChatRequest(model="grok-4.7", messages=(ChatMessage(role="user", content="hi"),))
+
+    def quiet(text: str) -> None:
+        assert _ACCESS not in text and _REFRESH not in text
+
+    def plant(name: str) -> tuple[Path, _Fake, ProviderAuthBroker]:
+        config = tmp_path / name
+        config.mkdir()
+        (config / "config.toml").write_text(_OAUTH_TOML, encoding="utf-8")
+        fake = _Fake()
+        fake.token_status = 200
+        fake.token_error = ""
+        broker = process_broker(config, fake)
+        broker.save_pair(
+            access_token=_ACCESS, refresh_token=_REFRESH, expires_in=7200,
+            account={"sub": "subject-1"}, scope="openid",
+            token_endpoint="https://auth.x.ai/oauth2/token",
+        )
+        return config, fake, broker
+
+    def chat(config: Path):
+        settings = load_settings({}, config_path=config / "config.toml")
+        return default_providers(settings, config_dir=config)["xai"]
+
+    def run(provider: object, steps: list[object]):
+        opener.urls.clear()
+        opener.bearers.clear()
+        opener.steps = list(steps)
+        try:
+            events = list(provider.iter_stream(request))  # type: ignore[attr-defined]
+        except ProviderUnreachable as exc:
+            quiet(f"{exc.message}\n{exc}")
+            return None, exc
+        quiet(" ".join(str(getattr(event, "text", "") or "") for event in events))
+        return events, None
+
+    config, fake, broker = plant("refresh-once")
+    events, exc = run(chat(config), [(401, b"unauthorized"), _RETRIED])
+    assert exc is None and events is not None
+    assert any(getattr(event, "text", "") == "retried" for event in events)
+    assert broker.refresh_posts == 1 and fake.refresh_posts == 1
+    assert any(url.endswith("/token") for url in fake.calls)
+    assert len(opener.urls) == 2 and opener.bearers[1] == "Bearer access-2"
+    config, fake, broker = plant("both-401")
+    leaked = (_ACCESS + " access-2").encode()
+    _events, exc = run(chat(config), [(401, b"unauthorized"), (401, leaked)])
+    assert exc is not None and exc.message.startswith("HTTP 401")
+    assert "[redacted]" in exc.message and "access-2" not in exc.message
+    assert broker.refresh_posts == 1 and fake.refresh_posts == 1 and len(opener.urls) == 2
+    config, fake, broker = plant("quota")
+    fake.token_status = 400
+    _events, exc = run(chat(config), [(403, b"used all available credits")])
+    assert exc is not None and exc.message.startswith("HTTP 403")
+    other = ProviderAuthBroker(config)
+    assert broker.public_status()["state"] == "quota"
+    assert other.public_status()["state"] == "quota"
+    assert broker.has_tokens() is True and other.has_tokens() is True
+    assert broker.refresh_posts == 0 and fake.refresh_posts == 0
+    assert not any(url.endswith("/token") for url in fake.calls) and len(opener.urls) == 1
+    record = broker.store.load(issuer=ISSUER, client_id=CLIENT_ID)
+    assert record is not None
+    assert record.get("access_token") == _ACCESS and record.get("refresh_token") == _REFRESH
+    config, fake, broker = plant("wke")
+    events, exc = run(chat(config), [(403, b"[WKE=unauthenticated:no]"), _RETRIED])
+    assert exc is None and events is not None
+    assert any(getattr(event, "text", "") == "retried" for event in events)
+    assert broker.public_status()["state"] != "quota"
+    assert broker.refresh_posts == 1 and fake.refresh_posts == 1
+    assert any(url.endswith("/token") for url in fake.calls) and len(opener.urls) == 2
+    config, fake, broker = plant("api-key")
+    seen = {"classify": 0, "broker": 0}
+    real_classify, real_process = classify_xai_error, process_broker
+
+    def count_classify(status: int, body: str) -> str:
+        seen["classify"] += 1
+        return real_classify(status, body)
+
+    def count_process(*args: object, **kwargs: object):
+        seen["broker"] += 1
+        return real_process(*args, **kwargs)
+
+    monkeypatch.setattr("praxis_prime.providers_auth.broker.classify_xai_error", count_classify)
+    monkeypatch.setattr("praxis_prime.providers_auth.broker.process_broker", count_process)
+    api = OpenAICompatibleProvider(
+        name="xai", base_url="https://api.x.ai/v1", api_key="api-key-fixture",
+        key_hint="XAI_API_KEY", require_key=True,
+    )
+    _events, exc = run(api, [(403, b"used all available credits")])
+    assert exc is not None and exc.message.startswith("HTTP 403")
+    assert seen == {"classify": 0, "broker": 0}
+    assert broker.refresh_posts == 0 and broker.public_status()["state"] == "ok"
+    monkeypatch.setattr("praxis_prime.providers_auth.broker.classify_xai_error", real_classify)
+    monkeypatch.setattr("praxis_prime.providers_auth.broker.process_broker", real_process)
+    config, _fake, broker = plant("worker")
+    from praxis_prime.providers_auth.broker import install_worker_fault
+
+    monkeypatch.setenv("PRAXIS_PRIME_WORKER_PROFILE", "default")
+    hooked: list[tuple[int, str, str]] = []
+
+    def hook(status: int, body: str, failed_hash: str) -> dict[str, object]:
+        hooked.append((status, body, failed_hash))
+        return {"action": "stop"}
+
+    def boom(*_args: object, **_kwargs: object) -> None:
+        seen["broker"] += 1
+        raise RuntimeError("process_broker")
+
+    seen["broker"] = 0
+    try:
+        install_worker_fault(hook)
+        install_worker_token(lambda: _ACCESS)
+        monkeypatch.setattr("praxis_prime.providers_auth.broker.process_broker", boom)
+        worker = chat(config)
+        _events, exc = run(worker, [(401, b"unauthorized")])
+        assert exc is not None and len(hooked) == 1 and seen["broker"] == 0
+        status, body, digest = hooked[0]
+        assert status == 401 and body == "unauthorized" and len(digest) == 64
+        assert digest == hashlib.sha256(_ACCESS.encode("utf-8")).hexdigest()
+        quiet(json.dumps({"status": status, "body": body, "hash": digest}))
+        hooked.clear()
+        _events, exc = run(worker, [(403, b"used all available credits")])
+        assert exc is not None and len(hooked) == 1 and seen["broker"] == 0
+        assert hooked[0][0] == 403 and hooked[0][1] == "used all available credits"
+        assert len(hooked[0][2]) == 64 and broker.refresh_posts == 0
+        quiet(json.dumps({"body": hooked[0][1], "hash": hooked[0][2]}))
+        install_worker_fault(None)
+        _events, exc = run(worker, [(401, b"unauthorized")])
+        assert isinstance(exc, ProviderUnreachable) and seen["broker"] == 0 and len(hooked) == 1
+    finally:
+        install_worker_fault(None)
+        install_worker_token(None)
+        monkeypatch.delenv("PRAXIS_PRIME_WORKER_PROFILE", raising=False)
 
 
 def test_sign_out_deletes_the_grant_when_the_flag_is_off(tmp_path: Path) -> None:
