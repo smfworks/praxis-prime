@@ -36,6 +36,8 @@ def open_lines(
         raise ProviderUnreachable(
             provider,
             f"HTTP {exc.code} from {url}. {detail}".strip(),
+            status=exc.code,
+            body=detail,
         ) from exc
     except URLError as exc:
         raise ProviderUnreachable(provider, f"could not reach {url} ({exc.reason})") from exc
