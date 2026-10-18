@@ -24,7 +24,6 @@ from praxis_prime.onboarding.service import OnboardingError, OnboardingService, 
 from praxis_prime.providers_auth.broker import (
     ProviderAuthBroker,
     classify_xai_error,
-    install_worker_fault,
     install_worker_token,
     process_broker,
 )
@@ -743,7 +742,6 @@ def test_oauth_chat_refreshes_once_on_401_and_does_not_refresh_on_entitlement(
     tmp_path: Path, monkeypatch
 ) -> None:
     monkeypatch.delenv("PRAXIS_PRIME_WORKER_PROFILE", raising=False)
-    install_worker_fault(None)
     opener = _ChatOpener()
     monkeypatch.setattr("praxis_prime.router.http._OPENER", opener)
     request = ChatRequest(model="grok-4.7", messages=(ChatMessage(role="user", content="hi"),))
@@ -840,6 +838,8 @@ def test_oauth_chat_refreshes_once_on_401_and_does_not_refresh_on_entitlement(
     monkeypatch.setattr("praxis_prime.providers_auth.broker.classify_xai_error", real_classify)
     monkeypatch.setattr("praxis_prime.providers_auth.broker.process_broker", real_process)
     config, _fake, broker = plant("worker")
+    from praxis_prime.providers_auth.broker import install_worker_fault
+
     monkeypatch.setenv("PRAXIS_PRIME_WORKER_PROFILE", "default")
     hooked: list[tuple[int, str, str]] = []
 
